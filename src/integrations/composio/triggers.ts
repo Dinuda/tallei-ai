@@ -1,16 +1,14 @@
 import type { AuthContext } from "../../domain/auth/index.js";
-import { resolveToolkitSlug } from "./auth.js";
-import { resolveConnectedAccountId } from "./accounts.js";
-import { getComposioClient, isComposioConfigured, toObjectRecord } from "./client.js";
+import { isComposioTriggerSlugFormat } from "../../loops/event-trigger.js";
+import { lookupStaticTriggerSlug } from "../../loops/trigger-catalog.js";
 import {
   deactivateLoopTriggerSubscription,
-  ensureWorkspaceTriggerChannel,
   getLoopTriggerSubscription,
   releaseWorkspaceTriggerChannel,
-  upsertLoopTriggerSubscription,
   type LoopTriggerSubscriptionRow,
 } from "./trigger-channels.js";
-import { ensureComposioWebhookSubscription } from "./webhook-subscription.js";
+import { resolveToolkitSlug } from "./auth.js";
+import { getComposioClient, isComposioConfigured, toObjectRecord } from "./client.js";
 
 export type ComposioTriggerTypeRow = {
   slug: string;
@@ -63,26 +61,31 @@ function pickAvailableSlug(
   return match?.slug ?? null;
 }
 
-/** Catalogue helper for Conductor — prefers exact slug match. */
+/** Catalogue helper for Conductor — static map, then exact slug, then fuzzy match. */
 export async function resolveTriggerSlugWithCatalog(
   toolkit: string,
   eventTypeOrSlug: string,
 ): Promise<string> {
   const normalizedToolkit = await resolveToolkitSlug(toolkit);
+  const hint = eventTypeOrSlug.trim();
+
+  const fromStatic = lookupStaticTriggerSlug(normalizedToolkit, hint);
+  if (fromStatic) return fromStatic;
+
   const available = await listComposioTriggerTypes(normalizedToolkit);
 
-  const fromExactSlug = pickAvailableSlug(eventTypeOrSlug.trim(), available);
+  const fromExactSlug = pickAvailableSlug(hint, available);
   if (fromExactSlug) return fromExactSlug;
 
   let best: { slug: string; score: number } | null = null;
   for (const row of available) {
-    const score = scoreTriggerSlugMatch(eventTypeOrSlug, row.slug, row.name);
+    const score = scoreTriggerSlugMatch(hint, row.slug, row.name);
     if (!best || score > best.score) best = { slug: row.slug, score };
   }
   if (best && best.score >= MIN_TRIGGER_SCORE) return best.slug;
 
   throw new Error(
-    `No Composio trigger for ${normalizedToolkit}/${eventTypeOrSlug}. ` +
+    `No Composio trigger for ${normalizedToolkit}/${hint}. ` +
       `Available: ${available.map((row) => row.slug).join(", ") || "none"}`,
   );
 }
@@ -103,6 +106,38 @@ export async function validateComposioTriggerSlug(
   return match.toUpperCase();
 }
 
+export async function resolveCanonicalTriggerSlug(
+  toolkit: string,
+  input: { composioSlug?: string; eventType?: string },
+): Promise<string> {
+  const resolvedToolkit = await resolveToolkitSlug(toolkit);
+  const composioSlug = input.composioSlug?.trim() ?? "";
+  const eventType = input.eventType?.trim() ?? "";
+
+  if (composioSlug && isComposioTriggerSlugFormat(composioSlug)) {
+    return validateComposioTriggerSlug(resolvedToolkit, composioSlug);
+  }
+
+  const hints = [composioSlug, eventType].filter(Boolean);
+  for (const hint of hints) {
+    const staticSlug = lookupStaticTriggerSlug(resolvedToolkit, hint);
+    if (staticSlug) {
+      return validateComposioTriggerSlug(resolvedToolkit, staticSlug);
+    }
+  }
+
+  const primaryHint = hints[0];
+  if (!primaryHint) {
+    const available = await listComposioTriggerTypes(resolvedToolkit);
+    throw new Error(
+      `Event trigger requires composioSlug or eventType for ${resolvedToolkit}. ` +
+        `Available: ${available.map((row) => row.slug).join(", ") || "none"}`,
+    );
+  }
+
+  return resolveTriggerSlugWithCatalog(resolvedToolkit, primaryHint);
+}
+
 export type LoopTriggerRegistrationRow = LoopTriggerSubscriptionRow & {
   composio_trigger_slug?: string;
   composio_instance_id?: string | null;
@@ -120,46 +155,16 @@ export async function registerLoopEventTrigger(input: {
   loopId: string;
   workspaceId: string;
   source: string;
-  composioSlug: string;
-}): Promise<LoopTriggerSubscriptionRow> {
-  if (!isComposioConfigured()) {
-    throw new Error("Composio is not configured");
+  composioSlug?: string;
+  eventType?: string;
+}): Promise<LoopTriggerSubscriptionRow & import("./event-trigger-provision.js").EventTriggerProvisionReceipt> {
+  const { provisionEventTrigger } = await import("./event-trigger-provision.js");
+  const receipt = await provisionEventTrigger(input);
+  const subscription = await getLoopTriggerSubscription(input.loopId);
+  if (!subscription) {
+    throw new Error("Loop trigger subscription missing after provision");
   }
-
-  const toolkit = await resolveToolkitSlug(input.source);
-  const composioTriggerSlug = await validateComposioTriggerSlug(toolkit, input.composioSlug);
-  const connectedAccountId = await resolveConnectedAccountId(input.auth, toolkit);
-  if (!connectedAccountId) {
-    throw new Error(`Connect ${toolkit} before enabling its event trigger`);
-  }
-
-  const existing = await getLoopTriggerSubscription(input.loopId);
-  if (existing?.status === "active" && existing.channel_id) {
-    await deactivateLoopTriggerSubscription(input.loopId);
-    await releaseWorkspaceTriggerChannel(existing.channel_id);
-  }
-
-  const channel = await ensureWorkspaceTriggerChannel({
-    workspaceId: input.workspaceId,
-    toolkit,
-    connectedAccountId,
-    composioTriggerSlug,
-  });
-
-  const webhook = await ensureComposioWebhookSubscription();
-  if (!webhook.configured) {
-    console.warn("[integrations/composio] trigger registered but webhook delivery may not work", {
-      loopId: input.loopId,
-      reason: webhook.reason,
-      webhookUrl: webhook.webhookUrl,
-    });
-  }
-
-  return upsertLoopTriggerSubscription({
-    loopId: input.loopId,
-    workspaceId: input.workspaceId,
-    channelId: channel.id,
-  });
+  return { ...subscription, ...receipt };
 }
 
 export async function unregisterLoopEventTrigger(loopId: string): Promise<void> {

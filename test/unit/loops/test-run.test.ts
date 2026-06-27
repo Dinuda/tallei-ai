@@ -19,12 +19,20 @@ function basePlan(partial: Partial<CompiledPlan>): CompiledPlan {
     profile: "agentic",
     intent: { goal: "Triage email", outcome: "Reply drafted", successCriteria: [] },
     trigger: { kind: "manual" },
+    connectorPlaybook: {
+      compiledAt: new Date().toISOString(),
+      useCase: "Reply drafted",
+    },
     toolCatalog: [{
       id: "tool_email_read",
       capability: "email.read",
       connector: "gmail",
       actionSlug: "GMAIL_FETCH_EMAILS",
       inputSchema: { type: "object", properties: { limit: { type: "number" } }, required: [] },
+      plannerCard: {
+        summary: "List Gmail messages",
+        argGuides: {},
+      },
       sensitive: false,
       credentialRef: "acc-1",
     }],
@@ -71,6 +79,16 @@ test("checkTestRunProfile returns null for valid monitor plan", () => {
     monitor: { source: "metrics.cpu", rule: { op: "gt", field: "value", value: 80 } },
   }));
   assert.equal(result, null);
+});
+
+test("checkTestRunProfile fails agentic plan without connector playbook", () => {
+  const result = checkTestRunProfile(basePlan({
+    connectorPlaybook: undefined as never,
+  }));
+  assert.equal(result?.ok, false);
+  if (result && !result.ok) {
+    assert.match(result.error, /connectorPlaybook/i);
+  }
 });
 
 test("resolveTestRunTimeoutMs allows at least one planner call per step", () => {

@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 
 import { apiFetch } from "@/lib/api-fetch";
+import { deleteLoop } from "@/lib/loops-api";
 import { useWorkspace } from "@/lib/workspace-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,7 +15,7 @@ const STARTERS = [
   { id: "research_digest", title: "Research Digest", description: "Search the web, summarize findings, and deliver a daily digest." },
   { id: "newsletter_loop", title: "Newsletter Loop", description: "Curate AI news and send weekly newsletters to subscribers." },
   { id: "lead_scoring", title: "Lead Scoring Loop", description: "Score incoming leads and notify sales when a hot lead arrives." },
-  { id: "support_auto_reply", title: "Support Auto-Reply", description: "Auto-classify support tickets and send context-aware replies." },
+  { id: "support_auto_reply", title: "Support Auto-Reply", description: "Classify tickets and draft replies for review." },
   { id: "smart_alerts", title: "Smart Alerts", description: "Monitor data and notify when thresholds break." },
   { id: "crm_sync", title: "CRM Sync", description: "Keep contacts in sync between Notion, Airtable, and your CRM." },
 ] as const;
@@ -27,10 +29,12 @@ type LoopSummary = {
 };
 
 export default function LoopsPage() {
+  const router = useRouter();
   const { activeWorkspace } = useWorkspace();
   const [loops, setLoops] = useState<LoopSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeWorkspace?.id) return;
@@ -55,7 +59,7 @@ export default function LoopsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to create loop");
-      window.location.href = `/dashboard/loops/${data.loop.id}/conductor`;
+      router.push(`/dashboard/loops/${data.loop.id}/conductor`);
     } catch (error) {
       console.error(error);
       alert(error instanceof Error ? error.message : "Failed to create loop");
@@ -64,12 +68,27 @@ export default function LoopsPage() {
     }
   }
 
+  async function handleDeleteLoop(loop: LoopSummary) {
+    if (!window.confirm(`Delete "${loop.name}"? This removes the loop and stops any schedules.`)) {
+      return;
+    }
+    setDeletingId(loop.id);
+    try {
+      await deleteLoop(loop.id);
+      setLoops((current) => current.filter((entry) => entry.id !== loop.id));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to delete loop");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl space-y-8 p-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#182506]">Loops</h1>
-          <p className="text-sm text-[#3d5c18]">Describe what you want automated. Tallei builds, compiles, and runs it.</p>
+          <h1 className="text-2xl font-bold text-[var(--ed-text)]">Loops</h1>
+          <p className="text-sm text-[var(--ed-text-2)]">Describe what you want automated. Tallei builds, compiles, and runs it.</p>
         </div>
         <Button asChild>
           <Link href="/dashboard/loops/new">
@@ -80,7 +99,7 @@ export default function LoopsPage() {
       </div>
 
       <section>
-        <h2 className="mb-4 text-lg font-semibold text-[#182506]">What would you like to automate?</h2>
+        <h2 className="mb-4 text-lg font-semibold text-[var(--ed-text)]">What would you like to automate?</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {STARTERS.map((starter) => (
             <Card key={starter.id} className="cursor-pointer transition hover:shadow-md" onClick={() => void createFromTemplate(starter.id, starter.title)}>
@@ -99,18 +118,35 @@ export default function LoopsPage() {
       </section>
 
       <section>
-        <h2 className="mb-4 text-lg font-semibold text-[#182506]">Your loops</h2>
+        <h2 className="mb-4 text-lg font-semibold text-[var(--ed-text)]">Your loops</h2>
         {loading ? <p className="text-sm text-muted-foreground">Loading...</p> : null}
         {!loading && loops.length === 0 ? (
           <p className="text-sm text-muted-foreground">No loops yet. Pick a starter above.</p>
         ) : (
           <ul className="space-y-2">
             {loops.map((loop) => (
-              <li key={loop.id}>
-                <Link href={`/dashboard/loops/${loop.id}/conductor`} className="flex items-center justify-between rounded-lg border border-[#e4f5c6] bg-white px-4 py-3 hover:bg-[#f8fdf2]">
-                  <span className="font-medium">{loop.name}</span>
-                  <span className="text-xs uppercase tracking-wide text-[#7a9a4a]">{loop.status}</span>
+              <li
+                className="flex items-center gap-2 rounded-lg border border-[var(--ed-border-light)] bg-white pr-2 hover:bg-[var(--ed-surface-alt)]"
+                key={loop.id}
+              >
+                <Link
+                  className="flex min-w-0 flex-1 items-center justify-between px-4 py-3"
+                  href={`/dashboard/loops/${loop.id}/conductor`}
+                >
+                  <span className="truncate font-medium text-[var(--ed-text)]">{loop.name}</span>
+                  <span className="ml-3 shrink-0 text-xs uppercase tracking-wide text-[var(--ed-text-3)]">{loop.status}</span>
                 </Link>
+                <Button
+                  aria-label={`Delete ${loop.name}`}
+                  className="shrink-0 text-[var(--ed-text-3)] hover:bg-red-50 hover:text-red-600"
+                  disabled={deletingId === loop.id}
+                  onClick={() => void handleDeleteLoop(loop)}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
               </li>
             ))}
           </ul>

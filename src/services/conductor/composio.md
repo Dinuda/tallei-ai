@@ -168,6 +168,7 @@ Toolkit slug aliases: `google_calendar` → `googlecalendar`, `google-mail` → 
 | Connected-app checklist UI | `listSessionToolkits` or `listToolkitsForUser` | `connected` + `connectedAccountId` for status badges |
 | Toolkit catalogue (developer page) | `listToolkits`, `getAllTools` | Direct path; no session required |
 | OAuth connect flow | `authorizeToolkit` / `authorizeToolkitForUser` | Wire redirect + `waitForConnection` in dashboard |
+| Loop compile playbook | `fetchConnectorPlaybook` | One session search at `compileLoop`; snapshot pitfalls + schemas on `compiled_plans` |
 | Spec-run agent tool surface | `getSessionTools` | Pass wrapped tools to Vercel AI SDK runner |
 | MCP exposure | `getSessionMcpUrl`, `getSessionMcpHeaders` | Optional; not registered in Tallei MCP server yet |
 
@@ -181,6 +182,13 @@ composio.{toolkit}.search
 ```
 
 Map `ComposioActionView.actionSlug` / search results into `tool-spec` contracts when hydrating definitions.
+
+### Loop runtime (compiled plan)
+
+- **`compileLoop`** calls `fetchConnectorPlaybook()` once: Composio session search + `COMPOSIO_GET_TOOL_SCHEMAS` for schema refs. **Required** when the loop has bound tools; compile fails if Composio is unconfigured or schemas cannot be resolved.
+- Results are stored on `compiled_plans` as `connectorPlaybook` and per-tool `plannerCard` / `outputSchema` (all mandatory for agentic runs).
+- **Runtime** uses `runAgenticLoop` (`src/loops/agentic-run.ts`) for both Temporal and headless paths — no field-name-only planner fallback.
+- **Event runs** inject webhook `eventPayload` fields into the planner prompt; they do **not** re-run Composio search.
 
 ---
 
@@ -197,11 +205,13 @@ From [`src/config/load.ts`](../../config/load.ts):
 | `TALLEI_CONNECTORS__COMPOSIO_WEBHOOK_SECRET` | Webhooks (not in this layer yet) |
 | `TALLEI_CONNECTORS__COMPOSIO_STRICT_MODE` | Strict connector mode |
 
-Check availability before calling:
+Check availability before calling compile (agentic loops with tools require Composio):
 
 ```typescript
 import { isComposioConfigured } from "../../integrations/composio/index.js";
-if (!isComposioConfigured()) { /* degrade gracefully */ }
+if (!isComposioConfigured()) {
+  // compile will fail with COMPOSIO_NOT_CONFIGURED for agentic tool bindings
+}
 ```
 
 ---

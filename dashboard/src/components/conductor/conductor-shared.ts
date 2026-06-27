@@ -57,7 +57,129 @@ export type ConnectorDiscoveryOutput = {
   askOptions?: InteractivePromptOption[];
   recommendedOptionIds?: string[];
   defaultQuestion?: string;
+  autoApplyConnector?: string;
 };
+
+export function uiMessagesEqual(a: UIMessage[], b: UIMessage[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Content fingerprint — useChat may mutate the messages array in place without changing reference. */
+export function getMessagesSyncKey(messages: UIMessage[]): string {
+  return JSON.stringify(messages);
+}
+
+export function blueprintNeedsConnectorPick(spec: Record<string, unknown> | null): boolean {
+  const blueprint = readTaskBlueprint(spec);
+  if (!blueprint?.outcomes?.length) return true;
+  return blueprint.outcomes.some(
+    (outcome) =>
+      outcome.role !== "transform"
+      && outcome.status !== "chosen"
+      && outcome.status !== "skipped"
+      && !outcome.selectedConnector,
+  );
+}
+
+export function resolveAutoConnectorPick(
+  askOptions: InteractivePromptOption[],
+  recommendedOptionIds: string[],
+): string | null {
+  const connected = askOptions.filter((option) => option.description === "Already connected");
+  if (connected.length !== 1) return null;
+  const pick = connected[0]!;
+  const topId = recommendedOptionIds[0];
+  if (topId && pick.id !== topId) return null;
+  return pick.value;
+}
+
+export function resolveDiscoveryAutoConnector(discovery: ConnectorDiscoveryOutput | null): string | null {
+  if (!discovery) return null;
+  if (discovery.autoApplyConnector) return discovery.autoApplyConnector;
+  if (!discovery.askOptions?.length) return null;
+  return resolveAutoConnectorPick(
+    discovery.askOptions,
+    discovery.recommendedOptionIds ?? discovery.askOptions.slice(0, 5).map((option) => option.id),
+  );
+}
+
+export type AutoConnectorPromptTarget = {
+  toolCallId: string;
+  toolName: "askQuestion" | "pickConnectorApp";
+  autoConnector: string;
+  connectorOptionId: string;
+  connectorLabel: string;
+};
+
+export function findAutoConnectorPromptTarget(
+  messages: UIMessage[],
+  spec: Record<string, unknown> | null,
+): AutoConnectorPromptTarget | null {
+  if (!blueprintNeedsConnectorPick(spec)) return null;
+
+  const discovery = findLatestConnectorDiscovery(messages);
+  const autoConnector = resolveDiscoveryAutoConnector(discovery);
+  if (!autoConnector || !discovery?.askOptions?.length) return null;
+
+  const connectorOption = discovery.askOptions.find(
+    (option) => option.value.toLowerCase() === autoConnector.toLowerCase(),
+  );
+  if (!connectorOption) return null;
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    const parts = message.parts ?? [];
+    for (let j = parts.length - 1; j >= 0; j -= 1) {
+      const part = parts[j];
+
+      if (isPickConnectorAppPart(part)) {
+        const pickPart = part as PickConnectorAppToolPart;
+        if (pickPart.state === "input-available" && pickPart.output == null) {
+          return {
+            toolCallId: pickPart.toolCallId,
+            toolName: "pickConnectorApp",
+            autoConnector,
+            connectorOptionId: connectorOption.id,
+            connectorLabel: connectorOption.label,
+          };
+        }
+      }
+
+      if (isAskQuestionPart(part)) {
+        const askPart = part as AskQuestionToolPart;
+        if (askPart.state === "input-available" && askPart.output == null) {
+          const input = askPart.input;
+          if (!input?.question || !input.options?.length) continue;
+          if (isConnectorConfirmationQuestion(input)) {
+            return {
+              toolCallId: askPart.toolCallId,
+              toolName: "askQuestion",
+              autoConnector,
+              connectorOptionId: connectorOption.id,
+              connectorLabel: connectorOption.label,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export function isConnectorConfirmationQuestion(input: AskQuestionInput): boolean {
+  const question = input.question.toLowerCase();
+  const labels = input.options.map((option) => option.label.toLowerCase());
+  const yesNo =
+    labels.includes("yes")
+    && (labels.includes("not yet") || labels.includes("no"));
+  const mentionsConnector =
+    /which app|what app|handles your|already connected|for trigger|for send|receiving|saving draft/.test(question);
+  return yesNo && mentionsConnector;
+}
 
 export type PendingInteractivePrompt = {
   toolCallId: string;
@@ -164,8 +286,14 @@ export function buildConnectorPickInput(
   };
 }
 
-export function findPendingInteractivePrompt(messages: UIMessage[]): PendingInteractivePrompt | null {
+export function findPendingInteractivePrompt(
+  messages: UIMessage[],
+  spec: Record<string, unknown> | null = null,
+): PendingInteractivePrompt | null {
+  if (!blueprintNeedsConnectorPick(spec)) return null;
+
   const discovery = findLatestConnectorDiscovery(messages);
+  const autoConnector = resolveDiscoveryAutoConnector(discovery);
 
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
@@ -178,6 +306,7 @@ export function findPendingInteractivePrompt(messages: UIMessage[]): PendingInte
         const pickPart = part as PickConnectorAppToolPart;
         if (pickPart.state === "input-available" && pickPart.output == null) {
           if (!discovery?.askOptions?.length) return null;
+          if (autoConnector) return null;
           return {
             toolCallId: pickPart.toolCallId,
             toolName: "pickConnectorApp",
@@ -191,6 +320,18 @@ export function findPendingInteractivePrompt(messages: UIMessage[]): PendingInte
         if (askPart.state === "input-available" && askPart.output == null) {
           const input = askPart.input;
           if (!input?.question || !input.options?.length) continue;
+
+          if (autoConnector && isConnectorConfirmationQuestion(input)) {
+            return null;
+          }
+
+          if (discovery?.askOptions?.length && isConnectorConfirmationQuestion(input)) {
+            return {
+              toolCallId: askPart.toolCallId,
+              toolName: "askQuestion",
+              input: buildConnectorPickInput(discovery, input.question),
+            };
+          }
 
           if (discovery?.askOptions?.length && looksLikeRoleBasedConnectorOptions(input.options)) {
             return {

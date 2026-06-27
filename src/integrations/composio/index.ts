@@ -39,6 +39,7 @@ export {
 export {
   listWorkspaceConnectors,
   listAllToolkitsWithStatus,
+  getToolkitCatalogEntry,
   getToolkitConnectionStatus,
   startToolkitAuthorization,
   verifyToolkitConnection,
@@ -60,6 +61,14 @@ export type {
 } from "./webhooks.js";
 export { dispatchComposioTriggerToLoops } from "./webhook-dispatch.js";
 export { executeComposioAction, resolveToolkitVersion } from "./execute.js";
+export {
+  fetchConnectorPlaybook,
+  buildPlannerCardForTool,
+  isEmailGetActionSlug,
+  parseSearchResponse,
+} from "./playbook.js";
+export type { FetchConnectorPlaybookResult, PlaybookToolEntry } from "./playbook.js";
+export { extractTriggerKnownFields, formatTriggerKnownFields } from "./trigger-known-fields.js";
 export {
   registerLoopEventTrigger,
   unregisterLoopEventTrigger,

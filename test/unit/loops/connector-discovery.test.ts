@@ -8,6 +8,7 @@ import {
   buildConnectorRecommendedIds,
   CONNECTED_TOOLKIT_BOOST,
   inferCatalogToolkitHints,
+  resolveAutoConnectorPick,
   TOP_CONNECTOR_RECOMMENDATIONS,
   type ConnectorCandidate,
 } from "../../../src/loops/connector-discovery.js";
@@ -51,6 +52,15 @@ test("inferCatalogToolkitHints includes email apps for support outcomes", () => 
   const hints = inferCatalogToolkitHints("incoming support ticket emails", "trigger");
   assert.ok(hints.includes("gmail"));
   assert.ok(hints.includes("outlook") || hints.includes("zendesk"));
+});
+
+test("resolveAutoConnectorPick returns sole connected top recommendation", () => {
+  const options = buildConnectorAskOptions([
+    candidate({ connector: "gmail", score: 10, connected: true, name: "Gmail" }),
+    candidate({ connector: "outlook", score: 9, connected: false, name: "Outlook" }),
+  ]);
+  const ids = buildConnectorRecommendedIds(options);
+  assert.equal(resolveAutoConnectorPick(options, ids), "gmail");
 });
 
 test("applyPrimaryConnectorToBlueprint marks all pending outcomes", () => {

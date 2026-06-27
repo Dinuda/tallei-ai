@@ -25,6 +25,7 @@ export function ConductorBuilderChat({
   showThinking,
   thinkingLabel = "Thinking…",
   className,
+  emptyState,
 }: {
   messages: UIMessage[];
   chatStatus: ChatStatus;
@@ -33,68 +34,69 @@ export function ConductorBuilderChat({
   showThinking: boolean;
   thinkingLabel?: string;
   className?: string;
+  emptyState?: React.ReactNode;
 }) {
   const lastMessageId = messages.at(-1)?.id;
 
   return (
-    <Conversation
-      className={cn(
-        "min-h-[420px] min-w-0 border border-[var(--ed-border-light)] bg-white",
-        className,
-      )}
-    >
-      <ConversationContent>
+    <Conversation className={cn("conductor-builder-chat flex-1 min-h-0", className)}>
+      <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
+        {messages.length === 0 && emptyState ? emptyState : null}
+
         {messages.map((message) => (
           <Message key={message.id} from={message.role}>
-            {message.role === "user" ? (
-              <MessageContent>
-                {message.parts?.map((part, i) =>
+            <MessageContent>
+              {message.role === "user" ? (
+                message.parts?.map((part, i) =>
                   part.type === "text" ? <span key={i}>{part.text}</span> : null,
-                )}
-              </MessageContent>
-            ) : (
-              <div className="max-w-full min-w-0 space-y-2">
-                {message.parts?.map((part, i) => {
-                  if (part.type === "reasoning") {
-                    return (
-                      <ConductorReasoningPart
-                        key={i}
-                        part={part as ReasoningUIPart}
-                        isMessageStreaming={chatStatus === "streaming" && message.id === lastMessageId}
-                      />
-                    );
-                  }
-                  if (part.type === "text") {
-                    const isStreaming =
-                      chatStatus === "streaming"
-                      && message.id === lastMessageId
-                      && i === (message.parts?.length ?? 0) - 1;
-                    return (
-                      <MessageResponse key={i} isAnimating={isStreaming}>
-                        {part.text}
-                      </MessageResponse>
-                    );
-                  }
-                  if (isToolPart(part.type)) {
-                    return (
-                      <ConductorToolPart
-                        key={i}
-                        part={part as DynamicToolUIPart}
-                        pendingQuestionCallId={pendingQuestionCallId}
-                        pendingReplyOptionsCallId={pendingReplyOptionsCallId}
-                      />
-                    );
-                  }
-                  return null;
-                })}
-              </div>
-            )}
+                )
+              ) : (
+                <div className="max-w-full min-w-0 space-y-2">
+                  {message.parts?.map((part, i) => {
+                    if (part.type === "reasoning") {
+                      return (
+                        <ConductorReasoningPart
+                          key={i}
+                          part={part as ReasoningUIPart}
+                          isMessageStreaming={chatStatus === "streaming" && message.id === lastMessageId}
+                        />
+                      );
+                    }
+                    if (part.type === "text") {
+                      const isStreaming =
+                        chatStatus === "streaming"
+                        && message.id === lastMessageId
+                        && i === (message.parts?.length ?? 0) - 1;
+                      return (
+                        <MessageResponse key={i} isAnimating={isStreaming}>
+                          {part.text}
+                        </MessageResponse>
+                      );
+                    }
+                    if (isToolPart(part.type)) {
+                      return (
+                        <ConductorToolPart
+                          key={i}
+                          part={part as DynamicToolUIPart}
+                          pendingQuestionCallId={pendingQuestionCallId}
+                          pendingReplyOptionsCallId={pendingReplyOptionsCallId}
+                        />
+                      );
+                    }
+                    return null;
+                  })}
+                </div>
+              )}
+            </MessageContent>
           </Message>
         ))}
+
         {showThinking ? (
-          <div className="pl-1">
-            <TranscriptThinkingIndicator label={thinkingLabel} variant="shimmer" />
-          </div>
+          <Message from="assistant">
+            <MessageContent>
+              <TranscriptThinkingIndicator label={thinkingLabel} variant="shimmer" />
+            </MessageContent>
+          </Message>
         ) : null}
       </ConversationContent>
       <ConversationScrollButton />

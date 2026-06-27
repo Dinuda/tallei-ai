@@ -1,29 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decomposeTask, isBlueprintComplete, validateConnectorChoicesBeforeSpecPatch } from "../../../src/loops/task-decomposition.js";
+import { isBlueprintComplete, normalizeTaskBlueprint, validateConnectorChoicesBeforeSpecPatch } from "../../../src/loops/task-decomposition.js";
 import { createEmptyLoopSpec } from "../../../src/loops/spec.js";
 import type { TaskBlueprint } from "../../../src/loops/spec.js";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 
-test("decomposeTask proposes source and destination for newsletter goals", () => {
-  const blueprint = decomposeTask({
-    goal: "Send a newsletter about what is new in AI",
-    outcome: "Subscribers receive a curated AI update",
+test("normalizeTaskBlueprint assigns ids and defaults", () => {
+  const normalized = normalizeTaskBlueprint({
+    version: 1,
+    summary: "Support triage",
+    outcomes: [{
+      role: "source",
+      description: "Ticket content available",
+    } as TaskBlueprint["outcomes"][number]],
   });
-  const roles = blueprint.outcomes.map((outcome) => outcome.role);
-  assert.ok(roles.includes("source"));
-  assert.ok(roles.includes("destination"));
-  assert.equal(blueprint.version, 1);
-});
-
-test("decomposeTask adds trigger for event-driven goals", () => {
-  const blueprint = decomposeTask({
-    goal: "When a new support email arrives, classify and reply",
-  });
-  assert.ok(blueprint.outcomes.some((outcome) => outcome.role === "trigger"));
-  assert.ok(blueprint.outcomes.some((outcome) => outcome.role === "source"));
+  assert.equal(normalized.outcomes[0]!.id.length > 0, true);
+  assert.equal(normalized.outcomes[0]!.status, "pending");
+  assert.deepEqual(normalized.outcomes[0]!.candidates, []);
 });
 
 test("isBlueprintComplete requires chosen connectors on required outcomes", () => {
@@ -67,7 +62,7 @@ test("validateConnectorChoicesBeforeSpecPatch blocks bindings without blueprint"
   });
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.match(result.error, /decomposeTask/i);
+    assert.match(result.error, /taskBlueprint/i);
   }
 });
 

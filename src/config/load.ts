@@ -256,12 +256,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     plannerModel: readResolvedChatModel("TALLEI_PLANNER__MODEL", "gpt-gpt-5-nano"),
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
     plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
-    plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000),
+    /** Per planner LLM call; 0 = no abort (wait for provider). Default 5 min. */
+    plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 300_000),
     loopTestRunMaxSteps: readIntEnv(e, "TALLEI_LOOPS__TEST_RUN_MAX_STEPS", 2),
     loopTestRunTimeoutMs: readIntEnv(
       e,
       "TALLEI_LOOPS__TEST_RUN_TIMEOUT_MS",
-      Math.max(60_000, readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000) * 2 + 10_000),
+      Math.max(600_000, readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 300_000) * 4),
     ),
     /** Max simultaneous event-triggered runs per workspace; 0 = unlimited. */
     loopMaxConcurrentEventRuns: Math.max(0, readIntEnv(e, "TALLEI_LOOPS__MAX_CONCURRENT_EVENT_RUNS", 0)),
@@ -274,7 +275,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     loopMinerEventSummaryCharCap: readIntEnv(e, "TALLEI_LOOP_MINER__EVENT_SUMMARY_CHAR_CAP", 900),
     loopMinerTranscriptSnippetsMax: readIntEnv(e, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPETS_MAX", 2),
     loopMinerTranscriptSnippetCharCap: readIntEnv(e, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPET_CHAR_CAP", 220),
-    loopMinerChatTimeoutMs: readIntEnv(e, "TALLEI_LOOP_MINER__CHAT_TIMEOUT_MS", 30_000),
+    loopMinerChatTimeoutMs: readIntEnv(e, "TALLEI_LOOP_MINER__CHAT_TIMEOUT_MS", 300_000),
     loopMinerMaxEvidenceDays: readIntEnv(e, "TALLEI_LOOP_MINER__MAX_EVIDENCE_DAYS", 14),
     loopMinerMaxEventsPerRun: readIntEnv(e, "TALLEI_LOOP_MINER__MAX_EVENTS_PER_RUN", 0),
     openaiPayloadLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),

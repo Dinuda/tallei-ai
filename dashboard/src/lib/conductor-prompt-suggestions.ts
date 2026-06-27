@@ -209,6 +209,9 @@ export function deriveConductorPromptSuggestions(input: DeriveSuggestionsInput):
   }
 
   if (asksUser) {
+    if (/which app|what app|handles your|already connected|gmail|outlook|connector/.test(lower)) {
+      return [];
+    }
     if (ready && !compileOk && /compile|test/.test(lower)) {
       return compileAndTestSuggestions();
     }

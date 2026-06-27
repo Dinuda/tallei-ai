@@ -460,9 +460,9 @@ async function callPlanner(params: {
   transcript: PlannerTurn[];
   webSearchBudget: number;
 }): Promise<any> {
-  const timeoutMs = Math.max(5_000, config.plannerRequestTimeoutMs);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = config.plannerRequestTimeoutMs;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
 
   const schema = params.mode === "interview" ? interviewJsonSchema : finalizeJsonSchema;
   const modeInstruction =
@@ -501,10 +501,10 @@ async function callPlanner(params: {
           },
         },
       },
-      { signal: controller.signal }
+      ...(controller ? { signal: controller.signal } : {}),
     );
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -513,9 +513,9 @@ async function callProviderRoleSuggestion(params: {
   brief?: string | null;
   comments?: string | null;
 }): Promise<any> {
-  const timeoutMs = Math.max(5_000, config.plannerRequestTimeoutMs);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = config.plannerRequestTimeoutMs;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
 
   const brief = params.brief?.trim() ?? "";
   const comments = params.comments?.trim() ?? "";
@@ -558,10 +558,10 @@ async function callProviderRoleSuggestion(params: {
           },
         },
       },
-      { signal: controller.signal }
+      ...(controller ? { signal: controller.signal } : {}),
     );
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
   }
 }
 

@@ -98,20 +98,3 @@ export function validateToolArgsAgainstSchema(
   return { ok: false, missing, required: summary.required };
 }
 
-export function summarizeToolForPlanner(tool: {
-  id: string;
-  capability: string;
-  connector: string;
-  actionSlug: string;
-  inputSchema: Record<string, unknown>;
-}): Record<string, unknown> {
-  const schema = summarizeInputSchema(tool.inputSchema);
-  return {
-    id: tool.id,
-    capability: tool.capability,
-    connector: tool.connector,
-    actionSlug: tool.actionSlug,
-    requiredFields: schema.required,
-    optionalFields: schema.properties.filter((field) => !schema.required.includes(field)),
-  };
-}

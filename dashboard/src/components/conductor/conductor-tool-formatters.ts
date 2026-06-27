@@ -38,9 +38,20 @@ export function formatActivateSummary(output: unknown): string | null {
 
 export function formatPatchSummary(output: unknown): string | null {
   if (!output || typeof output !== "object") return null;
-  const row = output as { missingSlots?: string[]; spec?: { bindings?: Array<{ connector: string; capability: string }> } };
+  const row = output as {
+    missingSlots?: string[];
+    spec?: {
+      intent?: { outcome?: string };
+      bindings?: Array<{ connector: string; capability: string }>;
+      taskBlueprint?: { summary?: string };
+    };
+  };
+  const outcome = row.spec?.intent?.outcome?.trim();
+  const blueprint = row.spec?.taskBlueprint?.summary?.trim();
   const bindings = row.spec?.bindings?.map((b) => `${b.connector}:${b.capability}`).join(", ");
   const missing = row.missingSlots?.length ? `Still needed: ${row.missingSlots.join(", ")}` : "Ready to compile";
+  if (outcome) return `${outcome}${bindings ? ` · Bindings: ${bindings}` : ""}. ${missing}`;
+  if (blueprint) return `${blueprint}. ${missing}`;
   return bindings ? `Bindings: ${bindings}. ${missing}` : missing;
 }
 
@@ -70,10 +81,6 @@ export function formatToolInputPreview(toolName: string, input: unknown): string
     if (role && outcome) return `${role}: ${outcome}`;
     if (outcome) return outcome;
     if (role) return role;
-  }
-
-  if (toolName === "decomposeTask" && typeof row.goal === "string") {
-    return row.goal;
   }
 
   if (toolName === "connectToolkit" && typeof row.toolkit === "string") {

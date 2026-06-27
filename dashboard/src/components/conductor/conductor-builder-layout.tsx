@@ -1,80 +1,36 @@
 "use client";
 
 import type { UIMessage } from "ai";
+import { History } from "lucide-react";
 import Link from "next/link";
+import { AnimatePresence, motion } from "motion/react";
+import { useCallback, useMemo } from "react";
 
 import {
   InteractivePromptMenu,
   type InteractivePromptAnswer,
 } from "@/components/ai-elements/interactive-prompt-menu";
+import {
+  PromptInput,
+  PromptInputFooter,
+  PromptInputSubmit,
+  PromptInputTextarea,
+} from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import { TranscriptThinkingIndicator } from "@/components/ai-elements/transcript-thinking";
 import { BuilderConnectorPrompt } from "@/components/conductor/builder-connector-prompt";
 import { ConductorBuilderChat } from "@/components/conductor/conductor-builder-chat";
+import { ConductorSpecSheet, type LoopEventTriggerStatus } from "@/components/conductor/conductor-spec-sheet";
+import { LoopSuggestionCards } from "@/components/conductor/loop-suggestion-cards";
 import type {
   ChatStatus,
   PendingInteractivePrompt,
-  TaskBlueprint,
 } from "@/components/conductor/conductor-shared";
 import {
-  outcomeRoleLabel,
   promptVariantForQuestion,
-  readTaskBlueprint,
   shouldShowThinkingIndicator,
 } from "@/components/conductor/conductor-shared";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import type { ConductorPromptSuggestion } from "@/lib/conductor-prompt-suggestions";
-
-function TaskBlueprintPanel({ blueprint }: { blueprint: TaskBlueprint }) {
-  const outcomes = blueprint.outcomes ?? [];
-  if (outcomes.length === 0) return null;
-
-  return (
-    <Card className="rounded-none border-[var(--ed-border-light)] shadow-none">
-      <CardHeader>
-        <CardTitle className="text-base text-[var(--ed-text)]">Task blueprint</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {blueprint.summary ? (
-          <p className="text-sm text-[var(--ed-text-2)]">{blueprint.summary}</p>
-        ) : null}
-        <ul className="space-y-2">
-          {outcomes.map((outcome) => (
-            <li
-              key={outcome.id}
-              className="border border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] p-3 text-sm"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-[var(--ed-text)]">
-                  {outcomeRoleLabel(outcome.role)}
-                </span>
-                <span className="text-xs uppercase text-[var(--ed-text-3)]">{outcome.status}</span>
-              </div>
-              <p className="mt-1 text-[var(--ed-text-2)]">{outcome.description}</p>
-              {outcome.selectedConnector ? (
-                <p className="mt-1 text-xs text-[var(--ed-text)]">
-                  Connector: <span className="font-mono">{outcome.selectedConnector}</span>
-                </p>
-              ) : null}
-              {!outcome.selectedConnector && outcome.candidates && outcome.candidates.length > 0 ? (
-                <ul className="mt-2 space-y-1 text-xs text-[var(--ed-text-3)]">
-                  {outcome.candidates.slice(0, 3).map((candidate) => (
-                    <li key={candidate.connector}>
-                      {candidate.connector}
-                      {candidate.connected ? " · connected" : " · not connected"}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      </CardContent>
-    </Card>
-  );
-}
 
 function ConductorPromptSuggestionsBar({
   suggestions,
@@ -88,13 +44,12 @@ function ConductorPromptSuggestionsBar({
   if (suggestions.length === 0) return null;
 
   return (
-    <div className="space-y-2">
-      <p className="text-xs font-medium text-[var(--ed-text-3)]">Quick replies</p>
-      <Suggestions className="pb-1">
+    <div className="border-b border-[var(--cb-border-light,#e5e7eb)] px-3 py-2">
+      <Suggestions className="flex-wrap gap-1.5 pb-0">
         {suggestions.map((suggestion) => (
           <Suggestion
             key={suggestion.id}
-            className="border-[var(--ed-border-light)] bg-white text-[var(--ed-text)] hover:border-[var(--ed-accent-border)] hover:bg-[var(--ed-surface-hover)]"
+            className="border-[var(--cb-border-light,#e5e7eb)] bg-white text-[var(--cb-text,#111827)] hover:border-[#9ca3af] hover:bg-slate-50"
             disabled={disabled}
             onClick={() => onSelect(suggestion)}
             suggestion={suggestion.message}
@@ -115,6 +70,7 @@ export type ConductorBuilderLayoutProps = {
   input: string;
   setInput: (value: string) => void;
   onSubmit: (text: string) => void;
+  onStop?: () => void;
   pendingQuestion: PendingInteractivePrompt | null;
   promptSuggestions: ConductorPromptSuggestion[];
   onAskQuestionAnswer: (answer: InteractivePromptAnswer) => void;
@@ -124,6 +80,7 @@ export type ConductorBuilderLayoutProps = {
   missingSlots: string[];
   status: string;
   compiledPlanId: string | null;
+  eventTrigger?: LoopEventTriggerStatus | null;
   onRun?: () => void;
   thinkingLabel?: string;
   forceThinking?: boolean;
@@ -139,6 +96,7 @@ export function ConductorBuilderLayout({
   input,
   setInput,
   onSubmit,
+  onStop,
   pendingQuestion,
   promptSuggestions,
   onAskQuestionAnswer,
@@ -148,6 +106,7 @@ export function ConductorBuilderLayout({
   missingSlots,
   status,
   compiledPlanId,
+  eventTrigger,
   onRun,
   thinkingLabel = "Thinking…",
   forceThinking = false,
@@ -156,7 +115,6 @@ export function ConductorBuilderLayout({
 }: ConductorBuilderLayoutProps) {
   const pendingQuestionCallId = pendingQuestion?.toolCallId ?? null;
   const readyToCompile = missingSlots.length === 0 && Boolean(spec);
-  const taskBlueprint = readTaskBlueprint(spec);
   const showThinking = shouldShowThinkingIndicator(
     messages,
     chatStatus,
@@ -164,146 +122,172 @@ export function ConductorBuilderLayout({
     forceThinking,
   );
   const chatBusy = composerDisabled || chatStatus === "streaming" || chatStatus === "submitted";
-  const specPanelValue = spec
-    ? JSON.stringify(spec, null, 2)
-    : "Describe what you want automated in chat. Tallei will name the loop from your first message and build the spec here.";
+  const composerInteractiveReady = chatStatus === "ready" && !composerDisabled;
+  const showComposerBusy = chatBusy && !pendingQuestion;
+  const showTranscriptThinking = showThinking && !showComposerBusy;
 
   const isConnectorPick = pendingQuestion?.input.questionId === "connector-app";
   const promptVariant = pendingQuestion
     ? promptVariantForQuestion(pendingQuestion.input.questionId)
     : "neutral";
 
+  const submitComposerText = useCallback((text: string) => {
+    const answerText = text.trim();
+    if (!answerText || pendingQuestion || chatBusy) return;
+    onSubmit(answerText);
+    setInput("");
+  }, [chatBusy, onSubmit, pendingQuestion, setInput]);
+
+  const emptyState = useMemo(
+    () => (!loopId ? <LoopSuggestionCards className="max-w-3xl" onSelect={submitComposerText} /> : undefined),
+    [loopId, submitComposerText],
+  );
+
   return (
-    <div className="mx-auto grid max-w-6xl gap-6 p-6 lg:grid-cols-[1fr_360px]">
-      <div className="min-w-0 space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-[var(--ed-text)]" style={{ fontFamily: "var(--font-title)" }}>
-              Conductor
-            </h1>
-            {loopName ? (
-              <p className="mt-0.5 text-sm text-[var(--ed-text-2)]">{loopName}</p>
-            ) : (
-              <p className="mt-0.5 text-sm text-[var(--ed-text-2)]">Create a loop</p>
-            )}
-          </div>
-          <div className="flex gap-3 text-sm">
-            {loopId ? (
-              <Link href={`/dashboard/loops/${loopId}/runs`} className="text-[var(--ed-accent)] hover:underline">
-                Runs
-              </Link>
-            ) : null}
-            <Link href="/dashboard/loops" className="text-[var(--ed-accent)] hover:underline">
-              Back
-            </Link>
+    <div className="conductor-builder-page">
+      <div aria-hidden className="conductor-builder-page__gradient" />
+      <div className="conductor-builder-page__inner">
+        <div className="conductor-builder-page__conversation">
+          <ConductorBuilderChat
+            chatStatus={chatStatus}
+            emptyState={emptyState}
+            messages={messages}
+            pendingQuestionCallId={pendingQuestionCallId}
+            pendingReplyOptionsCallId={pendingReplyOptionsCallId}
+            showThinking={showTranscriptThinking}
+            thinkingLabel={thinkingLabel}
+          />
+        </div>
+
+        <div className="conductor-builder-page__composer-wrap">
+          <div className="conductor-builder-page__composer-inner">
+            <motion.div className="conductor-builder-page__composer-surface">
+              <AnimatePresence initial={false} mode="popLayout">
+                {composerInteractiveReady && pendingQuestion ? (
+                  <motion.div
+                    key={isConnectorPick ? "connector-pick" : `prompt-${pendingQuestion.toolCallId}`}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    {isConnectorPick ? (
+                      <BuilderConnectorPrompt
+                        allowMultiple={pendingQuestion.input.allowMultiple}
+                        allowOther={pendingQuestion.input.allowOther ?? true}
+                        disabled={chatBusy}
+                        onDismiss={onAskQuestionDismiss}
+                        onSubmit={onAskQuestionAnswer}
+                        options={pendingQuestion.input.options}
+                        question={pendingQuestion.input.question}
+                        recommendedOptionIds={pendingQuestion.input.recommendedOptionIds}
+                        selectionHint="Search or scroll to find an app"
+                        step={pendingQuestion.input.step}
+                      />
+                    ) : (
+                      <InteractivePromptMenu
+                        allowMultiple={pendingQuestion.input.allowMultiple}
+                        allowOther={pendingQuestion.input.allowOther ?? true}
+                        disabled={chatBusy}
+                        onDismiss={onAskQuestionDismiss}
+                        onSubmit={onAskQuestionAnswer}
+                        options={pendingQuestion.input.options}
+                        placement="composer"
+                        question={pendingQuestion.input.question}
+                        recommendedOptionIds={pendingQuestion.input.recommendedOptionIds}
+                        step={pendingQuestion.input.step}
+                        variant={promptVariant}
+                      />
+                    )}
+                  </motion.div>
+                ) : showComposerBusy ? (
+                  <motion.div
+                    key="composer-busy"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    initial={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <div
+                      aria-label={thinkingLabel}
+                      className="flex min-h-[var(--cb-composer-min-h,56px)] items-center px-4 py-5"
+                      role="status"
+                    >
+                      <TranscriptThinkingIndicator label={thinkingLabel} />
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="prompt-input"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    initial={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    {!pendingQuestion && promptSuggestions.length > 0 ? (
+                      <ConductorPromptSuggestionsBar
+                        disabled={chatBusy}
+                        onSelect={onPromptSuggestionSelect}
+                        suggestions={promptSuggestions}
+                      />
+                    ) : null}
+
+                    <div className="relative" data-conductor-prompt-input>
+                      <PromptInput
+                        className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"
+                        onSubmit={({ text }) => {
+                          submitComposerText(text);
+                        }}
+                      >
+                        <PromptInputTextarea
+                          className="min-h-0 pr-12 pb-2"
+                          onChange={(event) => setInput(event.currentTarget.value)}
+                          placeholder="Describe the outcome you want (e.g. urgent tickets flagged, drafts ready for review)..."
+                          value={input}
+                        />
+
+                        <div className="absolute bottom-3 left-4 flex items-center gap-2">
+                          <ConductorSpecSheet
+                            compiledPlanId={compiledPlanId}
+                            eventTrigger={eventTrigger}
+                            loopId={loopId}
+                            loopName={loopName}
+                            missingSlots={missingSlots}
+                            onRun={onRun}
+                            readyToCompile={readyToCompile}
+                            spec={spec}
+                            status={status}
+                          />
+                          {loopId ? (
+                            <Link
+                              className="conductor-builder-page__spec-trigger"
+                              href={`/dashboard/loops/${loopId}/runs`}
+                            >
+                              <History className="size-3.5" />
+                              <span>Runs</span>
+                            </Link>
+                          ) : null}
+                        </div>
+
+                        <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
+                          <PromptInputSubmit
+                            className="data-[conductor-submit]"
+                            data-conductor-submit
+                            onStop={onStop}
+                            status={chatStatus}
+                          />
+                        </PromptInputFooter>
+                      </PromptInput>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
           </div>
         </div>
 
-        <ConductorBuilderChat
-          chatStatus={chatStatus}
-          messages={messages}
-          pendingQuestionCallId={pendingQuestionCallId}
-          pendingReplyOptionsCallId={pendingReplyOptionsCallId}
-          showThinking={showThinking}
-          thinkingLabel={thinkingLabel}
-        />
-
-        {pendingQuestion ? (
-          isConnectorPick ? (
-            <BuilderConnectorPrompt
-              allowMultiple={pendingQuestion.input.allowMultiple}
-              allowOther={pendingQuestion.input.allowOther ?? true}
-              disabled={chatBusy}
-              onDismiss={onAskQuestionDismiss}
-              onSubmit={onAskQuestionAnswer}
-              options={pendingQuestion.input.options}
-              question={pendingQuestion.input.question}
-              recommendedOptionIds={pendingQuestion.input.recommendedOptionIds}
-              selectionHint="Search or scroll to find an app"
-              step={pendingQuestion.input.step}
-            />
-          ) : (
-            <div className="overflow-hidden border border-[var(--ed-border-light)] bg-white shadow-sm">
-              <InteractivePromptMenu
-                allowMultiple={pendingQuestion.input.allowMultiple}
-                allowOther={pendingQuestion.input.allowOther ?? true}
-                disabled={chatBusy}
-                onDismiss={onAskQuestionDismiss}
-                onSubmit={onAskQuestionAnswer}
-                options={pendingQuestion.input.options}
-                placement="composer"
-                question={pendingQuestion.input.question}
-                recommendedOptionIds={pendingQuestion.input.recommendedOptionIds}
-                step={pendingQuestion.input.step}
-                variant={promptVariant}
-              />
-            </div>
-          )
-        ) : null}
-
-        {!pendingQuestion && promptSuggestions.length > 0 ? (
-          <ConductorPromptSuggestionsBar
-            disabled={chatBusy}
-            onSelect={onPromptSuggestionSelect}
-            suggestions={promptSuggestions}
-          />
-        ) : null}
-
-        <form
-          className="flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!input.trim() || pendingQuestion || chatBusy) return;
-            onSubmit(input.trim());
-            setInput("");
-          }}
-        >
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={pendingQuestion ? "Answer the question above to continue…" : "Do this, loop this, connect this..."}
-            disabled={chatBusy || Boolean(pendingQuestion)}
-          />
-          <Button type="submit" disabled={chatBusy || Boolean(pendingQuestion) || !input.trim()}>
-            Send
-          </Button>
-        </form>
-      </div>
-
-      <div className="space-y-4">
-        {taskBlueprint ? <TaskBlueprintPanel blueprint={taskBlueprint} /> : null}
-        <Card className="rounded-none border-[var(--ed-border-light)] shadow-none">
-          <CardHeader>
-            <CardTitle className="text-base text-[var(--ed-text)]">Loop spec</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Textarea readOnly className="min-h-[200px] font-mono text-xs" value={specPanelValue} />
-            {readyToCompile ? (
-              <p className="mt-2 text-sm font-medium text-[var(--builder-emerald-accent)]">Ready to compile</p>
-            ) : (
-              <p className="mt-2 text-xs text-muted-foreground">
-                Missing: {missingSlots.join(", ") || (loopId ? "—" : "Send your first message to start")}
-              </p>
-            )}
-            <p className="mt-2 text-xs text-muted-foreground">
-              Status: {status}
-              {compiledPlanId ? ` · plan ${compiledPlanId.slice(0, 8)}…` : ""}
-            </p>
-            {readyToCompile ? (
-              <p className="mt-2 text-xs text-[var(--ed-text-2)]">
-                When you are happy with the spec, ask Conductor to compile, test, and activate it.
-              </p>
-            ) : null}
-          </CardContent>
-        </Card>
-
-        <div className="flex flex-col gap-2">
-          <Button variant="secondary" onClick={() => onRun?.()} disabled={!onRun || status !== "active"}>
-            Run now
-          </Button>
-          <Link href="/dashboard/approvals" className="text-center text-sm text-[var(--ed-accent)] hover:underline">
-            Approval inbox
-          </Link>
+        <div className="conductor-builder-page__footer">
+          <p>Tallei can make mistakes. Check important info.</p>
         </div>
       </div>
     </div>

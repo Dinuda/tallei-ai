@@ -69,12 +69,6 @@ export const discoverBindingsInputSchema = z.object({
 
 export type DiscoverBindingsInput = z.infer<typeof discoverBindingsInputSchema>;
 
-export const decomposeTaskInputSchema = z.object({
-  goal: z.string().min(1),
-  outcome: z.string().optional(),
-  constraints: z.array(z.string()).optional(),
-});
-
 export const discoverConnectorsForBlueprintInputSchema = z.object({
   outcomes: z.array(z.object({
     id: z.string().min(1),
@@ -83,7 +77,6 @@ export const discoverConnectorsForBlueprintInputSchema = z.object({
   })).min(1),
 });
 
-export type DecomposeTaskInput = z.infer<typeof decomposeTaskInputSchema>;
 export type DiscoverConnectorsForBlueprintInput = z.infer<typeof discoverConnectorsForBlueprintInputSchema>;
 
 export const compileLoopInputSchema = z.object({});

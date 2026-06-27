@@ -5,6 +5,7 @@ import {
   disconnectToolkit,
   getToolkitConnectionStatus,
   listAllToolkitsWithStatus,
+  getToolkitCatalogEntry,
   listWorkspaceConnectors,
   startToolkitAuthorization,
   verifyToolkitConnection,
@@ -41,8 +42,21 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
 
 router.get("/catalog", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
+    const query = z.object({
+      toolkit: z.string().min(1).optional(),
+      includeTriggers: z.enum(["true", "false"]).optional(),
+    }).parse(req.query);
+
+    if (query.toolkit?.trim()) {
+      const entry = await getToolkitCatalogEntry(req.authContext!, query.toolkit, {
+        includeTriggers: query.includeTriggers === "true",
+      });
+      res.json({ scoped: true, toolkit: entry.toolkit, ...(entry.triggers ? { triggers: entry.triggers } : {}) });
+      return;
+    }
+
     const { toolkits, total } = await listAllToolkitsWithStatus(req.authContext!);
-    res.json({ toolkits, total });
+    res.json({ scoped: false, toolkits, total });
   } catch (error) {
     sendError(res, error, "Failed to list connector catalog");
   }

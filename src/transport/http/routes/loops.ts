@@ -13,7 +13,6 @@ import {
   activateLoopInputSchema,
   askQuestionInputSchema,
   compileLoopInputSchema,
-  decomposeTaskInputSchema,
   discoverBindingsInputSchema,
   discoverConnectorsForBlueprintInputSchema,
   pickConnectorAppInputSchema,
@@ -22,7 +21,7 @@ import {
 } from "../../../loops/conductor-tools.js";
 import { discoverOutcomeBindings } from "../../../loops/binding-discovery.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
-import { decomposeTask, validateConnectorChoicesBeforeSpecPatch } from "../../../loops/task-decomposition.js";
+import { validateConnectorChoicesBeforeSpecPatch } from "../../../loops/task-decomposition.js";
 import { executeLoopTestRun } from "../../../loops/test-run.js";
 import {
   activateLoop,
@@ -46,7 +45,8 @@ import { composioWebhookDeliveryUrl, isLocalWebhookUrl } from "../../../integrat
 import { deriveLoopNameFromPrompt } from "../../../loops/loop-name.js";
 import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
 import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
-import { listAllToolkitsWithStatus, listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
+import { listAllToolkitsWithStatus, listWorkspaceConnectors, startToolkitAuthorization, getToolkitCatalogEntry } from "../../../integrations/composio/accounts.js";
+import { resolveEventTriggerPatch, eventTriggerResolutionHint } from "../../../loops/event-trigger.js";
 import { listComposioTriggerTypes } from "../../../integrations/composio/triggers.js";
 import { resolveToolkitSlug } from "../../../integrations/composio/auth.js";
 import { getAllTools } from "../../../integrations/composio/tools.js";
@@ -125,6 +125,16 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
     const missingSlots = spec ? getMissingSlots(spec) : [];
     const eventTrigger = await getLoopEventTriggerStatus(loopId);
     const webhookUrl = composioWebhookDeliveryUrl();
+    const triggerKind = spec?.trigger && typeof spec.trigger === "object" && !Array.isArray(spec.trigger)
+      ? String((spec.trigger as Record<string, unknown>).kind ?? "")
+      : "";
+    const activationGap = triggerKind === "event"
+      ? loop.status === "active" && eventTrigger && !eventTrigger.subscribed
+        ? "composio_trigger_not_registered"
+        : loop.status !== "active" && (buildChat?.compiledPlanId || loop.activePlanId)
+          ? "needs_activate"
+          : null
+      : null;
     res.json({
       loop,
       spec,
@@ -132,6 +142,7 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
       buildChat,
       missingSlots,
       eventTrigger,
+      activationGap,
       webhookDelivery: {
         url: webhookUrl,
         reachableByComposio: !isLocalWebhookUrl(webhookUrl),
@@ -308,7 +319,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       tools: {
         patchLoopSpec: tool({
           description:
-            "Apply a partial update to the loop spec. Patch taskBlueprint after pickConnectorApp answers. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome is chosen.",
+            "Apply a partial update to the loop spec. On new loops, patch intent (goal, outcome, successCriteria), taskBlueprint (outcome roles), agent.instructions, and approval here — you analyze intent directly, no separate analyst tool. Patch taskBlueprint after pickConnectorApp answers. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome is chosen.",
           inputSchema: specPatchSchema,
           execute: async (patch) => {
             const gate = validateConnectorChoicesBeforeSpecPatch(currentSpec!, patch);
@@ -320,7 +331,34 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 missingSlots: (await import("../../../loops/patch.js")).getMissingSlots(currentSpec!),
               };
             }
-            currentSpec = applySpecPatch(currentSpec!, patch);
+            let normalizedPatch = patch;
+            try {
+              normalizedPatch = await resolveEventTriggerPatch(currentSpec!, patch);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              const source = patch.trigger?.kind === "event"
+                ? (patch.trigger.source?.trim()
+                  || (currentSpec!.trigger.kind === "event" ? currentSpec!.trigger.source : ""))
+                : "";
+              return {
+                ok: false,
+                error: message,
+                ...(source ? { hint: eventTriggerResolutionHint(source) } : {}),
+                missingSlots: (await import("../../../loops/patch.js")).getMissingSlots(currentSpec!),
+              };
+            }
+            try {
+              currentSpec = applySpecPatch(currentSpec!, normalizedPatch);
+            } catch (error) {
+              const message = error instanceof z.ZodError
+                ? error.errors.map((row) => row.message).join("; ")
+                : error instanceof Error ? error.message : String(error);
+              return {
+                ok: false,
+                error: message,
+                missingSlots: (await import("../../../loops/patch.js")).getMissingSlots(currentSpec!),
+              };
+            }
             await saveSpecDraft(auth, loopId, currentSpec, "chat");
             const { getMissingSlots } = await import("../../../loops/patch.js");
             return {
@@ -349,38 +387,46 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         listConnectorCatalog: tool({
           description:
-            "Full Composio toolkit catalogue merged with workspace connection status. Browse only — use discoverConnectorsForBlueprint to rank connectors for the whole blueprint.",
-          inputSchema: z.object({}),
-          execute: async () => {
+            "Composio toolkit metadata + workspace connection status. Pass toolkit to fetch ONE connector (preferred). Omit toolkit only when browsing the full catalogue. For event triggers use includeTriggers: true or listTriggers.",
+          inputSchema: z.object({
+            toolkit: z.string().min(1).optional(),
+            includeTriggers: z.boolean().optional(),
+          }),
+          execute: async ({ toolkit, includeTriggers }) => {
+            if (toolkit?.trim()) {
+              const entry = await getToolkitCatalogEntry(auth, toolkit, {
+                includeTriggers: includeTriggers ?? false,
+              });
+              return {
+                scoped: true,
+                toolkit: entry.toolkit,
+                ...(entry.triggers ? { triggers: entry.triggers } : {}),
+              };
+            }
             const { toolkits, total } = await listAllToolkitsWithStatus(auth);
             return {
+              scoped: false,
               total,
-              toolkits: toolkits.map((toolkit) => ({
-                slug: toolkit.slug,
-                name: toolkit.name,
-                description: toolkit.description,
-                category: toolkit.category ?? null,
-                connected: toolkit.connected,
-                connectedAccountId: toolkit.connectedAccountId ?? null,
+              toolkits: toolkits.map((row) => ({
+                slug: row.slug,
+                name: row.name,
+                description: row.description,
+                category: row.category ?? null,
+                connected: row.connected,
+                connectedAccountId: row.connectedAccountId ?? null,
               })),
             };
           },
         }),
-        decomposeTask: tool({
-          description:
-            "Break the user's goal into outcome roles (source, destination, trigger, transform). Call early before picking connectors. Patch taskBlueprint from the result.",
-          inputSchema: decomposeTaskInputSchema,
-          execute: async (input) => decomposeTask(input),
-        }),
         discoverConnectorsForBlueprint: tool({
           description:
-            "REQUIRED once after decomposeTask. Ranks unique apps for the whole loop (each app once). Returns askOptions, recommendedOptionIds (top 5), and defaultQuestion. Always follow with pickConnectorApp — never askQuestion for this step.",
+            "REQUIRED once taskBlueprint exists. Ranks unique apps (each once). Returns askOptions, recommendedOptionIds, defaultQuestion, autoApplyConnector when sole connected app is #1. autoApplyConnector → patchLoopSpec immediately; else MUST call pickConnectorApp (tool, not plain text).",
           inputSchema: discoverConnectorsForBlueprintInputSchema,
           execute: async (input) => discoverConnectorsForBlueprint(auth, input),
         }),
         pickConnectorApp: tool({
           description:
-            "Present the app picker after discoverConnectorsForBlueprint. Pass optional question text only — the UI injects ranked app options from discovery. One app pick for the whole loop; triggers/bindings come later.",
+            "Present app picker after discoverConnectorsForBlueprint when autoApplyConnector is not set. Pass optional question text only — UI injects ranked options. Required tool call; do not ask in plain text only.",
           inputSchema: pickConnectorAppInputSchema,
         }),
         presentReplyOptions: tool({
@@ -484,7 +530,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         activateLoop: tool({
           description:
-            "Activate a compiled plan so event triggers and schedules start firing. Requires a prior passing testRunLoop on the same plan (persisted — do not re-test).",
+            "Activate a compiled plan. Compile freezes the plan; activate provisions Composio webhooks and schedules. Requires a prior passing testRunLoop on the same plan.",
           inputSchema: activateLoopInputSchema,
           execute: async ({ compiledPlanId }) => {
             const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;

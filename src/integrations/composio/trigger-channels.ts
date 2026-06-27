@@ -107,15 +107,23 @@ export async function ensureWorkspaceTriggerChannel(input: {
     );
     const row = existing.rows[0];
     if (row) {
+      let composioInstanceId = row.composio_instance_id;
+      if (!composioInstanceId || row.status === "inactive") {
+        composioInstanceId = await upsertComposioTriggerInstance({
+          triggerSlug: slug,
+          connectedAccountId: input.connectedAccountId,
+        });
+      }
       const updated = await client.query<WorkspaceTriggerChannelRow>(
         `UPDATE workspace_trigger_channels
          SET ref_count = ref_count + 1,
              status = 'active',
+             composio_instance_id = $2,
              updated_at = NOW()
          WHERE id = $1
          RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
                    composio_instance_id, ref_count, status`,
-        [row.id],
+        [row.id, composioInstanceId],
       );
       await client.query("COMMIT");
       return updated.rows[0]!;

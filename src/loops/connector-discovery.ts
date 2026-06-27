@@ -43,7 +43,22 @@ export type BlueprintConnectorDiscoveryResult = {
   recommendedOptionIds: string[];
   defaultQuestion: string;
   pickerKind: "app";
+  /** Sole connected app that is also #1 recommended — Conductor may patch without pickConnectorApp. */
+  autoApplyConnector?: string;
 };
+
+/** Auto-pick when exactly one connected app is the top recommendation. */
+export function resolveAutoConnectorPick(
+  askOptions: ConnectorAskOption[],
+  recommendedOptionIds: string[],
+): string | null {
+  const connected = askOptions.filter((option) => option.description === "Already connected");
+  if (connected.length !== 1) return null;
+  const pick = connected[0]!;
+  const topId = recommendedOptionIds[0];
+  if (topId && pick.id !== topId) return null;
+  return pick.value;
+}
 
 export function inferCatalogToolkitHints(
   outcomeDescription: string,
@@ -205,12 +220,14 @@ export async function discoverConnectorsForBlueprint(
   const ranked = [...byConnector.values()].sort((a, b) => b.score - a.score);
   const askOptions = buildConnectorAskOptions(ranked);
   const recommendedOptionIds = buildConnectorRecommendedIds(askOptions);
+  const autoApplyConnector = resolveAutoConnectorPick(askOptions, recommendedOptionIds) ?? undefined;
 
   return {
     askOptions,
     recommendedOptionIds,
     defaultQuestion: DEFAULT_CONNECTOR_PICK_QUESTION,
     pickerKind: "app",
+    ...(autoApplyConnector ? { autoApplyConnector } : {}),
   };
 }
 

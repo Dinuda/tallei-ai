@@ -2,6 +2,7 @@ export {
   loadCompiledPlanActivity,
   createRunRecordActivity,
   executeLoopRunHeadless,
+  runAgenticLoopActivity,
   plannerActivity,
   executeToolActivity,
   createApprovalRequestActivity,

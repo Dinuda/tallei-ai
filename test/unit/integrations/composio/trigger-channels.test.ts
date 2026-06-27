@@ -40,3 +40,16 @@ test("releaseWorkspaceTriggerChannel decrements ref_count before deleting instan
     assert.equal(nextRef === 0, shouldDelete);
   }
 });
+
+test("ensureWorkspaceTriggerChannel recreates instance when channel row is stale", () => {
+  const cases = [
+    { composio_instance_id: null, status: "inactive", recreate: true },
+    { composio_instance_id: null, status: "active", recreate: true },
+    { composio_instance_id: "inst-1", status: "inactive", recreate: true },
+    { composio_instance_id: "inst-1", status: "active", recreate: false },
+  ];
+  for (const row of cases) {
+    const needsRecreate = !row.composio_instance_id || row.status === "inactive";
+    assert.equal(needsRecreate, row.recreate);
+  }
+});

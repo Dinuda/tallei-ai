@@ -124,7 +124,7 @@ export async function createLoop(
 export async function listLoops(auth: AuthContext, workspaceId: string) {
   const result = await pool.query<LoopRow>(
     `SELECT * FROM loops
-     WHERE tenant_id = $1 AND user_id = $2 AND workspace_id = $3
+     WHERE tenant_id = $1 AND user_id = $2 AND workspace_id = $3 AND status <> 'archived'
      ORDER BY updated_at DESC`,
     [auth.tenantId, auth.userId, workspaceId]
   );
@@ -586,20 +586,50 @@ export async function findActiveLoopsByEventTrigger(
     }));
 }
 
+export type ComposioTriggerLoopMatch = {
+  loopId: string;
+  activePlanId: string;
+  workspaceId: string;
+  tenantId: string;
+  userId: string;
+};
+
 export async function findActiveLoopsByComposioTriggerSlug(
-  workspaceId: string,
   composioTriggerSlug: string,
-): Promise<Array<{ loopId: string; activePlanId: string; workspaceId: string }>> {
-  const result = await pool.query<{ loop_id: string; active_plan_id: string; workspace_id: string }>(
-    `SELECT l.id AS loop_id, l.active_plan_id, l.workspace_id
+  filters: { workspaceId?: string; connectedAccountId?: string } = {},
+): Promise<ComposioTriggerLoopMatch[]> {
+  const slug = composioTriggerSlug.toUpperCase();
+  const conditions = [
+    "l.status = 'active'",
+    "l.active_plan_id IS NOT NULL",
+    "s.status = 'active'",
+    "c.status = 'active'",
+    "c.composio_trigger_slug = $1",
+  ];
+  const params: unknown[] = [slug];
+
+  if (filters.workspaceId) {
+    params.push(filters.workspaceId);
+    conditions.push(`l.workspace_id = $${params.length}`);
+  }
+  if (filters.connectedAccountId) {
+    params.push(filters.connectedAccountId);
+    conditions.push(`c.connected_account_id = $${params.length}`);
+  }
+
+  const result = await pool.query<{
+    loop_id: string;
+    active_plan_id: string;
+    workspace_id: string;
+    tenant_id: string;
+    user_id: string;
+  }>(
+    `SELECT l.id AS loop_id, l.active_plan_id, l.workspace_id, l.tenant_id, l.user_id
      FROM loops l
      INNER JOIN loop_trigger_subscriptions s ON s.loop_id = l.id AND s.status = 'active'
      INNER JOIN workspace_trigger_channels c ON c.id = s.channel_id AND c.status = 'active'
-     WHERE l.workspace_id = $1
-       AND l.status = 'active'
-       AND l.active_plan_id IS NOT NULL
-       AND c.composio_trigger_slug = $2`,
-    [workspaceId, composioTriggerSlug.toUpperCase()],
+     WHERE ${conditions.join(" AND ")}`,
+    params,
   );
   return result.rows
     .filter((r) => r.active_plan_id)
@@ -607,6 +637,8 @@ export async function findActiveLoopsByComposioTriggerSlug(
       loopId: r.loop_id,
       activePlanId: r.active_plan_id!,
       workspaceId: r.workspace_id,
+      tenantId: r.tenant_id,
+      userId: r.user_id,
     }));
 }
 

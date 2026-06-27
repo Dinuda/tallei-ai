@@ -50,9 +50,11 @@ export type ReasoningProps = ComponentProps<typeof Collapsible> & {
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   duration?: number;
+  /** Ms to wait after streaming ends before auto-collapsing (default 1000). */
+  autoCloseDelay?: number;
 };
 
-const AUTO_CLOSE_DELAY = 1000;
+const DEFAULT_AUTO_CLOSE_DELAY = 1000;
 const MS_IN_S = 1000;
 
 export const Reasoning = memo(
@@ -63,6 +65,7 @@ export const Reasoning = memo(
     defaultOpen,
     onOpenChange,
     duration: durationProp,
+    autoCloseDelay = DEFAULT_AUTO_CLOSE_DELAY,
     children,
     ...props
   }: ReasoningProps) => {
@@ -128,10 +131,10 @@ export const Reasoning = memo(
             autoCloseTimerRef.current = null;
             setIsOpen(false);
             setHasAutoClosed(true);
-          }, AUTO_CLOSE_DELAY);
+          }, autoCloseDelay);
         }
       }
-    }, [isExplicitlyClosed, isStreaming, setDuration, setIsOpen]);
+    }, [autoCloseDelay, isExplicitlyClosed, isStreaming, setDuration, setIsOpen]);
 
     useEffect(() => () => {
       if (autoCloseTimerRef.current !== null) {
@@ -212,7 +215,7 @@ export const ReasoningTrigger = memo(
             {getThinkingMessage(isStreaming, duration)}
             <ChevronDownIcon
               className={cn(
-                "size-4 transition-transform",
+                "size-4 transition-transform duration-500 ease-[cubic-bezier(0.4,0,0.2,1)]",
                 isOpen ? "rotate-180" : "rotate-0"
               )}
             />
@@ -230,6 +233,8 @@ export type ReasoningContentProps = ComponentProps<
 };
 
 const streamdownPlugins = { cjk, code, math, mermaid };
+
+export const reasoningStreamdownPlugins = streamdownPlugins;
 
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => (

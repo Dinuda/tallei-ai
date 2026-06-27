@@ -4,7 +4,7 @@ import { getToken } from "next-auth/jwt";
 import { auth } from "../../../../auth";
 
 const SECRET = process.env.INTERNAL_API_SECRET;
-const BACKEND_TIMEOUT_MS = 60_000;
+const BACKEND_TIMEOUT_MS = 600_000;
 
 function resolveBackendUrl(req?: NextRequest): string {
   const configured = process.env.BACKEND_URL || process.env.API_PROXY_TARGET || "http://127.0.0.1:3000";

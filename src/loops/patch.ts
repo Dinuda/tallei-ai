@@ -4,6 +4,8 @@ import {
   type LoopSpec,
   type SpecPatch,
 } from "./spec.js";
+import { isEventTriggerReadyForCompile } from "./event-trigger.js";
+import { normalizeTaskBlueprint } from "./task-decomposition.js";
 
 export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
   const merged: LoopSpec = {
@@ -12,7 +14,9 @@ export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
     trigger: patch.trigger ?? current.trigger,
     profile: patch.profile ?? current.profile,
     bindings: patch.bindings ?? current.bindings,
-    taskBlueprint: patch.taskBlueprint ?? current.taskBlueprint,
+    taskBlueprint: patch.taskBlueprint
+      ? normalizeTaskBlueprint(patch.taskBlueprint)
+      : current.taskBlueprint,
     agent: patch.agent
       ? { ...(current.agent ?? { instructions: "", maxSteps: 12, maxTokens: 8_000 }), ...patch.agent }
       : current.agent,
@@ -30,8 +34,12 @@ export function getMissingSlots(spec: LoopSpec): string[] {
   if (!spec.intent.goal.trim()) missing.push("intent.goal");
   if (!spec.intent.outcome.trim()) missing.push("intent.outcome");
   if (spec.trigger.kind === "schedule" && !spec.trigger.cron.trim()) missing.push("trigger.cron");
-  if (spec.trigger.kind === "event" && !spec.trigger.composioSlug.trim()) missing.push("trigger.composioSlug");
-  if (spec.trigger.kind === "event" && !spec.trigger.source.trim()) missing.push("trigger.source");
+  if (spec.trigger.kind === "event") {
+    if (!spec.trigger.source.trim()) missing.push("trigger.source");
+    if (!isEventTriggerReadyForCompile(spec.trigger.source, spec.trigger.composioSlug)) {
+      missing.push("trigger.composioSlug");
+    }
+  }
   if (spec.profile === "agentic" && !spec.agent?.instructions?.trim()) missing.push("agent.instructions");
   if (spec.bindings.length === 0) missing.push("bindings");
   if (spec.output.kind !== "none" && !spec.output.target?.trim()) missing.push("output.target");

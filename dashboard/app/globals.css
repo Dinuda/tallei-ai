@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "./dashboard/loops/conductor-builder.css";
 
 @custom-variant dark (&:is(.dark *));
 @source "./components";
@@ -145,6 +146,19 @@
   --builder-emerald-text-muted: #047857;
   --builder-emerald-accent: #059669;
   --builder-user-bubble: #f4f4f4;
+
+  /* Conductor builder page shell (see conductor-builder.css) */
+  --cb-bg: #ffffff;
+  --cb-surface: #ffffff;
+  --cb-border: #d1d5db;
+  --cb-border-light: #e5e7eb;
+  --cb-text: #111827;
+  --cb-text-muted: #6b7280;
+  --cb-text-subtle: #9ca3af;
+  --cb-accent: #111827;
+  --cb-accent-hover: #374151;
+  --cb-composer-min-h: 56px;
+  --cb-max-width: 48rem;
   --tag-red-text: #991b1b;
 }
 

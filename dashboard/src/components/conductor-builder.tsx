@@ -9,7 +9,14 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 
 import { ConductorBuilderLayout } from "@/components/conductor/conductor-builder-layout";
+import type { LoopEventTriggerStatus } from "@/components/conductor/conductor-spec-sheet";
 import {
+  ConductorChatProvider,
+  useConductorChat,
+  type ConductorChatApi,
+} from "@/components/conductor/conductor-chat-context";
+import {
+  findAutoConnectorPromptTarget,
   findPendingInteractivePrompt,
   makeUserMessage,
   type ChatStatus,
@@ -27,19 +34,15 @@ type ConductorChatBridgeProps = {
   pendingPrompt: string | null;
   skipLoopFetch?: boolean;
   bootstrapPromptSentRef: MutableRefObject<boolean>;
-  onMessagesChange: (messages: UIMessage[]) => void;
-  onStatusChange: (status: ChatStatus) => void;
   onLoopMetaChange: (meta: {
     loopName?: string;
     spec?: Record<string, unknown> | null;
     missingSlots?: string[];
     status?: string;
     compiledPlanId?: string | null;
+    eventTrigger?: LoopEventTriggerStatus | null;
   }) => void;
-  onChatReady: (api: {
-    sendMessage: (input: { text: string }) => void;
-    addToolOutput: ReturnType<typeof useChat>["addToolOutput"];
-  }) => void;
+  children: React.ReactNode;
 };
 
 function ConductorChatBridge({
@@ -47,20 +50,12 @@ function ConductorChatBridge({
   pendingPrompt,
   skipLoopFetch = false,
   bootstrapPromptSentRef,
-  onMessagesChange,
-  onStatusChange,
   onLoopMetaChange,
-  onChatReady,
+  children,
 }: ConductorChatBridgeProps) {
-  const onMessagesChangeRef = useRef(onMessagesChange);
-  const onStatusChangeRef = useRef(onStatusChange);
   const onLoopMetaChangeRef = useRef(onLoopMetaChange);
-  const onChatReadyRef = useRef(onChatReady);
 
-  useEffect(() => { onMessagesChangeRef.current = onMessagesChange; }, [onMessagesChange]);
-  useEffect(() => { onStatusChangeRef.current = onStatusChange; }, [onStatusChange]);
   useEffect(() => { onLoopMetaChangeRef.current = onLoopMetaChange; }, [onLoopMetaChange]);
-  useEffect(() => { onChatReadyRef.current = onChatReady; }, [onChatReady]);
 
   const transport = useMemo(
     () => new DefaultChatTransport({
@@ -73,27 +68,28 @@ function ConductorChatBridge({
     [loopId],
   );
 
-  const { messages, sendMessage, status: chatStatus, addToolOutput, setMessages } = useChat({
+  const { messages, sendMessage, status: chatStatus, addToolOutput, setMessages, stop } = useChat({
     transport,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
   });
 
   const chatLoadedRef = useRef(false);
+  const processedToolMetaRef = useRef<Set<string>>(new Set());
 
-  useEffect(() => {
-    onChatReadyRef.current({ sendMessage, addToolOutput });
-  }, [addToolOutput, sendMessage]);
+  const chatApi = useMemo<ConductorChatApi>(
+    () => ({ sendMessage, addToolOutput, stop }),
+    [addToolOutput, sendMessage, stop],
+  );
 
-  useEffect(() => {
-    onMessagesChangeRef.current(messages);
-  }, [messages]);
-
-  useEffect(() => {
-    onStatusChangeRef.current(chatStatus);
-  }, [chatStatus]);
+  const chatContextValue = {
+    messages,
+    chatStatus: chatStatus as ChatStatus,
+    chatApi,
+  };
 
   useEffect(() => {
     chatLoadedRef.current = false;
+    processedToolMetaRef.current = new Set();
 
     if (skipLoopFetch) {
       chatLoadedRef.current = true;
@@ -112,6 +108,7 @@ function ConductorChatBridge({
           missingSlots: Array.isArray(data.missingSlots) ? data.missingSlots : [],
           status: data.loop?.status ?? "draft",
           compiledPlanId: data.buildChat?.compiledPlanId ?? null,
+          eventTrigger: data.eventTrigger ?? null,
         });
         if (Array.isArray(data.chatMessages) && data.chatMessages.length > 0) {
           setMessages(data.chatMessages as UIMessage[]);
@@ -139,7 +136,10 @@ function ConductorChatBridge({
   useEffect(() => {
     for (const message of messages) {
       for (const part of message.parts ?? []) {
+        const metaKey = `${message.id}:${"toolCallId" in part ? String(part.toolCallId) : part.type}`;
         if (part.type === "tool-patchLoopSpec" && part.state === "output-available") {
+          if (processedToolMetaRef.current.has(metaKey)) continue;
+          processedToolMetaRef.current.add(metaKey);
           const output = part.output as { spec?: Record<string, unknown>; missingSlots?: string[] };
           onLoopMetaChangeRef.current({
             spec: output.spec ?? null,
@@ -147,15 +147,26 @@ function ConductorChatBridge({
           });
         }
         if (part.type === "tool-compileLoop" && part.state === "output-available") {
+          if (processedToolMetaRef.current.has(metaKey)) continue;
+          processedToolMetaRef.current.add(metaKey);
           const output = part.output as { ok?: boolean; plan?: { id: string } };
           if (output.ok && output.plan?.id) {
             onLoopMetaChangeRef.current({ compiledPlanId: output.plan.id });
           }
         }
         if (part.type === "tool-activateLoop" && part.state === "output-available") {
-          const output = part.output as { ok?: boolean; status?: string };
+          if (processedToolMetaRef.current.has(metaKey)) continue;
+          processedToolMetaRef.current.add(metaKey);
+          const output = part.output as {
+            ok?: boolean;
+            status?: string;
+            eventTrigger?: LoopEventTriggerStatus;
+          };
           if (output.ok) {
-            onLoopMetaChangeRef.current({ status: output.status ?? "active" });
+            onLoopMetaChangeRef.current({
+              status: output.status ?? "active",
+              eventTrigger: output.eventTrigger ?? null,
+            });
           }
         }
       }
@@ -174,50 +185,71 @@ function ConductorChatBridge({
     return () => window.clearTimeout(timer);
   }, [messages, chatStatus, loopId]);
 
-  return null;
+  return (
+    <ConductorChatProvider value={chatContextValue}>
+      {children}
+    </ConductorChatProvider>
+  );
 }
 
-function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) {
-  const [loopId, setLoopId] = useState<string | null>(initialLoopId ?? null);
-  const [loopName, setLoopName] = useState<string | undefined>();
-  const [spec, setSpec] = useState<Record<string, unknown> | null>(null);
-  const [missingSlots, setMissingSlots] = useState<string[]>([]);
-  const [compiledPlanId, setCompiledPlanId] = useState<string | null>(null);
-  const [status, setStatus] = useState<string>("draft");
-  const [input, setInput] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [pendingUserBubble, setPendingUserBubble] = useState<UIMessage | null>(null);
-  const [chatMessages, setChatMessages] = useState<UIMessage[]>([]);
-  const [chatStatus, setChatStatus] = useState<ChatStatus>("ready");
-  const pendingPromptRef = useRef<string | null>(null);
-  const bootstrapPromptSentRef = useRef(false);
-  const chatApiRef = useRef<{
-    sendMessage: (input: { text: string }) => void;
-    addToolOutput: ReturnType<typeof useChat>["addToolOutput"];
-  } | null>(null);
-  const createdInSessionRef = useRef(false);
+function ConductorBuilderLive({
+  loopId,
+  loopName,
+  spec,
+  missingSlots,
+  compiledPlanId,
+  status,
+  eventTrigger,
+  input,
+  setInput,
+  creating,
+  pendingUserBubble,
+  setPendingUserBubble,
+  pendingPromptRef,
+  bootstrapPromptSentRef,
+  autoConnectorSubmittedRef,
+  createdInSessionRef,
+  onCreateLoop,
+  onRun,
+}: {
+  loopId: string | null;
+  loopName?: string;
+  spec: Record<string, unknown> | null;
+  missingSlots: string[];
+  compiledPlanId: string | null;
+  status: string;
+  eventTrigger: LoopEventTriggerStatus | null;
+  input: string;
+  setInput: (value: string) => void;
+  creating: boolean;
+  pendingUserBubble: UIMessage | null;
+  setPendingUserBubble: (message: UIMessage | null) => void;
+  pendingPromptRef: MutableRefObject<string | null>;
+  bootstrapPromptSentRef: MutableRefObject<boolean>;
+  autoConnectorSubmittedRef: MutableRefObject<string | null>;
+  createdInSessionRef: MutableRefObject<boolean>;
+  onCreateLoop: (text: string) => void | Promise<void>;
+  onRun?: () => void;
+}) {
+  const liveChat = useConductorChat();
+  const messages = liveChat?.messages ?? (pendingUserBubble ? [pendingUserBubble] : []);
+  const chatStatus: ChatStatus = creating
+    ? "submitted"
+    : liveChat?.chatStatus ?? "ready";
+  const chatApi = liveChat?.chatApi ?? null;
 
-  const displayMessages = useMemo(() => {
-    if (chatMessages.length > 0) return chatMessages;
-    if (pendingUserBubble) return [pendingUserBubble];
-    return [];
-  }, [chatMessages, pendingUserBubble]);
-
-  useEffect(() => {
-    if (chatMessages.some((message) => message.role === "user")) {
-      setPendingUserBubble(null);
-    }
-  }, [chatMessages]);
-
-  const pendingQuestion = useMemo(() => findPendingInteractivePrompt(displayMessages), [displayMessages]);
+  const pendingQuestion = useMemo(
+    () => findPendingInteractivePrompt(messages, spec),
+    [messages, spec],
+  );
   const pendingReplyOptions = useMemo(
-    () => findPendingPresentReplyOptions(displayMessages),
-    [displayMessages],
+    () => findPendingPresentReplyOptions(messages),
+    [messages],
   );
 
   const promptSuggestions = useMemo(
     () => deriveConductorPromptSuggestions({
-      messages: displayMessages,
+      messages,
       missingSlots,
       status,
       hasPendingQuestion: Boolean(pendingQuestion),
@@ -228,7 +260,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     [
       creating,
       chatStatus,
-      displayMessages,
+      messages,
       missingSlots,
       pendingQuestion,
       pendingReplyOptions,
@@ -236,12 +268,148 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     ],
   );
 
+  useEffect(() => {
+    if (messages.some((message) => message.role === "user")) {
+      setPendingUserBubble(null);
+    }
+  }, [messages, setPendingUserBubble]);
+
+  useEffect(() => {
+    if (!chatApi || creating) return;
+    if (chatStatus === "streaming" || chatStatus === "submitted") return;
+
+    const target = findAutoConnectorPromptTarget(messages, spec);
+    if (!target) return;
+
+    const key = `${target.toolCallId}:${target.autoConnector}`;
+    if (autoConnectorSubmittedRef.current === key) return;
+    autoConnectorSubmittedRef.current = key;
+
+    void chatApi.addToolOutput({
+      tool: target.toolName,
+      toolCallId: target.toolCallId,
+      output: {
+        questionId: "connector-app",
+        answerText: target.connectorLabel,
+        selectedOptionIds: [target.connectorOptionId],
+        selectedValues: [target.autoConnector],
+      },
+    });
+  }, [autoConnectorSubmittedRef, chatApi, chatStatus, creating, messages, spec]);
+
+  function handleSubmit(text: string) {
+    if (creating) return;
+    if (!loopId) {
+      onCreateLoop(text);
+      return;
+    }
+    chatApi?.sendMessage({ text });
+  }
+
+  function submitAskQuestionAnswer(answer: InteractivePromptAnswer) {
+    if (!pendingQuestion || !chatApi) return;
+    void chatApi.addToolOutput({
+      tool: pendingQuestion.toolName,
+      toolCallId: pendingQuestion.toolCallId,
+      output: {
+        questionId: pendingQuestion.input.questionId,
+        answerText: answer.answerText,
+        selectedOptionIds: answer.selectedOptionIds,
+        selectedValues: answer.selectedValues,
+        ...(answer.otherText ? { otherText: answer.otherText } : {}),
+      },
+    });
+  }
+
+  function dismissAskQuestion() {
+    if (!pendingQuestion || !chatApi) return;
+    void chatApi.addToolOutput({
+      tool: pendingQuestion.toolName,
+      toolCallId: pendingQuestion.toolCallId,
+      output: {
+        questionId: pendingQuestion.input.questionId,
+        answerText: "skipped",
+        selectedOptionIds: [],
+        selectedValues: [],
+        skipped: true,
+      },
+    });
+  }
+
+  function handlePromptSuggestionSelect(suggestion: ConductorPromptSuggestion) {
+    if (creating || chatStatus === "streaming" || chatStatus === "submitted") return;
+
+    if (pendingReplyOptions && chatApi) {
+      void chatApi.addToolOutput({
+        tool: "presentReplyOptions",
+        toolCallId: pendingReplyOptions.toolCallId,
+        output: {
+          selectedOptionId: suggestion.id,
+          message: suggestion.message,
+        },
+      });
+      return;
+    }
+
+    if (!loopId) {
+      onCreateLoop(suggestion.message);
+      return;
+    }
+    chatApi?.sendMessage({ text: suggestion.message });
+  }
+
+  return (
+    <ConductorBuilderLayout
+      loopId={loopId ?? undefined}
+      loopName={loopName}
+      messages={messages}
+      chatStatus={chatStatus}
+      input={input}
+      setInput={setInput}
+      onSubmit={handleSubmit}
+      onStop={() => chatApi?.stop()}
+      pendingQuestion={pendingQuestion}
+      pendingReplyOptionsCallId={pendingReplyOptions?.toolCallId ?? null}
+      promptSuggestions={promptSuggestions}
+      onAskQuestionAnswer={submitAskQuestionAnswer}
+      onAskQuestionDismiss={dismissAskQuestion}
+      onPromptSuggestionSelect={handlePromptSuggestionSelect}
+      spec={spec}
+      missingSlots={missingSlots}
+      status={status}
+      compiledPlanId={compiledPlanId}
+      eventTrigger={eventTrigger}
+      onRun={onRun}
+      thinkingLabel={creating ? "Creating loop…" : "Thinking…"}
+      forceThinking={creating}
+      composerDisabled={creating}
+    />
+  );
+}
+
+function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) {
+  const [loopId, setLoopId] = useState<string | null>(initialLoopId ?? null);
+  const [loopName, setLoopName] = useState<string | undefined>();
+  const [spec, setSpec] = useState<Record<string, unknown> | null>(null);
+  const [missingSlots, setMissingSlots] = useState<string[]>([]);
+  const [compiledPlanId, setCompiledPlanId] = useState<string | null>(null);
+  const [status, setStatus] = useState<string>("draft");
+  const [eventTrigger, setEventTrigger] = useState<LoopEventTriggerStatus | null>(null);
+  const [input, setInput] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [pendingUserBubble, setPendingUserBubble] = useState<UIMessage | null>(null);
+  const pendingPromptRef = useRef<string | null>(null);
+  const bootstrapPromptSentRef = useRef(false);
+  const autoConnectorSubmittedRef = useRef<string | null>(null);
+  const createdInSessionRef = useRef(false);
+
   const handleLoopMetaChange = useCallback((meta: {
     loopName?: string;
     spec?: Record<string, unknown> | null;
     missingSlots?: string[];
     status?: string;
     compiledPlanId?: string | null;
+    eventTrigger?: LoopEventTriggerStatus | null;
   }) => {
     if (meta.loopName !== undefined) setLoopName(meta.loopName);
     if (meta.spec !== undefined) {
@@ -264,13 +432,14 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     if (meta.compiledPlanId !== undefined) {
       setCompiledPlanId((prev) => (prev === meta.compiledPlanId ? prev : meta.compiledPlanId ?? null));
     }
-  }, []);
-
-  const handleChatReady = useCallback((api: {
-    sendMessage: (input: { text: string }) => void;
-    addToolOutput: ReturnType<typeof useChat>["addToolOutput"];
-  }) => {
-    chatApiRef.current = api;
+    if (meta.eventTrigger !== undefined) {
+      setEventTrigger((prev) => {
+        const next = meta.eventTrigger ?? null;
+        if (prev === next) return prev;
+        if (prev && next && JSON.stringify(prev) === JSON.stringify(next)) return prev;
+        return next;
+      });
+    }
   }, []);
 
   async function createLoopFromPrompt(text: string) {
@@ -303,67 +472,6 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     }
   }
 
-  function handleSubmit(text: string) {
-    if (creating) return;
-    if (!loopId) {
-      void createLoopFromPrompt(text);
-      return;
-    }
-    chatApiRef.current?.sendMessage({ text });
-  }
-
-  function submitAskQuestionAnswer(answer: InteractivePromptAnswer) {
-    if (!pendingQuestion || !chatApiRef.current) return;
-    void chatApiRef.current.addToolOutput({
-      tool: pendingQuestion.toolName,
-      toolCallId: pendingQuestion.toolCallId,
-      output: {
-        questionId: pendingQuestion.input.questionId,
-        answerText: answer.answerText,
-        selectedOptionIds: answer.selectedOptionIds,
-        selectedValues: answer.selectedValues,
-        ...(answer.otherText ? { otherText: answer.otherText } : {}),
-      },
-    });
-  }
-
-  function dismissAskQuestion() {
-    if (!pendingQuestion || !chatApiRef.current) return;
-    void chatApiRef.current.addToolOutput({
-      tool: pendingQuestion.toolName,
-      toolCallId: pendingQuestion.toolCallId,
-      output: {
-        questionId: pendingQuestion.input.questionId,
-        answerText: "skipped",
-        selectedOptionIds: [],
-        selectedValues: [],
-        skipped: true,
-      },
-    });
-  }
-
-  function handlePromptSuggestionSelect(suggestion: ConductorPromptSuggestion) {
-    if (creating || chatStatus === "streaming" || chatStatus === "submitted") return;
-
-    if (pendingReplyOptions && chatApiRef.current) {
-      void chatApiRef.current.addToolOutput({
-        tool: "presentReplyOptions",
-        toolCallId: pendingReplyOptions.toolCallId,
-        output: {
-          selectedOptionId: suggestion.id,
-          message: suggestion.message,
-        },
-      });
-      return;
-    }
-
-    if (!loopId) {
-      void createLoopFromPrompt(suggestion.message);
-      return;
-    }
-    chatApiRef.current?.sendMessage({ text: suggestion.message });
-  }
-
   async function handleRun() {
     if (!loopId) return;
     const res = await apiFetch(`/api/loops/${loopId}/runs`, { method: "POST" });
@@ -374,50 +482,41 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     }
   }
 
-  const effectiveChatStatus: ChatStatus = creating
-    ? "submitted"
-    : loopId
-      ? chatStatus
-      : "ready";
+  const liveProps = {
+    loopId,
+    loopName,
+    spec,
+    missingSlots,
+    compiledPlanId,
+    status,
+    eventTrigger,
+    input,
+    setInput,
+    creating,
+    pendingUserBubble,
+    setPendingUserBubble,
+    pendingPromptRef,
+    bootstrapPromptSentRef,
+    autoConnectorSubmittedRef,
+    createdInSessionRef,
+    onCreateLoop: createLoopFromPrompt,
+    onRun: loopId ? () => void handleRun() : undefined,
+  };
+
+  const live = <ConductorBuilderLive {...liveProps} />;
+
+  if (!loopId) return live;
 
   return (
-    <>
-      {loopId ? (
-        <ConductorChatBridge
-          loopId={loopId}
-          pendingPrompt={pendingPromptRef.current}
-          skipLoopFetch={createdInSessionRef.current}
-          bootstrapPromptSentRef={bootstrapPromptSentRef}
-          onMessagesChange={setChatMessages}
-          onStatusChange={setChatStatus}
-          onLoopMetaChange={handleLoopMetaChange}
-          onChatReady={handleChatReady}
-        />
-      ) : null}
-      <ConductorBuilderLayout
-        loopId={loopId ?? undefined}
-        loopName={loopName}
-        messages={displayMessages}
-        chatStatus={effectiveChatStatus}
-        input={input}
-        setInput={setInput}
-        onSubmit={handleSubmit}
-        pendingQuestion={pendingQuestion}
-        pendingReplyOptionsCallId={pendingReplyOptions?.toolCallId ?? null}
-        promptSuggestions={promptSuggestions}
-        onAskQuestionAnswer={submitAskQuestionAnswer}
-        onAskQuestionDismiss={dismissAskQuestion}
-        onPromptSuggestionSelect={handlePromptSuggestionSelect}
-        spec={spec}
-        missingSlots={missingSlots}
-        status={status}
-        compiledPlanId={compiledPlanId}
-        onRun={loopId ? () => void handleRun() : undefined}
-        thinkingLabel={creating ? "Creating loop…" : "Thinking…"}
-        forceThinking={creating}
-        composerDisabled={creating}
-      />
-    </>
+    <ConductorChatBridge
+      loopId={loopId}
+      pendingPrompt={pendingPromptRef.current}
+      skipLoopFetch={createdInSessionRef.current}
+      bootstrapPromptSentRef={bootstrapPromptSentRef}
+      onLoopMetaChange={handleLoopMetaChange}
+    >
+      {live}
+    </ConductorChatBridge>
   );
 }
 

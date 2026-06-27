@@ -12,6 +12,7 @@ import {
   type CompiledPlan,
   type PlannerDecision,
 } from "./spec.js";
+import { assertAgenticCompiledPlan } from "./plan-validators.js";
 import { validateToolArgsAgainstSchema } from "./tool-schema.js";
 import { createLoopRun, getCompiledPlan, updateLoopRun } from "./store.js";
 
@@ -48,7 +49,8 @@ const DEFAULT_MAX_STEPS = 2;
 /** Wall-clock budget for the full simulated test (all planner LLM calls). */
 export function resolveTestRunTimeoutMs(maxSteps: number, overrideMs?: number): number {
   if (overrideMs != null && overrideMs > 0) return overrideMs;
-  return Math.max(config.loopTestRunTimeoutMs, config.plannerRequestTimeoutMs * maxSteps + 5_000);
+  const perStep = config.plannerRequestTimeoutMs > 0 ? config.plannerRequestTimeoutMs : 300_000;
+  return Math.max(config.loopTestRunTimeoutMs, perStep * maxSteps + 30_000);
 }
 
 function mapToolCatalog(plan: CompiledPlan) {
@@ -57,7 +59,7 @@ function mapToolCatalog(plan: CompiledPlan) {
     capability: tool.capability,
     connector: tool.connector,
     actionSlug: tool.actionSlug,
-    inputSchema: tool.inputSchema,
+    plannerCard: tool.plannerCard,
   }));
 }
 
@@ -103,6 +105,19 @@ function runStructuralProfileCheck(plan: CompiledPlan): TestRunResult | null {
       };
     }
     return null;
+  }
+
+  try {
+    assertAgenticCompiledPlan(plan);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "compiled_plan_invalid";
+    return {
+      ok: false,
+      runId: "",
+      status: "failed",
+      error: message,
+      steps: [{ kind: "error", code: "COMPILED_PLAN_INVALID", message }],
+    };
   }
 
   return null;
@@ -166,10 +181,14 @@ async function runAgenticTestLoop(input: {
 
   for (let stepIndex = 0; stepIndex < input.maxSteps; stepIndex += 1) {
     const prompt = buildTestRunPlannerPrompt({
+      planOutcome: input.plan.intent.outcome,
       planGoal: input.plan.intent.goal,
+      agentInstructions: input.plan.agent?.instructions,
+      successCriteria: input.plan.intent.successCriteria,
       scenario: input.scenario,
       toolCatalog: mapToolCatalog(input.plan),
       stepHistory: toolResults,
+      connectorPlaybook: input.plan.connectorPlaybook,
     });
 
     const decision = await runPlannerDecision(prompt, {
@@ -265,10 +284,9 @@ export async function executeLoopTestRun(
   const plan = compiledPlanSchema.parse(planRow);
   const maxSteps = input.maxSteps ?? config.loopTestRunMaxSteps ?? DEFAULT_MAX_STEPS;
   const timeoutMs = resolveTestRunTimeoutMs(maxSteps, input.timeoutMs);
-  const plannerTimeoutMs = Math.min(
-    60_000,
-    Math.max(25_000, Math.floor(timeoutMs / Math.max(1, maxSteps))),
-  );
+  const plannerTimeoutMs = config.plannerRequestTimeoutMs > 0
+    ? config.plannerRequestTimeoutMs
+    : 0;
 
   const structuralFailure = runStructuralProfileCheck(plan);
   if (structuralFailure && !structuralFailure.ok) {

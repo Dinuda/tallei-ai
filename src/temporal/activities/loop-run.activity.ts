@@ -1,8 +1,9 @@
 import type { AuthContext } from "../../domain/auth/index.js";
+import { pollApprovalDecision, runAgenticLoop } from "../../loops/agentic-run.js";
 import { buildMonitorAlertMessage, evaluateMonitorRule } from "../../loops/monitor.js";
 import { getCompiledPlan, createLoopRun, getLoopRunById, updateLoopRun } from "../../loops/store.js";
 import { compiledPlanSchema } from "../../loops/spec.js";
-import type { LoopRunWorkflowInput } from "../types.js";
+import type { LoopRunResult, LoopRunWorkflowInput } from "../types.js";
 import { plannerActivity } from "./planner.js";
 import { executeToolActivity } from "./execute-tool.js";
 import {
@@ -43,6 +44,28 @@ export async function createRunRecordActivity(input: LoopRunWorkflowInput & { te
   });
 }
 
+function buildAgenticRunDeps(auth: AuthContext) {
+  return {
+    planner: plannerActivity,
+    executeTool: (toolInput: Parameters<typeof executeToolActivity>[0]) => executeToolActivity(toolInput),
+    deliverOutput: (outputInput: Parameters<typeof deliverOutputActivity>[0]) => deliverOutputActivity(outputInput),
+    failRun: failRunActivity,
+    createApproval: createApprovalRequestActivity,
+    resolveApprovalExpired: resolveApprovalExpiredActivity,
+    waitForApproval: pollApprovalDecision,
+  };
+}
+
+export async function runAgenticLoopActivity(
+  input: LoopRunWorkflowInput & { temporalWorkflowId?: string },
+): Promise<LoopRunResult> {
+  const plan = await loadCompiledPlanActivity(input.compiledPlanId);
+  const auth = toAuth(input);
+  return runAgenticLoop(input, plan, auth, buildAgenticRunDeps(auth), {
+    temporalWorkflowId: input.temporalWorkflowId,
+  });
+}
+
 export async function executeLoopRunHeadless(input: LoopRunWorkflowInput): Promise<void> {
   const plan = await loadCompiledPlanActivity(input.compiledPlanId);
   const auth = toAuth(input);
@@ -56,43 +79,7 @@ export async function executeLoopRunHeadless(input: LoopRunWorkflowInput): Promi
     return;
   }
 
-  const maxSteps = plan.agent?.maxSteps ?? 12;
-  const state = {
-    stepIndex: 0,
-    messages: [] as Array<{ role: string; content: string }>,
-    toolResults: [] as Array<{ toolId: string; result: unknown }>,
-    totalCostUsd: 0,
-    status: "running" as const,
-  };
-
-  for (; state.stepIndex < maxSteps; state.stepIndex += 1) {
-    const decision = await plannerActivity({ auth, plan, runId: input.runId, state });
-    if (decision.kind === "finish") {
-      await deliverOutputActivity({
-        auth,
-        plan,
-        runId: input.runId,
-        loopId: input.loopId,
-        state,
-        summary: decision.summary,
-      });
-      return;
-    }
-    const tool = plan.toolCatalog.find((t) => t.id === decision.toolId);
-    if (!tool) {
-      await failRunActivity({ runId: input.runId, error: `Unknown tool: ${decision.toolId}` });
-      return;
-    }
-    const result = await executeToolActivity({
-      auth,
-      runId: input.runId,
-      stepIndex: state.stepIndex,
-      tool,
-      args: decision.args,
-    });
-    state.toolResults.push({ toolId: tool.id, result });
-  }
-  await failRunActivity({ runId: input.runId, error: "max_steps_exceeded" });
+  await runAgenticLoop(input, plan, auth, buildAgenticRunDeps(auth));
 }
 
 async function fetchMonitorSample(

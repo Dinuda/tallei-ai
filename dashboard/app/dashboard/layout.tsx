@@ -246,6 +246,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     };
   }, [mobileOpen]);
 
+  const isConductorRoute =
+    pathname === "/dashboard/loops/new"
+    || /\/dashboard\/loops\/[^/]+\/conductor$/.test(pathname);
   const initials = getInitials(session?.user?.name, session?.user?.email);
   const sessionPlan = session?.user?.plan ?? "free";
   const isFreePlan = sessionPlan === "free";
@@ -279,7 +282,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <Link href="/dashboard" className="flex shrink-0 items-center">
               <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
-            {pathname === "/dashboard/loops/new" ? (
+            {isConductorRoute ? (
               <Suspense fallback={
                 <div className="ml-4 hidden min-w-0 flex-1 items-center gap-4 border-l border-slate-200 pl-6 md:flex">
                   <div>
@@ -378,7 +381,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <NavSectionContent pathname={pathname} onNavigate={() => setMobileOpen(false)} />
       </aside>
 
-      <main id="main-content" className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
+      <main id="main-content" className={cn("min-h-screen min-w-0 pt-14 md:ml-[248px]", isConductorRoute ? "bg-white" : "bg-[#f4f4f4]")}>
         <div className="mx-auto w-full">
           <DashboardUpdateBanner />
           {children}

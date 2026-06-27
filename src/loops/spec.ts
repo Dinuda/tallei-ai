@@ -13,7 +13,13 @@ export const triggerSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("event"),
     source: z.string().min(1),
-    composioSlug: z.string().default(""),
+    composioSlug: z
+      .string()
+      .default("")
+      .refine(
+        (slug) => !slug.trim() || /^[A-Z][A-Z0-9_]+$/.test(slug.trim()),
+        "composioSlug must be an uppercase Composio trigger slug (e.g. GMAIL_NEW_GMAIL_MESSAGE), not the connector name",
+      ),
     eventType: z.string().optional(),
   }),
 ]);
@@ -189,12 +195,46 @@ export const plannerDecisionSchema = z.discriminatedUnion("kind", [
 ]);
 export type PlannerDecision = z.infer<typeof plannerDecisionSchema>;
 
+export const toolArgGuideSchema = z.object({
+  description: z.string().optional(),
+  examples: z.array(z.string()).optional(),
+  constraints: z.string().optional(),
+});
+
+export const toolOutputSummarySchema = z.object({
+  fields: z.array(z.string()).default([]),
+  notes: z.array(z.string()).optional(),
+});
+
+export const toolPlannerCardSchema = z.object({
+  summary: z.string().min(1),
+  whenToUse: z.string().optional(),
+  whenNotToUse: z.string().optional(),
+  argGuides: z.record(toolArgGuideSchema).default({}),
+  outputSummary: toolOutputSummarySchema.optional(),
+  antiPatterns: z.array(z.string()).optional(),
+  relatedActionSlugs: z.array(z.string()).optional(),
+});
+export type ToolPlannerCard = z.infer<typeof toolPlannerCardSchema>;
+
+export const connectorPlaybookSchema = z.object({
+  composioSessionId: z.string().optional(),
+  compiledAt: z.string().min(1),
+  useCase: z.string().min(1),
+  workflowSteps: z.array(z.string()).optional(),
+  pitfalls: z.array(z.string()).optional(),
+  toolkitVersions: z.record(z.string()).optional(),
+});
+export type ConnectorPlaybook = z.infer<typeof connectorPlaybookSchema>;
+
 export const resolvedToolSchema = z.object({
   id: z.string().min(1),
   capability: z.string().min(1),
   connector: z.string().min(1),
   actionSlug: z.string().min(1),
   inputSchema: z.record(z.unknown()).default({}),
+  outputSchema: z.record(z.unknown()).optional(),
+  plannerCard: toolPlannerCardSchema,
   sensitive: z.boolean().default(false),
   credentialRef: z.string().min(1),
   toolkitVersion: z.string().min(1).optional(),
@@ -212,6 +252,7 @@ export const compiledPlanSchema = z.object({
   intent: intentSchema,
   trigger: triggerSchema,
   toolCatalog: z.array(resolvedToolSchema),
+  connectorPlaybook: connectorPlaybookSchema,
   agent: agentConfigSchema.optional(),
   monitor: monitorConfigSchema.optional(),
   sync: syncConfigSchema.optional(),
@@ -222,6 +263,10 @@ export const compiledPlanSchema = z.object({
   status: z.enum(["draft", "active", "superseded"]).default("draft"),
 });
 export type CompiledPlan = z.infer<typeof compiledPlanSchema>;
+
+export function parseCompiledPlan(raw: unknown): CompiledPlan {
+  return compiledPlanSchema.parse(raw);
+}
 
 export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopSpec>): LoopSpec {
   return loopSpecSchema.parse({

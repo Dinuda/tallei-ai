@@ -1,6 +1,7 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { authorizeToolkitForUser, normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
 import { composioRequest, isComposioConfigured } from "./client.js";
+import { listComposioTriggerTypes, type ComposioTriggerTypeRow } from "./triggers.js";
 import { listToolkits } from "./tools.js";
 import {
   clearSessionCache,
@@ -101,6 +102,83 @@ export async function listAllToolkitsWithStatus(auth: AuthContext): Promise<{
   });
 
   return { toolkits, total: toolkits.length };
+}
+
+async function fetchToolkitMetadata(slug: string): Promise<{
+  name: string;
+  description: string;
+  logo: string;
+  category?: string;
+}> {
+  type ToolkitRow = {
+    slug?: string;
+    name?: string;
+    meta?: { description?: string; logo?: string };
+    description?: string;
+    logo?: string;
+    category?: string;
+  };
+
+  const paths = [
+    `/api/v3.1/toolkits/${encodeURIComponent(slug)}`,
+    `/api/v3/toolkits/${encodeURIComponent(slug)}`,
+  ];
+  for (const path of paths) {
+    try {
+      const data = await composioRequest<ToolkitRow>({ path });
+      return {
+        name: String(data.name ?? slug),
+        description: String(data.meta?.description ?? data.description ?? ""),
+        logo: String(data.meta?.logo ?? data.logo ?? ""),
+        ...(data.category ? { category: data.category } : {}),
+      };
+    } catch {
+      // try next path
+    }
+  }
+
+  const catalog = await listToolkits();
+  const match = catalog.find((row) => normalizeToolkitSlug(row.slug) === normalizeToolkitSlug(slug));
+  if (match) {
+    return {
+      name: match.name,
+      description: match.description,
+      logo: match.logo,
+      ...(match.category ? { category: match.category } : {}),
+    };
+  }
+
+  return { name: slug, description: "", logo: "" };
+}
+
+/** Scoped catalogue lookup — one toolkit (+ optional triggers) without loading the full catalogue. */
+export async function getToolkitCatalogEntry(
+  auth: AuthContext,
+  toolkit: string,
+  options?: { includeTriggers?: boolean },
+): Promise<{ toolkit: CatalogToolkitView; triggers?: ComposioTriggerTypeRow[] }> {
+  if (!isComposioConfigured()) {
+    throw new Error("Composio is not configured");
+  }
+
+  const slug = await resolveToolkitSlug(toolkit);
+  const [connection, metadata] = await Promise.all([
+    getToolkitConnectionStatus(auth, slug),
+    fetchToolkitMetadata(slug),
+  ]);
+
+  const entry: CatalogToolkitView = {
+    slug,
+    name: metadata.name,
+    description: metadata.description,
+    logo: metadata.logo,
+    ...(metadata.category ? { category: metadata.category } : {}),
+    connected: connection.connected,
+    ...(connection.connectedAccountId ? { connectedAccountId: connection.connectedAccountId } : {}),
+  };
+
+  const triggers = options?.includeTriggers ? await listComposioTriggerTypes(slug) : undefined;
+  return { toolkit: entry, ...(triggers ? { triggers } : {}) };
 }
 
 export async function getToolkitConnectionStatus(

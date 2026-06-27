@@ -87,7 +87,17 @@ export async function resumeLoopSchedule(loopId: string): Promise<void> {
   await client.schedule.getHandle(loopScheduleId(loopId)).unpause();
 }
 
+function isScheduleNotFoundError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /not found/i.test(error.message);
+}
+
 export async function deleteLoopSchedule(loopId: string): Promise<void> {
   const client = await getTemporalClient();
-  await client.schedule.getHandle(loopScheduleId(loopId)).delete();
+  try {
+    await client.schedule.getHandle(loopScheduleId(loopId)).delete();
+  } catch (error) {
+    if (isScheduleNotFoundError(error)) return;
+    throw error;
+  }
 }

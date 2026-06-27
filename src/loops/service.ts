@@ -56,16 +56,25 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
   const plan = await getCompiledPlan(compiledPlanId);
   if (!plan || plan.loopId !== loopId) throw new Error("Compiled plan not found");
   const ctx = await resolveLoopAuthWorkspace(auth, loop.workspaceId);
-  await activateCompiledPlan(ctx, loopId, compiledPlanId);
 
-  if (plan.trigger.kind === "event") {
-    await registerLoopEventTrigger({
-      auth: ctx,
-      loopId,
-      workspaceId: loop.workspaceId,
-      source: plan.trigger.source,
-      composioSlug: plan.trigger.composioSlug,
-    });
+  try {
+    if (plan.trigger.kind === "event") {
+      await registerLoopEventTrigger({
+        auth: ctx,
+        loopId,
+        workspaceId: loop.workspaceId,
+        source: plan.trigger.source,
+        composioSlug: plan.trigger.composioSlug,
+        eventType: plan.trigger.eventType,
+      });
+    }
+
+    await activateCompiledPlan(ctx, loopId, compiledPlanId);
+  } catch (error) {
+    if (plan.trigger.kind === "event") {
+      await unregisterLoopEventTrigger(loopId).catch(() => undefined);
+    }
+    throw error;
   }
 
   if (config.temporalEnabled) {
@@ -79,7 +88,18 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
       userId: ctx.userId,
     });
   }
-  return { loopId, activePlanId: compiledPlanId, status: "active" };
+
+  const { getLoopEventTriggerStatus } = await import("./store.js");
+  const eventTrigger = plan.trigger.kind === "event"
+    ? await getLoopEventTriggerStatus(loopId)
+    : null;
+
+  return {
+    loopId,
+    activePlanId: compiledPlanId,
+    status: "active" as const,
+    ...(eventTrigger ? { eventTrigger } : {}),
+  };
 }
 
 export async function pauseLoop(auth: AuthContext, loopId: string) {
@@ -106,6 +126,7 @@ export async function resumeLoop(auth: AuthContext, loopId: string) {
       workspaceId: loop.workspaceId,
       source: plan.trigger.source,
       composioSlug: plan.trigger.composioSlug,
+      eventType: plan.trigger.eventType,
     });
   }
 
@@ -122,7 +143,17 @@ export async function resumeLoop(auth: AuthContext, loopId: string) {
   }
 
   await setLoopStatus(auth, loopId, "active");
-  return { loopId, status: "active" as const };
+
+  const { getLoopEventTriggerStatus } = await import("./store.js");
+  const eventTrigger = plan.trigger.kind === "event"
+    ? await getLoopEventTriggerStatus(loopId)
+    : null;
+
+  return {
+    loopId,
+    status: "active" as const,
+    ...(eventTrigger ? { eventTrigger } : {}),
+  };
 }
 
 export async function triggerManualRun(auth: AuthContext, loopId: string) {

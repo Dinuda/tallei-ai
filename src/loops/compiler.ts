@@ -2,6 +2,12 @@ import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../domain/auth/index.js";
 import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/composio/auth.js";
+import {
+  buildPlannerCardForTool,
+  fetchConnectorPlaybook,
+  isEmailGetActionSlug,
+  PlaybookFetchError,
+} from "../integrations/composio/playbook.js";
 import { listToolkitsForUser } from "../integrations/composio/session.js";
 import { resolveBindingAction, alignCapabilityWithAction, looksLikeComposioActionSlug } from "./binding-discovery.js";
 import {
@@ -17,7 +23,76 @@ import {
   hashPlan,
   saveCompiledPlan,
 } from "./store.js";
+import { validateAgenticCompileArtifacts } from "./plan-validators.js";
+import { validateEventTriggerForCompile } from "./event-trigger.js";
 import { scoreSchemaFitForCapability, semanticCapabilityForAction, summarizeInputSchema } from "./tool-schema.js";
+
+const MAX_AUTO_EXPAND_TOOLS = 2;
+
+function attachPlaybookToCatalog(
+  toolCatalog: Array<Omit<ResolvedTool, "plannerCard"> & { plannerCard?: ResolvedTool["plannerCard"] }>,
+  playbookResult: Awaited<ReturnType<typeof fetchConnectorPlaybook>>,
+): void {
+  for (let i = 0; i < toolCatalog.length; i++) {
+    const tool = toolCatalog[i]!;
+    const entry = playbookResult.toolsBySlug.get(tool.actionSlug.toUpperCase());
+    toolCatalog[i] = {
+      ...tool,
+      plannerCard: buildPlannerCardForTool(tool, entry, playbookResult.playbook),
+      ...(entry?.outputSchema ? { outputSchema: entry.outputSchema } : {}),
+    };
+  }
+}
+
+async function autoExpandRelatedTools(
+  parsed: LoopSpec,
+  toolCatalog: Array<Omit<ResolvedTool, "plannerCard"> & { plannerCard?: ResolvedTool["plannerCard"] }>,
+  connectedBySlug: Map<string, { connectedAccountId?: string }>,
+  playbookResult: Awaited<ReturnType<typeof fetchConnectorPlaybook>>,
+): Promise<void> {
+  const hasEmailRead = toolCatalog.some((t) => t.capability === "email.read");
+  if (!hasEmailRead) return;
+
+  let autoAdded = 0;
+  for (const relatedSlug of playbookResult.relatedSlugs) {
+    if (autoAdded >= MAX_AUTO_EXPAND_TOOLS) break;
+    if (!isEmailGetActionSlug(relatedSlug)) continue;
+    if (toolCatalog.some((t) => t.actionSlug.toUpperCase() === relatedSlug.toUpperCase())) continue;
+
+    const parent = toolCatalog.find((t) => t.capability === "email.read");
+    if (!parent) continue;
+
+    const toolkit = connectedBySlug.get(normalizeToolkitSlug(parent.connector));
+    if (!toolkit?.connectedAccountId) continue;
+
+    const entry = playbookResult.toolsBySlug.get(relatedSlug.toUpperCase());
+    const resolved = await resolveBindingAction(parent.connector, "email.get");
+    const actionSlug = resolved?.actionSlug ?? relatedSlug;
+    if (toolCatalog.some((t) => t.actionSlug.toUpperCase() === actionSlug.toUpperCase())) continue;
+
+    const inputSchema = entry?.inputSchema ?? resolved?.inputSchema ?? {};
+    const capability = semanticCapabilityForAction(actionSlug, inputSchema, "email");
+    const sensitive = parsed.approval.sensitiveCapabilities.includes(capability);
+
+    toolCatalog.push({
+      id: `tool_${capability.replace(/\./g, "_")}`,
+      capability,
+      connector: parent.connector,
+      actionSlug,
+      inputSchema,
+      ...(entry?.outputSchema ? { outputSchema: entry.outputSchema } : {}),
+      plannerCard: buildPlannerCardForTool(
+        { actionSlug, capability, inputSchema, outputSchema: entry?.outputSchema },
+        entry,
+        playbookResult.playbook,
+      ),
+      sensitive,
+      credentialRef: toolkit.connectedAccountId,
+      ...(resolved?.toolkitVersion ? { toolkitVersion: resolved.toolkitVersion } : {}),
+    });
+    autoAdded++;
+  }
+}
 
 export type CompileError = {
   code: string;
@@ -72,13 +147,32 @@ export async function compileLoopSpec(
         message: "Event triggers require composioSlug from the connector catalogue",
         binding: "trigger.composioSlug",
       });
+    } else if (parsed.trigger.source.trim()) {
+      try {
+        const validated = await validateEventTriggerForCompile(
+          parsed.trigger.source,
+          parsed.trigger.composioSlug,
+        );
+        parsed = {
+          ...parsed,
+          trigger: { ...parsed.trigger, composioSlug: validated },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push({
+          code: "INVALID_TRIGGER_SLUG",
+          message,
+          binding: "trigger.composioSlug",
+        });
+      }
     }
   }
 
   const { toolkits } = await listToolkitsForUser(auth, { isConnected: true, limit: 50 });
   const connectedBySlug = new Map(toolkits.map((t) => [normalizeToolkitSlug(t.slug), t]));
 
-  const toolCatalog: ResolvedTool[] = [];
+  type ToolCatalogDraft = Omit<ResolvedTool, "plannerCard"> & { plannerCard?: ResolvedTool["plannerCard"] };
+  const toolCatalog: ToolCatalogDraft[] = [];
   for (const binding of parsed.bindings) {
     const resolvedConnector = await resolveToolkitSlug(binding.connector);
     const toolkit = connectedBySlug.get(normalizeToolkitSlug(resolvedConnector));
@@ -148,6 +242,33 @@ export async function compileLoopSpec(
 
   if (errors.length > 0) return { errors };
 
+  const connectedAccounts: Record<string, string> = {};
+  for (const [slug, toolkit] of connectedBySlug) {
+    if (toolkit.connectedAccountId) connectedAccounts[slug] = toolkit.connectedAccountId;
+  }
+
+  let playbookResult: Awaited<ReturnType<typeof fetchConnectorPlaybook>>;
+  try {
+    playbookResult = await fetchConnectorPlaybook(auth, {
+      intent: parsed.intent,
+      bindings: parsed.bindings,
+      connectedAccounts,
+      boundActionSlugs: toolCatalog.map((t) => t.actionSlug),
+    });
+  } catch (error) {
+    const code = error instanceof PlaybookFetchError ? error.code : "PLAYBOOK_FETCH_FAILED";
+    const message = error instanceof Error ? error.message : "Playbook fetch failed";
+    return { errors: [{ code, message }] };
+  }
+
+  attachPlaybookToCatalog(toolCatalog, playbookResult);
+  await autoExpandRelatedTools(parsed, toolCatalog, connectedBySlug, playbookResult);
+
+  errors.push(...validateAgenticCompileArtifacts(parsed.profile, toolCatalog, playbookResult.playbook));
+  if (errors.length > 0) return { errors };
+
+  const resolvedCatalog = toolCatalog as ResolvedTool[];
+
   const specRevision = await getLatestSpecRevision(loopId);
   const revision = await getNextPlanRevision(loopId);
   const compiledAt = new Date().toISOString();
@@ -161,7 +282,8 @@ export async function compileLoopSpec(
     profile: parsed.profile,
     intent: parsed.intent,
     trigger: parsed.trigger,
-    toolCatalog,
+    toolCatalog: resolvedCatalog,
+    connectorPlaybook: playbookResult.playbook,
     agent: parsed.agent,
     monitor: parsed.monitor,
     sync: parsed.sync,

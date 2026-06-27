@@ -4,7 +4,10 @@ import type { DynamicToolUIPart, ReasoningUIPart } from "ai";
 import { MessageCircleQuestion } from "lucide-react";
 import { useState } from "react";
 
-import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+import { CollapsibleContent } from "@/components/ui/collapsible";
+import { Reasoning, ReasoningTrigger, reasoningStreamdownPlugins } from "@/components/ai-elements/reasoning";
+import { ConductorReasoningStream, CONDUCTOR_REASONING_COLLAPSE_MS } from "@/components/conductor/conductor-reasoning-stream";
+import { Streamdown } from "streamdown";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { BuilderConnectToolkitCard } from "@/components/conductor/builder-connect-toolkit-card";
@@ -29,6 +32,18 @@ import type {
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
 
+const LIVE_REASONING_CHAR_WINDOW = 900;
+
+function liveReasoningText(text: string, isStreaming: boolean): string {
+  if (!isStreaming || text.length <= LIVE_REASONING_CHAR_WINDOW) return text;
+  const sliceAt = text.length - LIVE_REASONING_CHAR_WINDOW;
+  const lineBreak = text.lastIndexOf("\n", text.length - 1);
+  const softBreak = text.lastIndexOf("\n", sliceAt);
+  if (softBreak > sliceAt) return text.slice(softBreak + 1);
+  if (lineBreak > sliceAt) return text.slice(lineBreak + 1);
+  return text.slice(sliceAt);
+}
+
 export function ConductorReasoningPart({
   part,
   isMessageStreaming,
@@ -37,10 +52,29 @@ export function ConductorReasoningPart({
   isMessageStreaming: boolean;
 }) {
   const isStreaming = part.state === "streaming" || (isMessageStreaming && part.state !== "done");
+  const text = part.text;
+  const liveText = liveReasoningText(text, isStreaming);
+
   return (
-    <Reasoning className="mb-2" isStreaming={isStreaming}>
+    <Reasoning
+      autoCloseDelay={CONDUCTOR_REASONING_COLLAPSE_MS + 180}
+      className="mb-2"
+      isStreaming={isStreaming}
+    >
       <ReasoningTrigger />
-      <ReasoningContent>{part.text}</ReasoningContent>
+      <CollapsibleContent className="conductor-reasoning-collapsible mt-2 text-sm outline-none">
+        <ConductorReasoningStream isStreaming={isStreaming} textLength={text.length}>
+          {isStreaming ? (
+            <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
+              {liveText}
+            </p>
+          ) : (
+            <div className="text-muted-foreground">
+              <Streamdown plugins={reasoningStreamdownPlugins}>{text}</Streamdown>
+            </div>
+          )}
+        </ConductorReasoningStream>
+      </CollapsibleContent>
     </Reasoning>
   );
 }
@@ -140,9 +174,7 @@ export function ConductorToolPart({
         ? "Workspace connectors"
         : toolName === "listConnectorCatalog"
           ? "Connector catalogue"
-          : toolName === "decomposeTask"
-            ? "Decompose task"
-            : toolName === "discoverConnectorsForBlueprint"
+          : toolName === "discoverConnectorsForBlueprint"
               ? "Discover connectors"
               : toolName === "pickConnectorApp"
                 ? "Pick connector app"
