@@ -118,6 +118,33 @@
   --tag-amber-text: #92400e;
   --tag-red-border: #d9a3a3;
   --tag-red-bg: #fdf2f2;
+
+  /* Builder / Conductor interactive cards */
+  --builder-indigo-border: #c7d2fe;
+  --builder-indigo-border-light: #e0e7ff;
+  --builder-indigo-bg: rgb(238 242 255 / 0.4);
+  --builder-indigo-bg-solid: #eef2ff;
+  --builder-indigo-text: #312e81;
+  --builder-indigo-text-muted: rgb(49 46 129 / 0.7);
+  --builder-indigo-accent: #4338ca;
+  --builder-indigo-accent-hover: #3730a3;
+  --builder-violet-border: #ddd6fe;
+  --builder-violet-border-light: #ede9fe;
+  --builder-violet-bg: rgb(245 243 255 / 0.4);
+  --builder-violet-text: #2e1065;
+  --builder-violet-text-muted: rgb(46 16 101 / 0.7);
+  --builder-violet-accent: #6d28d9;
+  --builder-violet-accent-hover: #5b21b6;
+  --builder-amber-border: #fde68a;
+  --builder-amber-bg: rgb(255 251 235 / 0.6);
+  --builder-amber-text: #78350f;
+  --builder-amber-accent: #d97706;
+  --builder-emerald-border: #a7f3d0;
+  --builder-emerald-bg: #ecfdf5;
+  --builder-emerald-text: #022c22;
+  --builder-emerald-text-muted: #047857;
+  --builder-emerald-accent: #059669;
+  --builder-user-bubble: #f4f4f4;
   --tag-red-text: #991b1b;
 }
 

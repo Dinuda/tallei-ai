@@ -47,6 +47,7 @@ export function BuilderRequirementSelector({
       question={question}
       recommendedOptionIds={recommendedOptionIds}
       submittedAnswer={completedOutput ?? undefined}
+      variant="neutral"
     />
   );
 }

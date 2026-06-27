@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 
+import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api-fetch";
 
@@ -157,17 +158,11 @@ export function BuilderKnowledgeBaseSelector({
 
   if (completedOutput) {
     return (
-      <div className="my-3 border border-violet-200 bg-violet-50 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <span className="flex size-8 items-center justify-center bg-violet-600 text-white">
-            <Check className="size-4" />
-          </span>
-          <div>
-            <div className="text-sm font-semibold text-violet-950" style={{ fontFamily: "var(--font-title)" }}>Knowledge sources selected</div>
-            <div className="text-xs text-violet-700">{completedOutput.answerText}</div>
-          </div>
-        </div>
-      </div>
+      <BuilderCompletedCard
+        subtitle={completedOutput.answerText}
+        title="Knowledge sources selected"
+        variant="violet"
+      />
     );
   }
 

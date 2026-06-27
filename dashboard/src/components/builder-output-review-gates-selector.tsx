@@ -99,6 +99,7 @@ export function BuilderOutputReviewGatesSelector({
         question={question}
         recommendedOptionIds={recommendedOptionIds}
         submittedAnswer={completedOutput ?? undefined}
+        variant="amber"
       />
     </div>
   );

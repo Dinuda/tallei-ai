@@ -24,16 +24,134 @@ export type InteractivePromptAnswer = {
   answerText: string;
 };
 
+export type InteractivePromptVariant = "neutral" | "connector" | "violet" | "amber";
+
+type PromptTheme = {
+  outerBorder: string;
+  headerBg: string;
+  headerBorder: string;
+  title: string;
+  step: string;
+  searchBorder: string;
+  searchBg: string;
+  optionSelected: string;
+  optionHover: string;
+  optionTitle: string;
+  optionDesc: string;
+  recommended: string;
+  divider: string;
+  footerBg: string;
+  footerBorder: string;
+  hint: string;
+  primaryBtn: string;
+  selectedDot: string;
+  logoSelected: string;
+  logoDefault: string;
+};
+
+const PROMPT_THEMES: Record<InteractivePromptVariant, PromptTheme> = {
+  neutral: {
+    outerBorder: "border-[var(--ed-border)]",
+    headerBg: "bg-[var(--ed-surface-alt)]",
+    headerBorder: "border-[var(--ed-border-light)]",
+    title: "text-[var(--ed-text)]",
+    step: "text-[var(--ed-text-3)]",
+    searchBorder: "border-[var(--ed-border-light)]",
+    searchBg: "bg-[var(--ed-surface-alt)]",
+    optionSelected: "border-[var(--ed-border)] bg-[var(--ed-surface-alt)] text-[var(--ed-text)]",
+    optionHover: "hover:bg-[var(--ed-surface-alt)]",
+    optionTitle: "text-[var(--ed-text)]",
+    optionDesc: "text-[var(--ed-text-3)]",
+    recommended: "border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] text-[var(--ed-text-3)]",
+    divider: "text-[var(--ed-text-4)]",
+    footerBg: "bg-[var(--ed-surface-alt)]",
+    footerBorder: "border-[var(--ed-border-light)]",
+    hint: "text-[var(--ed-text-3)]",
+    primaryBtn: "bg-[var(--ed-text)] hover:bg-[var(--ed-text-2)]",
+    selectedDot: "fill-[var(--ed-text)] text-[var(--ed-text)]",
+    logoSelected: "border-[var(--ed-text)] bg-[var(--ed-text)]",
+    logoDefault: "border-[var(--ed-border-light)] bg-white",
+  },
+  connector: {
+    outerBorder: "border-[var(--builder-indigo-border)]",
+    headerBg: "bg-white",
+    headerBorder: "border-[var(--builder-indigo-border-light)]",
+    title: "text-[var(--builder-indigo-text)]",
+    step: "text-[var(--builder-indigo-text-muted)]",
+    searchBorder: "border-[var(--builder-indigo-border-light)]",
+    searchBg: "bg-[var(--builder-indigo-bg-solid)]",
+    optionSelected: "border-[var(--builder-indigo-border)] bg-[var(--builder-indigo-bg-solid)] text-[var(--builder-indigo-text)]",
+    optionHover: "hover:bg-[var(--builder-indigo-bg-solid)]",
+    optionTitle: "text-[var(--builder-indigo-text)]",
+    optionDesc: "text-[var(--builder-indigo-text-muted)]",
+    recommended: "border-[var(--builder-indigo-border)] bg-white text-[var(--builder-indigo-accent)]",
+    divider: "text-[var(--builder-indigo-text-muted)]",
+    footerBg: "bg-[var(--builder-indigo-bg-solid)]",
+    footerBorder: "border-[var(--builder-indigo-border-light)]",
+    hint: "text-[var(--builder-indigo-text-muted)]",
+    primaryBtn: "bg-[var(--builder-indigo-accent)] hover:bg-[var(--builder-indigo-accent-hover)]",
+    selectedDot: "fill-[var(--builder-indigo-accent)] text-[var(--builder-indigo-accent)]",
+    logoSelected: "border-[var(--builder-indigo-accent)] bg-[var(--builder-indigo-accent)]",
+    logoDefault: "border-[var(--builder-indigo-border-light)] bg-white",
+  },
+  violet: {
+    outerBorder: "border-[var(--builder-violet-border)]",
+    headerBg: "bg-white",
+    headerBorder: "border-[var(--builder-violet-border-light)]",
+    title: "text-[var(--builder-violet-text)]",
+    step: "text-[var(--builder-violet-text-muted)]",
+    searchBorder: "border-[var(--builder-violet-border-light)]",
+    searchBg: "bg-violet-50",
+    optionSelected: "border-[var(--builder-violet-border)] bg-violet-50 text-[var(--builder-violet-text)]",
+    optionHover: "hover:bg-violet-50",
+    optionTitle: "text-[var(--builder-violet-text)]",
+    optionDesc: "text-[var(--builder-violet-text-muted)]",
+    recommended: "border-[var(--builder-violet-border)] bg-white text-[var(--builder-violet-accent)]",
+    divider: "text-[var(--builder-violet-text-muted)]",
+    footerBg: "bg-violet-50",
+    footerBorder: "border-[var(--builder-violet-border-light)]",
+    hint: "text-[var(--builder-violet-text-muted)]",
+    primaryBtn: "bg-[var(--builder-violet-accent)] hover:bg-[var(--builder-violet-accent-hover)]",
+    selectedDot: "fill-[var(--builder-violet-accent)] text-[var(--builder-violet-accent)]",
+    logoSelected: "border-[var(--builder-violet-accent)] bg-[var(--builder-violet-accent)]",
+    logoDefault: "border-[var(--builder-violet-border-light)] bg-white",
+  },
+  amber: {
+    outerBorder: "border-[var(--builder-amber-border)]",
+    headerBg: "bg-white",
+    headerBorder: "border-[var(--builder-amber-border)]",
+    title: "text-[var(--builder-amber-text)]",
+    step: "text-amber-700",
+    searchBorder: "border-[var(--builder-amber-border)]",
+    searchBg: "bg-[var(--builder-amber-bg)]",
+    optionSelected: "border-[var(--builder-amber-border)] bg-[var(--builder-amber-bg)] text-[var(--builder-amber-text)]",
+    optionHover: "hover:bg-[var(--builder-amber-bg)]",
+    optionTitle: "text-[var(--builder-amber-text)]",
+    optionDesc: "text-amber-700",
+    recommended: "border-[var(--builder-amber-border)] bg-white text-[var(--builder-amber-accent)]",
+    divider: "text-amber-600",
+    footerBg: "bg-[var(--builder-amber-bg)]",
+    footerBorder: "border-[var(--builder-amber-border)]",
+    hint: "text-amber-700",
+    primaryBtn: "bg-[var(--builder-amber-accent)] hover:bg-amber-700",
+    selectedDot: "fill-[var(--builder-amber-accent)] text-[var(--builder-amber-accent)]",
+    logoSelected: "border-[var(--builder-amber-accent)] bg-[var(--builder-amber-accent)]",
+    logoDefault: "border-[var(--builder-amber-border)] bg-white",
+  },
+};
+
 function ProviderLogo({
   icon,
   label,
   selected,
   index,
+  theme,
 }: {
   icon?: string;
   label: string;
   selected: boolean;
   index: number;
+  theme: PromptTheme;
 }) {
   const src = icon ? `https://logos.composio.dev/api/${icon}` : undefined;
 
@@ -43,8 +161,8 @@ function ProviderLogo({
         className={cn(
           "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border text-[11px]",
           selected
-            ? "border-[#111827] bg-[#111827] text-white"
-            : "border-[#e5e7eb] bg-white text-[#6b7280]"
+            ? cn(theme.logoSelected, "text-white")
+            : cn(theme.logoDefault, "text-[var(--ed-text-3)]")
         )}
       >
         {selected ? <Check className="size-3" /> : index + 1}
@@ -56,9 +174,7 @@ function ProviderLogo({
     <span
       className={cn(
         "mt-0.5 flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border",
-        selected
-          ? "border-[#111827] bg-[#111827]"
-          : "border-[#e5e7eb] bg-white"
+        selected ? theme.logoSelected : theme.logoDefault
       )}
     >
       {selected ? (
@@ -83,6 +199,7 @@ export function InteractivePromptMenu({
   selectionHint,
   rankedAppsLayout = false,
   topAppCount = 5,
+  variant = "neutral",
   onSubmit,
   onDismiss,
 }: {
@@ -99,9 +216,11 @@ export function InteractivePromptMenu({
   /** Top N recommended apps + searchable "More apps" section. */
   rankedAppsLayout?: boolean;
   topAppCount?: number;
+  variant?: InteractivePromptVariant;
   onSubmit: (answer: InteractivePromptAnswer) => void;
   onDismiss?: () => void;
 }) {
+  const theme = PROMPT_THEMES[variant];
   const [selectedIds, setSelectedIds] = useState<string[]>(
     submittedAnswer?.selectedOptionIds ?? []
   );
@@ -167,7 +286,7 @@ export function InteractivePromptMenu({
       <button
         className={cn(
           "flex w-full items-start gap-3 border border-transparent px-3 py-2.5 text-left transition-colors",
-          selected ? "border-[#d1d5db] bg-[#fafafa] text-[#111827]" : "hover:bg-[#fafafa]",
+          selected ? theme.optionSelected : theme.optionHover,
           (disabled || isSubmitted) && "cursor-default"
         )}
         disabled={disabled || isSubmitted}
@@ -180,26 +299,27 @@ export function InteractivePromptMenu({
           index={index}
           label={option.label}
           selected={selected}
+          theme={theme}
         />
         <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+          <span className={cn("flex flex-wrap items-center gap-2 text-sm font-semibold", theme.optionTitle)} style={{ fontFamily: "var(--font-title)" }}>
             <span>{option.label}</span>
             {recommended.has(option.id) && (
-              <span className="border border-[#e5e7eb] bg-[#fafafa] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280]">
+              <span className={cn("border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide", theme.recommended)}>
                 Recommended
               </span>
             )}
           </span>
           {option.description && (
-            <span className="mt-0.5 block text-xs text-[#6b7280]">
+            <span className={cn("mt-0.5 block text-xs", theme.optionDesc)}>
               {option.description}
             </span>
           )}
         </span>
         <Circle
           className={cn(
-            "mt-2 size-2 text-[#d1d5db]",
-            selected && "fill-[#111827] text-[#111827]"
+            "mt-2 size-2 text-[var(--ed-border)]",
+            selected && theme.selectedDot
           )}
         />
       </button>
@@ -260,15 +380,15 @@ export function InteractivePromptMenu({
         "w-full overflow-hidden bg-white",
         placement === "composer"
           ? "border-0 shadow-none"
-          : "my-3 border border-[#d1d5db] shadow-sm"
+          : cn("my-3 border shadow-sm", theme.outerBorder)
       )}
     >
-      <div className="flex items-center justify-between gap-3 border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3">
-        <div className="min-w-0 flex-1 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+      <div className={cn("flex items-center justify-between gap-3 border-b px-4 py-3", theme.headerBorder, theme.headerBg)}>
+        <div className={cn("min-w-0 flex-1 text-sm font-semibold", theme.title)} style={{ fontFamily: "var(--font-title)" }}>
           {question}
         </div>
         {step ? (
-          <div className="flex shrink-0 items-center gap-1 text-xs text-[#6b7280]">
+          <div className={cn("flex shrink-0 items-center gap-1 text-xs", theme.step)}>
             <ChevronLeft className="size-3.5 opacity-40" />
             <span>{step.index} of {step.total}</span>
             <ChevronRight className="size-3.5 opacity-40" />
@@ -276,11 +396,11 @@ export function InteractivePromptMenu({
         ) : null}
       </div>
       {rankedAppsLayout ? (
-        <div className="border-b border-[#e5e7eb] px-3 py-2">
+        <div className={cn("border-b px-3 py-2", theme.headerBorder)}>
           <div className="flex items-center gap-2">
-            <Search className="size-4 shrink-0 text-[#9ca3af]" />
+            <Search className="size-4 shrink-0 text-[var(--ed-text-4)]" />
             <Input
-              className="h-9 border-[#e5e7eb] bg-[#fafafa] text-sm shadow-none placeholder:text-[#9ca3af] focus-visible:ring-1 focus-visible:ring-[#d1d5db]"
+              className={cn("h-9 text-sm shadow-none placeholder:text-[var(--ed-text-4)] focus-visible:ring-1", theme.searchBorder, theme.searchBg)}
               disabled={disabled || isSubmitted}
               onChange={(event) => setAppSearch(event.target.value)}
               placeholder="Search apps…"
@@ -301,7 +421,7 @@ export function InteractivePromptMenu({
                 return (
                   <div key={option.id ?? `option-${index}`}>
                     {showMoreDivider ? (
-                      <p className="sticky top-0 z-10 bg-white px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-[#9ca3af]">
+                      <p className={cn("sticky top-0 z-10 bg-white px-3 py-2 text-[11px] font-medium uppercase tracking-wide", theme.divider)}>
                         More apps
                       </p>
                     ) : null}
@@ -310,7 +430,7 @@ export function InteractivePromptMenu({
                 );
               })
             ) : (
-              <p className="px-3 py-2 text-xs text-[#9ca3af]">No apps match your search.</p>
+              <p className={cn("px-3 py-2 text-xs", theme.divider)}>No apps match your search.</p>
             )}
           </div>
         ) : (
@@ -320,14 +440,14 @@ export function InteractivePromptMenu({
         )}
       </div>
       {allowOther && !isSubmitted && (
-        <div className="mx-3 mt-2 border-t border-[#e5e7eb] pt-3">
-          <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-wide text-[#9ca3af]">
+        <div className={cn("mx-3 mt-2 border-t pt-3", theme.footerBorder)}>
+          <p className={cn("mb-2 px-1 text-[11px] font-medium uppercase tracking-wide", theme.divider)}>
             Or describe it yourself
           </p>
           <div className="flex items-center gap-2">
-            <Pencil className="size-4 shrink-0 text-[#6b7280]" />
+            <Pencil className={cn("size-4 shrink-0", theme.hint)} />
             <Input
-              className="border-0 px-0 text-[#111827] shadow-none placeholder:text-[#9ca3af] focus-visible:ring-0"
+              className={cn("border-0 px-0 shadow-none focus-visible:ring-0", theme.title, "placeholder:text-[var(--ed-text-4)]")}
               disabled={disabled}
               onChange={(event) => setOtherText(event.target.value)}
               onKeyDown={(event) => {
@@ -339,11 +459,11 @@ export function InteractivePromptMenu({
           </div>
         </div>
       )}
-      <div className="flex items-center justify-between gap-3 border-t border-[#e5e7eb] bg-[#fafafa] px-3 py-3">
+      <div className={cn("flex items-center justify-between gap-3 border-t px-3 py-3", theme.footerBorder, theme.footerBg)}>
         <div className="flex items-center gap-2">
           {placement === "composer" && onDismiss && !isSubmitted && (
             <Button
-              className="h-7 gap-1.5 px-2 text-xs text-[#6b7280] hover:bg-white hover:text-[#111827]"
+              className={cn("h-7 gap-1.5 px-2 text-xs hover:bg-white", theme.hint, "hover:text-[var(--ed-text)]")}
               disabled={disabled}
               onClick={onDismiss}
               size="sm"
@@ -351,10 +471,10 @@ export function InteractivePromptMenu({
               variant="ghost"
             >
               <X className="size-3.5" />
-              Dismiss <span className="text-[#9ca3af]">ESC</span>
+              Dismiss <span className="text-[var(--ed-text-4)]">ESC</span>
             </Button>
           )}
-          <span className="text-xs text-[#6b7280]">
+          <span className={cn("text-xs", theme.hint)}>
             {isSubmitted
               ? `Answered: ${submittedAnswer?.answerText}`
               : selectionHint
@@ -371,7 +491,7 @@ export function InteractivePromptMenu({
         </div>
         {!isSubmitted && (
           <Button
-            className="bg-[#111827] text-white hover:bg-[#374151]"
+            className={cn("text-white", theme.primaryBtn)}
             disabled={
               disabled ||
               (selectedIds.length === 0 && !otherText.trim())
