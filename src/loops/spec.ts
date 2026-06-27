@@ -13,18 +13,74 @@ export const triggerSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("event"),
     source: z.string().min(1),
-    eventType: z.string().min(1),
+    composioSlug: z.string().default(""),
+    eventType: z.string().optional(),
   }),
 ]);
 export type TriggerConfig = z.infer<typeof triggerSchema>;
+
+/** Legacy DB rows may omit composioSlug or store the slug in eventType. */
+export function hydrateStoredTrigger(trigger: unknown): TriggerConfig | unknown {
+  if (!trigger || typeof trigger !== "object" || Array.isArray(trigger)) return trigger;
+  const row = trigger as Record<string, unknown>;
+  if (row.kind !== "event") return trigger;
+
+  const composioSlug = String(row.composioSlug ?? "").trim();
+  const eventType = String(row.eventType ?? "").trim();
+  if (composioSlug) {
+    return triggerSchema.parse({
+      kind: "event",
+      source: row.source,
+      composioSlug,
+      ...(eventType ? { eventType } : {}),
+    });
+  }
+
+  const fromEventType = /^[A-Z][A-Z0-9_]+$/.test(eventType) ? eventType : "";
+  return triggerSchema.parse({
+    kind: "event",
+    source: row.source,
+    composioSlug: fromEventType,
+    ...(eventType ? { eventType } : {}),
+  });
+}
 
 export const toolBindingSchema = z.object({
   capability: z.string().min(1),
   connector: z.string().min(1),
   accountId: z.string().optional(),
   optional: z.boolean().optional(),
+  role: z.enum(["trigger", "source", "transform", "destination"]).optional(),
 });
 export type ToolBinding = z.infer<typeof toolBindingSchema>;
+
+export const outcomeRoleSchema = z.enum(["trigger", "source", "transform", "destination"]);
+export type OutcomeRole = z.infer<typeof outcomeRoleSchema>;
+
+export const blueprintCandidateSchema = z.object({
+  connector: z.string().min(1),
+  connected: z.boolean(),
+  score: z.number(),
+  rationale: z.string(),
+  sampleActions: z.array(z.string()).optional(),
+});
+
+export const blueprintOutcomeSchema = z.object({
+  id: z.string().min(1),
+  role: outcomeRoleSchema,
+  description: z.string().min(1),
+  selectedConnector: z.string().optional(),
+  selectedCapability: z.string().optional(),
+  candidates: z.array(blueprintCandidateSchema).default([]),
+  status: z.enum(["pending", "chosen", "skipped"]).default("pending"),
+});
+
+export const taskBlueprintSchema = z.object({
+  version: z.literal(1),
+  summary: z.string().min(1),
+  outcomes: z.array(blueprintOutcomeSchema).default([]),
+});
+export type TaskBlueprint = z.infer<typeof taskBlueprintSchema>;
 
 export const agentConfigSchema = z.object({
   instructions: z.string().min(1),
@@ -94,6 +150,7 @@ export const loopSpecSchema = z.object({
   trigger: triggerSchema,
   profile: executionProfileSchema.default("agentic"),
   bindings: z.array(toolBindingSchema).default([]),
+  taskBlueprint: taskBlueprintSchema.optional(),
   agent: agentConfigSchema.optional(),
   monitor: monitorConfigSchema.optional(),
   sync: syncConfigSchema.optional(),
@@ -108,6 +165,7 @@ export const specPatchSchema = z.object({
   trigger: triggerSchema.optional(),
   profile: executionProfileSchema.optional(),
   bindings: z.array(toolBindingSchema).optional(),
+  taskBlueprint: taskBlueprintSchema.optional(),
   agent: agentConfigSchema.partial().optional(),
   monitor: monitorConfigSchema.optional(),
   sync: syncConfigSchema.optional(),
@@ -165,14 +223,6 @@ export const compiledPlanSchema = z.object({
 });
 export type CompiledPlan = z.infer<typeof compiledPlanSchema>;
 
-export const DEFAULT_SENSITIVE_CAPABILITIES = [
-  "email.send",
-  "chat.send",
-  "payment.charge",
-  "crm.contact.write",
-  "support.reply.send",
-] as const;
-
 export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopSpec>): LoopSpec {
   return loopSpecSchema.parse({
     workspaceId,
@@ -192,7 +242,7 @@ export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopS
     output: { kind: "none" },
     approval: {
       mode: "mixed",
-      sensitiveCapabilities: [...DEFAULT_SENSITIVE_CAPABILITIES],
+      sensitiveCapabilities: [],
       defaultTimeoutHours: 24,
       onTimeout: "reject",
     },
@@ -203,5 +253,27 @@ export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopS
       maxRunDurationMinutes: 60,
     },
     ...partial,
+  });
+}
+
+export function parseStoredLoopSpec(raw: unknown): LoopSpec {
+  const base =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+  return loopSpecSchema.parse({
+    ...base,
+    trigger: hydrateStoredTrigger(base.trigger),
+  });
+}
+
+export function parseStoredCompiledPlan(raw: unknown): CompiledPlan {
+  const base =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+  return compiledPlanSchema.parse({
+    ...base,
+    trigger: hydrateStoredTrigger(base.trigger),
   });
 }

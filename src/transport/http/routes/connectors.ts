@@ -4,11 +4,14 @@ import { z } from "zod";
 import {
   disconnectToolkit,
   getToolkitConnectionStatus,
+  listAllToolkitsWithStatus,
   listWorkspaceConnectors,
   startToolkitAuthorization,
   verifyToolkitConnection,
 } from "../../../integrations/composio/accounts.js";
-import { listToolkits } from "../../../integrations/composio/tools.js";
+import { listToolkits, getAllTools } from "../../../integrations/composio/tools.js";
+import { listComposioTriggerTypes } from "../../../integrations/composio/triggers.js";
+import { resolveToolkitSlug } from "../../../integrations/composio/auth.js";
 import { authMiddleware, type AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
@@ -36,12 +39,49 @@ router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Re
   }
 });
 
+router.get("/catalog", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { toolkits, total } = await listAllToolkitsWithStatus(req.authContext!);
+    res.json({ toolkits, total });
+  } catch (error) {
+    sendError(res, error, "Failed to list connector catalog");
+  }
+});
+
 router.get("/composio/toolkits", requireScopes(["memory:read"]), async (_req: AuthRequest, res: Response) => {
   try {
     const toolkits = await listToolkits();
     res.json({ toolkits });
   } catch (error) {
     sendError(res, error, "Failed to list Composio toolkits");
+  }
+});
+
+router.get("/:toolkit/triggers", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const toolkit = await resolveToolkitSlug(String(req.params.toolkit));
+    const triggers = await listComposioTriggerTypes(toolkit);
+    res.json({ toolkit, triggers });
+  } catch (error) {
+    sendError(res, error, "Failed to list connector triggers");
+  }
+});
+
+router.get("/:toolkit/actions", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const toolkit = await resolveToolkitSlug(String(req.params.toolkit));
+    const actions = await getAllTools(toolkit);
+    res.json({
+      toolkit,
+      actions: actions.map((action) => ({
+        slug: action.actionSlug,
+        name: action.name,
+        description: action.description,
+        inputSchema: action.inputSchema ?? {},
+      })),
+    });
+  } catch (error) {
+    sendError(res, error, "Failed to list connector actions");
   }
 });
 

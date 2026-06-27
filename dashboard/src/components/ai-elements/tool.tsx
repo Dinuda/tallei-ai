@@ -21,14 +21,16 @@ import type { ComponentProps, ReactNode } from "react";
 import { isValidElement } from "react";
 
 import { BUILDER_ISSUE_SUMMARY, maskBuilderIssueText } from "@/lib/builder-issue-text";
-import { CodeBlock } from "./code-block";
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
     data-tool-call=""
-    className={cn("group not-prose mb-4 w-full border border-[#d1d5db] bg-white overflow-hidden", className)}
+    className={cn(
+      "group not-prose mb-4 w-full max-w-full min-w-0 overflow-hidden rounded-lg border border-[#d1d5db] bg-white",
+      className,
+    )}
     {...props}
   />
 );
@@ -113,17 +115,17 @@ export const ToolHeader = ({
   return (
     <CollapsibleTrigger
       className={cn(
-        "flex w-full items-center justify-between gap-4 bg-[#fafafa] px-3 py-2.5",
+        "flex w-full min-w-0 items-center justify-between gap-4 bg-[#fafafa] px-3 py-2.5 text-left",
         className
       )}
       {...props}
     >
-      <div className="flex items-center gap-2">
-        <WrenchIcon className="size-4 text-muted-foreground" />
-        <span className="font-medium text-sm">{title ?? derivedName}</span>
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <WrenchIcon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="truncate font-medium text-sm">{title ?? derivedName}</span>
         {getStatusBadge(state)}
       </div>
-      <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180" />
     </CollapsibleTrigger>
   );
 };
@@ -133,7 +135,10 @@ export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 export const ToolContent = ({ className, ...props }: ToolContentProps) => (
   <CollapsibleContent
     className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 space-y-4 p-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+      "max-w-full min-w-0 overflow-hidden border-t border-[#e5e7eb] p-4 text-popover-foreground outline-none",
+      "data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=closed]:duration-200",
+      "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-2 data-[state=open]:duration-200",
+      "space-y-4",
       className
     )}
     {...props}
@@ -147,12 +152,14 @@ export type ToolInputProps = ComponentProps<"div"> & {
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
   if (input === undefined) return null;
   return (
-    <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
+    <div className={cn("max-w-full min-w-0 space-y-2 overflow-hidden", className)} {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
         Parameters
       </h4>
-      <div className="bg-muted/50 border border-[#e5e7eb]">
-        <CodeBlock code={JSON.stringify(input, null, 2) ?? ""} language="json" />
+      <div className="max-w-full min-w-0 overflow-hidden border border-[#e5e7eb] bg-muted/50">
+        <pre className="max-w-full whitespace-pre-wrap break-words p-3 font-mono text-xs text-foreground">
+          {JSON.stringify(input, null, 2)}
+        </pre>
       </div>
     </div>
   );
@@ -185,18 +192,24 @@ export const ToolOutput = ({
 
   if (typeof output === "object" && !isValidElement(output)) {
     Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2) ?? ""} language="json" />
+      <pre className="max-w-full whitespace-pre-wrap break-words p-3 font-mono text-xs text-foreground">
+        {JSON.stringify(output, null, 2)}
+      </pre>
     );
   } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
+    Output = (
+      <pre className="max-w-full whitespace-pre-wrap break-words p-3 font-mono text-xs text-foreground">
+        {output}
+      </pre>
+    );
   }
 
   return (
-    <div className={cn("space-y-2", className)} {...props}>
+    <div className={cn("max-w-full min-w-0 space-y-2 overflow-hidden", className)} {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
         Result
       </h4>
-      <div className="overflow-x-auto border border-[#e5e7eb] bg-muted/50 text-xs text-foreground [&_table]:w-full">
+      <div className="max-w-full min-w-0 overflow-hidden border border-[#e5e7eb] bg-muted/50 text-xs text-foreground">
         {Output}
       </div>
     </div>

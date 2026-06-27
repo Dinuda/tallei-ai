@@ -110,10 +110,11 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/integration-updates", integrationUpdatesRouter);
-  app.use("/api/connectors", deps.memoryRateLimit, connectorsRouter);
+  // Must be registered before /api/connectors — that router applies authMiddleware to all paths.
   app.post("/api/connectors/composio/webhook", (req, res) => {
     void handleComposioWebhook(req, res);
   });
+  app.use("/api/connectors", deps.memoryRateLimit, connectorsRouter);
   app.use("/api/workspaces", deps.memoryRateLimit, workspacesRouter);
   app.use("/api/loops", deps.memoryRateLimit, loopsRouter);
   app.use("/api/approvals", deps.memoryRateLimit, approvalsRouter);

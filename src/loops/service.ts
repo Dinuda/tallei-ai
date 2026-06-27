@@ -31,11 +31,16 @@ export async function resolveLoopAuthWorkspace(auth: AuthContext, workspaceId?: 
 
 export async function createLoopInWorkspace(
   auth: AuthContext,
-  input: { name: string; templateId?: string; workspaceId?: string },
+  input: { name: string; templateId?: string; workspaceId?: string; prompt?: string },
 ) {
   const ctx = await resolveLoopAuthWorkspace(auth, input.workspaceId);
   const workspaceId = ctx.workspaceId!;
-  return createLoop(ctx, { workspaceId, name: input.name, templateId: input.templateId });
+  return createLoop(ctx, {
+    workspaceId,
+    name: input.name,
+    templateId: input.templateId,
+    prompt: input.prompt,
+  });
 }
 
 export async function compileLoop(auth: AuthContext, loopId: string) {
@@ -59,7 +64,7 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
       loopId,
       workspaceId: loop.workspaceId,
       source: plan.trigger.source,
-      eventType: plan.trigger.eventType,
+      composioSlug: plan.trigger.composioSlug,
     });
   }
 
@@ -100,7 +105,7 @@ export async function resumeLoop(auth: AuthContext, loopId: string) {
       loopId,
       workspaceId: loop.workspaceId,
       source: plan.trigger.source,
-      eventType: plan.trigger.eventType,
+      composioSlug: plan.trigger.composioSlug,
     });
   }
 

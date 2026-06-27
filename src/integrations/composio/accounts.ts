@@ -1,9 +1,11 @@
 import type { AuthContext } from "../../domain/auth/index.js";
-import { authorizeToolkitForUser, normalizeToolkitSlug } from "./auth.js";
+import { authorizeToolkitForUser, normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
 import { composioRequest, isComposioConfigured } from "./client.js";
+import { listToolkits } from "./tools.js";
 import {
   clearSessionCache,
   createSession,
+  listAllSessionToolkits,
   listSessionToolkits,
   listToolkitsForUser,
 } from "./session.js";
@@ -16,6 +18,10 @@ export type WorkspaceConnectorView = {
   logo: string;
   connected: boolean;
   connectedAccountId?: string;
+};
+
+export type CatalogToolkitView = WorkspaceConnectorView & {
+  category?: string;
 };
 
 export type ToolkitConnectionStatus = {
@@ -60,16 +66,53 @@ export async function listWorkspaceConnectors(auth: AuthContext): Promise<Worksp
   return toolkits.map(mapToolkitView);
 }
 
+/** Full Composio catalogue merged with workspace connection status (connected-first planning). */
+export async function listAllToolkitsWithStatus(auth: AuthContext): Promise<{
+  toolkits: CatalogToolkitView[];
+  total: number;
+}> {
+  if (!isComposioConfigured()) return { toolkits: [], total: 0 };
+
+  const [catalog, session] = await Promise.all([
+    listToolkits(),
+    createSession(auth),
+  ]);
+  const sessionRows = await listAllSessionToolkits(session);
+  const statusBySlug = new Map(
+    sessionRows.map((row) => [normalizeToolkitSlug(row.slug), row] as const),
+  );
+
+  const toolkits = catalog.map((toolkit) => {
+    const status = statusBySlug.get(normalizeToolkitSlug(toolkit.slug));
+    return {
+      slug: toolkit.slug,
+      name: toolkit.name,
+      description: toolkit.description,
+      logo: toolkit.logo,
+      ...(toolkit.category ? { category: toolkit.category } : {}),
+      connected: Boolean(status?.connected && status.connectedAccountId),
+      ...(status?.connectedAccountId ? { connectedAccountId: status.connectedAccountId } : {}),
+    } satisfies CatalogToolkitView;
+  });
+
+  toolkits.sort((a, b) => {
+    if (a.connected !== b.connected) return a.connected ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return { toolkits, total: toolkits.length };
+}
+
 export async function getToolkitConnectionStatus(
   auth: AuthContext,
   toolkit: string,
 ): Promise<ToolkitConnectionStatus> {
-  const slug = normalizeToolkitSlug(toolkit);
+  const slug = await resolveToolkitSlug(toolkit);
   if (!slug || !isComposioConfigured()) {
     return { toolkit: slug || toolkit, connected: false, status: "disconnected" };
   }
   const { toolkits } = await listToolkitsForUser(auth, { limit: 50, search: slug });
-  const match = toolkits.find((row) => row.slug.toLowerCase() === slug.toLowerCase());
+  const match = toolkits.find((row) => normalizeToolkitSlug(row.slug) === normalizeToolkitSlug(slug));
   const connected = Boolean(match?.connected && match.connectedAccountId);
   return {
     toolkit: slug,
@@ -90,7 +133,7 @@ export async function startToolkitAuthorization(
   toolkit: string;
 }> {
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
-  const normalized = normalizeToolkitSlug(toolkit);
+  const normalized = await resolveToolkitSlug(toolkit);
   const { session, redirectUrl, connectionRequestId, waitForConnection } = await authorizeToolkitForUser(
     auth,
     normalized,
@@ -119,7 +162,7 @@ export async function verifyToolkitConnection(
   const pending = input.connectionRequestId
     ? pendingAuthorizations.get(input.connectionRequestId)
     : undefined;
-  const toolkit = normalizeToolkitSlug(input.toolkit ?? pending?.toolkit ?? "");
+  const toolkit = await resolveToolkitSlug(input.toolkit ?? pending?.toolkit ?? "");
   if (!toolkit) throw new Error("Toolkit is required");
 
   if (pending) {

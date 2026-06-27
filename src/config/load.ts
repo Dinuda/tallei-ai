@@ -33,6 +33,30 @@ function readImportExtractMode(env: NodeJS.ProcessEnv): ImportExtractMode {
   return "heuristic";
 }
 
+/** Up to 8 numbered slots + comma-separated list + legacy single key. */
+function readLlmApiKeyList(
+  env: NodeJS.ProcessEnv,
+  options: { prefix: string; legacyFallbackEnv?: string },
+): string[] {
+  const keys = new Set<string>();
+  const csv = readStringEnv(env, `${options.prefix}_API_KEYS`, "");
+  for (const part of csv.split(/[,;\n]/)) {
+    const trimmed = part.trim();
+    if (trimmed) keys.add(trimmed);
+  }
+  for (let slot = 1; slot <= 8; slot += 1) {
+    const value = readStringEnv(env, `${options.prefix}_API_KEY_${slot}`, "").trim();
+    if (value) keys.add(value);
+  }
+  const legacy = readStringEnv(env, `${options.prefix}_API_KEY`, "").trim();
+  if (legacy) keys.add(legacy);
+  if (keys.size === 0 && options.legacyFallbackEnv) {
+    const fallback = readStringEnv(env, options.legacyFallbackEnv, "").trim();
+    if (fallback) keys.add(fallback);
+  }
+  return [...keys];
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const e = resolveEnv(env);
 
@@ -53,6 +77,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const qdrantTimeoutSecondsLegacy = readOptionalIntEnv(e, "QDRANT_TIMEOUT_SECONDS"); // legacy only; no TALLEI_ form
   const defaultOllamaModel = readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen3:14b");
   const defaultOpenCodeModel = readStringEnv(e, "TALLEI_LLM__OPENCODE_MODEL", "big-pickle");
+  const openaiApiKeys = readLlmApiKeyList(e, { prefix: "TALLEI_LLM__OPENAI" });
+  const opencodeApiKeys = readLlmApiKeyList(e, {
+    prefix: "TALLEI_LLM__OPENCODE",
+    ...(openaiApiKeys.length === 0 ? { legacyFallbackEnv: "TALLEI_LLM__OPENAI_API_KEY" } : {}),
+  });
   const llmProvider = readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google" | "opencode";
 
   function readResolvedChatModel(key: string, productionDefault: string): string {
@@ -107,7 +136,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       "TALLEI_DB__AUTO_MIGRATE_ON_BOOT",
       nodeEnv !== "production"
     ),
-    openaiApiKey: readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
+    openaiApiKey: openaiApiKeys[0] ?? "",
+    openaiApiKeys,
     anthropicApiKey: readStringEnv(e, "TALLEI_LLM__ANTHROPIC_API_KEY"),
     jwtSecret: requireEnv(e, "TALLEI_AUTH__JWT_SECRET"),
     apiKeyPepper: readStringEnv(e, "TALLEI_AUTH__API_KEY_PEPPER"),
@@ -227,6 +257,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
     plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
     plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000),
+    loopTestRunMaxSteps: readIntEnv(e, "TALLEI_LOOPS__TEST_RUN_MAX_STEPS", 2),
+    loopTestRunTimeoutMs: readIntEnv(
+      e,
+      "TALLEI_LOOPS__TEST_RUN_TIMEOUT_MS",
+      Math.max(60_000, readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000) * 2 + 10_000),
+    ),
+    /** Max simultaneous event-triggered runs per workspace; 0 = unlimited. */
+    loopMaxConcurrentEventRuns: Math.max(0, readIntEnv(e, "TALLEI_LOOPS__MAX_CONCURRENT_EVENT_RUNS", 0)),
     loopMinerModel: readResolvedChatModel("TALLEI_LOOP_MINER__MODEL", "gpt-gpt-5-nano"),
     loopMinerEpisodeModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__EPISODE_MODEL"),
     loopMinerDetectorModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__DETECTOR_MODEL"),
@@ -253,7 +291,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       readStringEnv(e, "TALLEI_LLM__OPENCODE_BASE_URL", "https://opencode.ai/zen/v1"),
     ),
     opencodeModel: defaultOpenCodeModel,
-    opencodeApiKey: readStringEnv(e, "TALLEI_LLM__OPENCODE_API_KEY") || readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
+    opencodeApiKey: opencodeApiKeys[0] ?? "",
+    opencodeApiKeys,
     conductorModel: readResolvedChatModel(
       "TALLEI_CONDUCTOR__MODEL",
       readResolvedChatModel("TALLEI_LOOP_BUILDER__OPENAI_MODEL", defaultOpenCodeModel),

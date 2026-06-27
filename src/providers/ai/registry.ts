@@ -2,6 +2,11 @@ import OpenAI from "openai";
 
 import { config } from "../../config/index.js";
 import {
+  createPooledLlmFetch,
+  getOpenAiApiKeyPool,
+  getOpenCodeApiKeyPool,
+} from "../../services/llm/api-key-pool.js";
+import {
   CircuitBreakerRegistry,
   composePolicy,
   resolveResiliencePolicies,
@@ -68,14 +73,14 @@ function buildRetryPolicy(base: RetryPolicy | undefined): RetryPolicy | undefine
 }
 
 function requireOpenAiKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
-  if (providerNames.includes("openai") && !config.openaiApiKey) {
-    throw new Error("OPENAI_API_KEY is required when provider is openai");
+  if (providerNames.includes("openai") && getOpenAiApiKeyPool().size === 0) {
+    throw new Error("TALLEI_LLM__OPENAI_API_KEY is required when provider is openai");
   }
 }
 
 function requireOpenCodeKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
-  if (providerNames.includes("opencode") && !config.opencodeApiKey) {
-    throw new Error("TALLEI_LLM__OPENCODE_API_KEY (or TALLEI_LLM__OPENAI_API_KEY) is required when TALLEI_LLM__PROVIDER=opencode");
+  if (providerNames.includes("opencode") && getOpenCodeApiKeyPool().size === 0) {
+    throw new Error("TALLEI_LLM__OPENCODE_API_KEY (or TALLEI_LLM__OPENCODE_API_KEYS) is required when TALLEI_LLM__PROVIDER=opencode");
   }
 }
 
@@ -154,8 +159,12 @@ export class ProviderRegistry {
     requireOpenCodeKeyIfNeeded(requiredNames);
 
     if (requiredNames.includes("openai")) {
+      const openAiPool = getOpenAiApiKeyPool();
       const openAiProvider = new OpenAiProvider({
-        client: new OpenAI({ apiKey: config.openaiApiKey }),
+        client: new OpenAI({
+          apiKey: openAiPool.pickKey(),
+          fetch: createPooledLlmFetch(openAiPool, "openai"),
+        }),
         defaultChatModel: config.openaiModel,
         defaultEmbeddingModel: config.embeddingModel,
         defaultEmbeddingDimensions: config.embeddingDims,
@@ -167,8 +176,13 @@ export class ProviderRegistry {
     }
 
     if (requiredNames.includes("opencode")) {
+      const openCodePool = getOpenCodeApiKeyPool();
       const openCodeProvider = new OpenCodeProvider({
-        client: new OpenAI({ baseURL: config.opencodeBaseUrl, apiKey: config.opencodeApiKey }),
+        client: new OpenAI({
+          baseURL: config.opencodeBaseUrl,
+          apiKey: openCodePool.pickKey(),
+          fetch: createPooledLlmFetch(openCodePool, "opencode"),
+        }),
         defaultChatModel: config.opencodeModel,
       });
       this.providers.set(openCodeProvider.name, openCodeProvider);

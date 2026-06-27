@@ -1,33 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  lookupStaticTriggerSlug,
-  resolveComposioTriggerSlug,
-  resolveTriggerFromComposioSlug,
-} from "../../../src/loops/trigger-catalog.js";
+import { scoreTriggerSlugMatch } from "../../../src/integrations/composio/triggers.js";
 
-test("resolveComposioTriggerSlug maps gmail new_message", () => {
-  assert.equal(
-    resolveComposioTriggerSlug("gmail", "new_message"),
+test("scoreTriggerSlugMatch prefers slugs that share event tokens", () => {
+  const score = scoreTriggerSlugMatch(
+    "new_message",
     "GMAIL_NEW_GMAIL_MESSAGE",
+    "New Gmail Message",
   );
+  assert.ok(score >= 4);
 });
 
-test("lookupStaticTriggerSlug maps gmail message.new", () => {
-  assert.equal(
-    lookupStaticTriggerSlug("gmail", "message.new"),
+test("scoreTriggerSlugMatch returns low score for unrelated events", () => {
+  const score = scoreTriggerSlugMatch(
+    "totally_unknown_event",
     "GMAIL_NEW_GMAIL_MESSAGE",
+    "New Gmail Message",
   );
-});
-
-test("lookupStaticTriggerSlug does not guess invalid gmail slug", () => {
-  assert.equal(lookupStaticTriggerSlug("gmail", "totally_unknown_event"), null);
-});
-
-test("resolveTriggerFromComposioSlug maps gmail slug back", () => {
-  assert.deepEqual(resolveTriggerFromComposioSlug("GMAIL_NEW_GMAIL_MESSAGE"), {
-    source: "gmail",
-    eventType: "new_message",
-  });
+  assert.ok(score < 4);
 });

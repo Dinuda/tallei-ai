@@ -16,6 +16,7 @@ export {
   getSessionTools,
   invalidateSession,
   listSessionToolkits,
+  listAllSessionToolkits,
   listToolkitsForUser,
   useSession,
 } from "./session.js";
@@ -33,9 +34,11 @@ export {
   authorizeToolkit,
   authorizeToolkitForUser,
   normalizeToolkitSlug,
+  resolveToolkitSlug,
 } from "./auth.js";
 export {
   listWorkspaceConnectors,
+  listAllToolkitsWithStatus,
   getToolkitConnectionStatus,
   startToolkitAuthorization,
   verifyToolkitConnection,
@@ -43,7 +46,7 @@ export {
   resolveConnectedAccountId,
   listConnectedToolkitsForAuth,
 } from "./accounts.js";
-export type { WorkspaceConnectorView, ToolkitConnectionStatus } from "./accounts.js";
+export type { WorkspaceConnectorView, ToolkitConnectionStatus, CatalogToolkitView } from "./accounts.js";
 export { parseComposioEntityId, buildAuthContextFromEntity } from "./entity.js";
 export type { ParsedComposioEntityId } from "./entity.js";
 export {
@@ -62,5 +65,15 @@ export {
   unregisterLoopEventTrigger,
   getLoopTriggerRegistration,
   resolveTriggerSlugWithCatalog,
+  validateComposioTriggerSlug,
+  listComposioTriggerTypes,
+  scoreTriggerSlugMatch,
 } from "./triggers.js";
 export type { LoopTriggerRegistrationRow } from "./triggers.js";
+export {
+  claimWebhookEventDelivery,
+  ensureWorkspaceTriggerChannel,
+  releaseWorkspaceTriggerChannel,
+  getLoopTriggerSubscription,
+  getWorkspaceTriggerChannel,
+} from "./trigger-channels.js";

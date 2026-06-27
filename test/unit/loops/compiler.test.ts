@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveBindingAction } from "../../../src/loops/compiler.js";
+import { scoreToolForCapability } from "../../../src/loops/binding-discovery.js";
 
-test("resolveBindingAction uses static map for gmail email.read", async () => {
-  const resolved = await resolveBindingAction("gmail", "email.read");
-  assert.ok(resolved);
-  assert.equal(resolved?.actionSlug, "GMAIL_FETCH_EMAILS");
+test("scoreToolForCapability ranks matching action slugs by capability tokens", () => {
+  const score = scoreToolForCapability(
+    "message.send",
+    "SLACK_SEND_MESSAGE",
+    "Send message",
+    "Post a message to a Slack channel",
+  );
+  assert.ok(score >= 2);
 });
 
-test("resolveBindingAction uses static map for outlook email.read", async () => {
-  const resolved = await resolveBindingAction("outlook", "email.read");
-  assert.ok(resolved);
-  assert.equal(resolved?.actionSlug, "OUTLOOK_LIST_MESSAGES");
-});
-
-test("resolveBindingAction returns null for unsupported capability on known toolkit", async () => {
-  const resolved = await resolveBindingAction("gmail", "payment.charge");
-  assert.equal(resolved, null);
+test("scoreToolForCapability returns zero for unrelated capabilities", () => {
+  assert.equal(
+    scoreToolForCapability("payment.charge", "GMAIL_FETCH_EMAILS", "Fetch emails", "List messages"),
+    0,
+  );
 });

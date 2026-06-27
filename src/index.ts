@@ -1,11 +1,17 @@
 import "./patch.js";
 
 import { buildContainer } from "./bootstrap/composition-root.js";
+import { syncComposioWebhookSecretsFromApi } from "./integrations/composio/webhook-subscription.js";
 
 const appServices = buildContainer();
 
 async function start(): Promise<void> {
   await appServices.start();
+  void syncComposioWebhookSecretsFromApi({ force: true }).then((result) => {
+    if (result.synced && result.secretCount > 0) {
+      console.info("[integrations/composio] webhook signing secrets ready", { secretCount: result.secretCount });
+    }
+  });
 }
 
 let stopping = false;

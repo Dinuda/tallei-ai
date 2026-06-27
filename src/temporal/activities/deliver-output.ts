@@ -1,8 +1,9 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { CompiledPlan } from "../../loops/spec.js";
 import type { AgentRunState } from "../types.js";
+import { runStatusToChatMessage } from "../../loops/loop-chat.js";
 import { persistLoopRunWorkspaceMemory } from "../../services/workspace-memory.js";
-import { updateLoopRun } from "../../loops/store.js";
+import { appendRunChatMessages, updateLoopRun } from "../../loops/store.js";
 
 export async function deliverOutputActivity(input: {
   auth: AuthContext;
@@ -17,6 +18,16 @@ export async function deliverOutputActivity(input: {
     finishedAt: new Date().toISOString(),
     resultJson: { summary: input.summary, toolResults: input.state.toolResults },
   });
+
+  if (input.plan.profile !== "agentic") {
+    await appendRunChatMessages(input.runId, [
+      runStatusToChatMessage({
+        runId: input.runId,
+        status: "completed",
+        summary: input.summary,
+      }),
+    ]);
+  }
 
   await persistLoopRunWorkspaceMemory(input.auth, {
     workflowId: input.loopId,
@@ -35,4 +46,11 @@ export async function failRunActivity(input: {
     finishedAt: new Date().toISOString(),
     errorJson: { error: input.error },
   });
+  await appendRunChatMessages(input.runId, [
+    runStatusToChatMessage({
+      runId: input.runId,
+      status: "failed",
+      error: input.error,
+    }),
+  ]);
 }

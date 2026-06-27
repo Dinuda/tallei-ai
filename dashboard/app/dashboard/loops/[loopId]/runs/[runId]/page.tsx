@@ -39,11 +39,30 @@ type PendingApproval = {
   created_at: string;
 };
 
+type RunChatMessage = {
+  id: string;
+  role: string;
+  parts?: Array<{ type: string; text?: string }>;
+};
+
+function chatMessageText(message: RunChatMessage): string {
+  const parts = message.parts ?? [];
+  const text = parts
+    .filter((part) => part.type === "text" && part.text)
+    .map((part) => part.text)
+    .join("\n");
+  if (text) return text;
+  const toolPart = parts.find((part) => part.type.startsWith("tool-"));
+  if (toolPart) return `[${toolPart.type.replace(/^tool-/, "")}]`;
+  return "";
+}
+
 export default function LoopRunDetailPage() {
   const params = useParams<{ loopId: string; runId: string }>();
   const { loopId, runId } = params;
   const [run, setRun] = useState<LoopRun | null>(null);
   const [steps, setSteps] = useState<LoopRunStep[]>([]);
+  const [chatMessages, setChatMessages] = useState<RunChatMessage[]>([]);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,6 +78,7 @@ export default function LoopRunDetailPage() {
     setError(null);
     setRun(data.run ?? null);
     setSteps(data.steps ?? []);
+    setChatMessages(data.chatMessages ?? []);
     setPendingApproval(data.pendingApproval ?? null);
     return data.run as LoopRun | null;
   }, [loopId, runId]);
@@ -201,6 +221,35 @@ export default function LoopRunDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          {chatMessages.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Transcript ({chatMessages.length})</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ul className="space-y-2">
+                  {chatMessages.map((message) => {
+                    const text = chatMessageText(message);
+                    if (!text) return null;
+                    return (
+                      <li
+                        key={message.id}
+                        className={`rounded-lg border p-3 text-sm ${
+                          message.role === "user"
+                            ? "border-[#cce89e] bg-white"
+                            : "border-[#e4f5c6] bg-[#f8fdf2]"
+                        }`}
+                      >
+                        <span className="text-xs uppercase text-[#7a9a4a]">{message.role}</span>
+                        <p className="mt-1 whitespace-pre-wrap text-[#182506]">{text}</p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </CardContent>
+            </Card>
+          ) : null}
 
           {run.error_json ? (
             <Card>

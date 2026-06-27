@@ -74,7 +74,15 @@ Trigger payloads must include a workspace-scoped Composio entity id:
 tallei:{tenantId}:{userId}:{workspaceId}
 ```
 
-The handler maps Composio `trigger_slug` values (e.g. `GMAIL_NEW_GMAIL_MESSAGE`) to loop spec event triggers (`source` + `eventType`) and starts matching active loops.
+The handler resolves Composio `trigger_slug` values (e.g. `GMAIL_NEW_GMAIL_MESSAGE`) via `workspace_trigger_channels` and fans out to active loops in `loop_trigger_subscriptions` for the **workspace** in the webhook `entityId`. Duplicate webhook retries are skipped using `webhook_event_deliveries` (`external_event_id` + `loop_id` unique).
+
+### Workspace isolation & multiple Gmail accounts
+
+Each workspace uses its own Composio entity and connected accounts. **Personal** (alice@gmail.com) and **Work** (bob@company.com) each get a separate Composio trigger instance and separate webhook deliveries — same Tallei URL, different `entityId` and `connected_account_id` in the payload. Loops in one workspace never receive events meant for another.
+
+Multiple loops in the **same** workspace on the same account share one trigger instance (ref-counted) and fan out from a single webhook per event.
+
+Full diagrams, tables, and edge cases: **[Conductor → Event triggers & webhooks](./conductor.md#event-triggers--webhooks)**.
 
 Auth lifecycle webhooks (`connected_account.*`) invalidate the in-memory Composio session cache so connector status refreshes after OAuth.
 
@@ -85,6 +93,8 @@ Workspace-scoped connector status and OAuth (Composio session as source of truth
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/connectors` | List toolkits + live `connected` status |
+| `GET /api/connectors/:toolkit/triggers` | Composio trigger catalogue |
+| `GET /api/connectors/:toolkit/actions` | Composio action catalogue |
 | `GET /api/connectors/status/:toolkit` | Single toolkit status |
 | `POST /api/connectors/:toolkit/authorize` | Start OAuth (`redirectUrl`, `connectionRequestId`) |
 | `POST /api/connectors/authorize/:id/verify` | Poll until connected |
@@ -98,4 +108,4 @@ TALLEI_CONNECTORS__COMPOSIO_WEBHOOK_SECRET=...
 TALLEI_CONNECTORS__COMPOSIO_ENTITY_PREFIX=tallei
 ```
 
-Event-triggered loops register a Composio trigger instance on **Activate** (`loop_trigger_registrations` table).
+Event-triggered loops subscribe to a **shared** Composio trigger channel on **Activate** (`workspace_trigger_channels` + `loop_trigger_subscriptions`). Channels are scoped per **workspace + connected account + trigger slug** — each workspace uses its own Composio entity (`tallei:{tenant}:{user}:{workspaceId}`) and connected account IDs. Multiple loops in the same workspace sharing the same account reuse one Composio instance (ref-counted).

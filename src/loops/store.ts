@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "crypto";
 import type { AuthContext } from "../domain/auth/index.js";
 import { pool } from "../infrastructure/db/index.js";
 import type { CompiledPlan, LoopSpec } from "./spec.js";
-import { compiledPlanSchema, loopSpecSchema } from "./spec.js";
+import { compiledPlanSchema, loopSpecSchema, parseStoredCompiledPlan, parseStoredLoopSpec } from "./spec.js";
 
 export type LoopRow = {
   id: string;
@@ -97,7 +97,7 @@ function mapLoop(row: LoopRow) {
 
 export async function createLoop(
   auth: AuthContext,
-  input: { workspaceId: string; name: string; templateId?: string },
+  input: { workspaceId: string; name: string; templateId?: string; prompt?: string },
 ): Promise<{ loop: ReturnType<typeof mapLoop>; spec: LoopSpec }> {
   const loopId = randomUUID();
   const result = await pool.query<LoopRow>(
@@ -106,8 +106,17 @@ export async function createLoop(
      RETURNING *`,
     [loopId, auth.tenantId, auth.userId, input.workspaceId, input.name.trim()]
   );
-  const { seedSpecFromTemplate } = await import("./patch.js");
-  const spec = seedSpecFromTemplate(input.workspaceId, input.templateId ?? "");
+  const { applySpecPatch, seedSpecFromTemplate } = await import("./patch.js");
+  let spec = seedSpecFromTemplate(input.workspaceId, input.templateId ?? "");
+  const prompt = input.prompt?.trim();
+  if (prompt && !input.templateId) {
+    spec = applySpecPatch(spec, {
+      intent: {
+        goal: prompt,
+        outcome: prompt,
+      },
+    });
+  }
   const saved = await saveSpecDraft(auth, loopId, spec, input.templateId ?? "manual");
   return { loop: mapLoop(result.rows[0]), spec: saved };
 }
@@ -144,7 +153,7 @@ export async function getLatestSpec(auth: AuthContext, loopId: string): Promise<
   );
   const row = result.rows[0];
   if (!row) return null;
-  return loopSpecSchema.parse(row.spec_json);
+  return parseStoredLoopSpec(row.spec_json);
 }
 
 export async function saveSpecDraft(
@@ -164,6 +173,7 @@ export async function saveSpecDraft(
      VALUES ($1, $2, $3, $4::jsonb, $5)`,
     [randomUUID(), loopId, revision, JSON.stringify(parsed), source]
   );
+  await linkBuildChatThread({ auth, loopId, specRevision: revision });
   await pool.query(
     `UPDATE loops SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
     [loopId, auth.tenantId, auth.userId]
@@ -211,6 +221,12 @@ export async function saveCompiledPlan(
     `UPDATE loops SET updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND user_id = $3`,
     [loopId, auth.tenantId, auth.userId]
   );
+  await linkBuildChatThread({
+    auth,
+    loopId,
+    specRevision: parsed.specRevision,
+    compiledPlanId: parsed.id,
+  });
   return parsed;
 }
 
@@ -221,7 +237,7 @@ export async function getCompiledPlan(planId: string): Promise<CompiledPlan | nu
   );
   const row = result.rows[0];
   if (!row) return null;
-  return compiledPlanSchema.parse(row.plan_json);
+  return parseStoredCompiledPlan(row.plan_json);
 }
 
 export async function getNextPlanRevision(loopId: string): Promise<number> {
@@ -290,6 +306,7 @@ export async function createLoopRun(input: {
   triggerKind: string;
   temporalWorkflowId?: string;
   resultJson?: unknown;
+  skipChatThread?: boolean;
 }): Promise<LoopRunRow> {
   const id = input.id ?? randomUUID();
   const result = await pool.query<LoopRunRow>(
@@ -307,6 +324,21 @@ export async function createLoopRun(input: {
       input.resultJson ? JSON.stringify(input.resultJson) : null,
     ]
   );
+  const owner = await pool.query<{ tenant_id: string; user_id: string }>(
+    `SELECT tenant_id, user_id FROM loops WHERE id = $1 LIMIT 1`,
+    [input.loopId],
+  );
+  const row = owner.rows[0];
+  if (row && !input.skipChatThread) {
+    await ensureRunChatThread({
+      loopId: input.loopId,
+      runId: id,
+      workspaceId: input.workspaceId,
+      tenantId: row.tenant_id,
+      userId: row.user_id,
+      compiledPlanId: input.compiledPlanId,
+    });
+  }
   return result.rows[0];
 }
 
@@ -373,6 +405,8 @@ export async function insertRunStep(input: {
       input.status,
     ]
   );
+  const { stepToChatMessages } = await import("./loop-chat.js");
+  await appendRunChatMessages(input.runId, stepToChatMessages(input));
 }
 
 export async function listLoopRuns(auth: AuthContext, loopId: string): Promise<LoopRunRow[]> {
@@ -399,6 +433,32 @@ export async function getLoopRun(
     [runId, loopId, auth.tenantId, auth.userId],
   );
   return result.rows[0] ?? null;
+}
+
+/** Latest completed smoke test for a compiled plan (survives across chat turns). */
+export async function getLatestPassingTestRunForPlan(
+  auth: AuthContext,
+  loopId: string,
+  compiledPlanId: string,
+): Promise<{ runId: string } | null> {
+  const result = await pool.query<{ id: string }>(
+    `SELECT r.id
+     FROM loop_runs r
+     INNER JOIN loops l ON l.id = r.loop_id
+     WHERE r.loop_id = $1
+       AND r.compiled_plan_id = $2
+       AND r.trigger_kind = 'test'
+       AND r.status = 'completed'
+       AND COALESCE(r.result_json->>'testRun', 'false') = 'true'
+       AND COALESCE(r.result_json->>'status', '') = 'passed'
+       AND l.tenant_id = $3
+       AND l.user_id = $4
+     ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
+     LIMIT 1`,
+    [loopId, compiledPlanId, auth.tenantId, auth.userId],
+  );
+  const row = result.rows[0];
+  return row ? { runId: row.id } : null;
 }
 
 export async function listLoopRunSteps(
@@ -533,13 +593,13 @@ export async function findActiveLoopsByComposioTriggerSlug(
   const result = await pool.query<{ loop_id: string; active_plan_id: string; workspace_id: string }>(
     `SELECT l.id AS loop_id, l.active_plan_id, l.workspace_id
      FROM loops l
-     INNER JOIN loop_trigger_registrations r ON r.loop_id = l.id
+     INNER JOIN loop_trigger_subscriptions s ON s.loop_id = l.id AND s.status = 'active'
+     INNER JOIN workspace_trigger_channels c ON c.id = s.channel_id AND c.status = 'active'
      WHERE l.workspace_id = $1
        AND l.status = 'active'
        AND l.active_plan_id IS NOT NULL
-       AND r.status = 'active'
-       AND r.composio_trigger_slug = $2`,
-    [workspaceId, composioTriggerSlug],
+       AND c.composio_trigger_slug = $2`,
+    [workspaceId, composioTriggerSlug.toUpperCase()],
   );
   return result.rows
     .filter((r) => r.active_plan_id)
@@ -548,4 +608,291 @@ export async function findActiveLoopsByComposioTriggerSlug(
       activePlanId: r.active_plan_id!,
       workspaceId: r.workspace_id,
     }));
+}
+
+export async function countRunningEventRuns(workspaceId: string): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM loop_runs
+     WHERE workspace_id = $1
+       AND trigger_kind = 'event'
+       AND status = 'running'`,
+    [workspaceId],
+  );
+  return Number.parseInt(result.rows[0]?.count ?? "0", 10);
+}
+
+export async function getLoopEventTriggerStatus(
+  loopId: string,
+): Promise<{
+  subscribed: boolean;
+  subscriptionStatus: string | null;
+  composioTriggerSlug: string | null;
+  channelStatus: string | null;
+  composioInstanceId: string | null;
+} | null> {
+  const result = await pool.query<{
+    sub_status: string | null;
+    composio_trigger_slug: string | null;
+    channel_status: string | null;
+    composio_instance_id: string | null;
+  }>(
+    `SELECT s.status AS sub_status,
+            c.composio_trigger_slug,
+            c.status AS channel_status,
+            c.composio_instance_id
+     FROM loops l
+     LEFT JOIN loop_trigger_subscriptions s ON s.loop_id = l.id
+     LEFT JOIN workspace_trigger_channels c ON c.id = s.channel_id
+     WHERE l.id = $1
+     LIMIT 1`,
+    [loopId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const subscribed = row.sub_status === "active" && row.channel_status === "active";
+  return {
+    subscribed,
+    subscriptionStatus: row.sub_status,
+    composioTriggerSlug: row.composio_trigger_slug,
+    channelStatus: row.channel_status,
+    composioInstanceId: row.composio_instance_id,
+  };
+}
+
+export async function getConductorChatMessages(
+  auth: AuthContext,
+  loopId: string,
+): Promise<import("ai").UIMessage[]> {
+  return getBuildChatMessages(auth, loopId);
+}
+
+export async function saveConductorChatMessages(
+  auth: AuthContext,
+  loopId: string,
+  messages: import("ai").UIMessage[],
+): Promise<import("ai").UIMessage[]> {
+  return saveBuildChatMessages(auth, loopId, messages);
+}
+
+export async function getBuildChatThreadMeta(
+  auth: AuthContext,
+  loopId: string,
+): Promise<import("./loop-chat.js").LoopChatThreadMeta | null> {
+  const result = await pool.query<{ spec_revision: number | null; compiled_plan_id: string | null }>(
+    `SELECT spec_revision, compiled_plan_id
+     FROM loop_chat_threads
+     WHERE loop_id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND kind = 'build'
+       AND run_id IS NULL
+     LIMIT 1`,
+    [loopId, auth.tenantId, auth.userId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    specRevision: row.spec_revision,
+    compiledPlanId: row.compiled_plan_id,
+  };
+}
+
+export async function getBuildChatMessages(
+  auth: AuthContext,
+  loopId: string,
+): Promise<import("ai").UIMessage[]> {
+  const loop = await getLoop(auth, loopId);
+  if (!loop) return [];
+  const { parseStoredConductorChatMessages } = await import("./conductor-chat.js");
+  const result = await pool.query<{ messages_json: unknown }>(
+    `SELECT messages_json
+     FROM loop_chat_threads
+     WHERE loop_id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND kind = 'build'
+       AND run_id IS NULL
+     LIMIT 1`,
+    [loopId, auth.tenantId, auth.userId],
+  );
+  return parseStoredConductorChatMessages(result.rows[0]?.messages_json ?? []);
+}
+
+export async function saveBuildChatMessages(
+  auth: AuthContext,
+  loopId: string,
+  messages: import("ai").UIMessage[],
+): Promise<import("ai").UIMessage[]> {
+  const loop = await getLoop(auth, loopId);
+  if (!loop) throw new Error("Loop not found");
+  const { sanitizeConductorChatMessages } = await import("./conductor-chat.js");
+  const sanitized = sanitizeConductorChatMessages(messages);
+  await pool.query(
+    `INSERT INTO loop_chat_threads (
+       loop_id, workspace_id, tenant_id, user_id, kind, messages_json, updated_at
+     )
+     SELECT $1, $2, $3, $4, 'build', $5::jsonb, NOW()
+     WHERE NOT EXISTS (
+       SELECT 1 FROM loop_chat_threads
+       WHERE loop_id = $1
+         AND tenant_id = $3
+         AND user_id = $4
+         AND kind = 'build'
+         AND run_id IS NULL
+     )`,
+    [loopId, loop.workspaceId, auth.tenantId, auth.userId, JSON.stringify(sanitized)],
+  );
+  await pool.query(
+    `UPDATE loop_chat_threads
+     SET workspace_id = $2,
+         messages_json = $3::jsonb,
+         updated_at = NOW()
+     WHERE loop_id = $1
+       AND tenant_id = $4
+       AND user_id = $5
+       AND kind = 'build'
+       AND run_id IS NULL`,
+    [loopId, loop.workspaceId, JSON.stringify(sanitized), auth.tenantId, auth.userId],
+  );
+  return sanitized;
+}
+
+export async function linkBuildChatThread(input: {
+  auth: AuthContext;
+  loopId: string;
+  specRevision?: number;
+  compiledPlanId?: string;
+}): Promise<void> {
+  const loop = await getLoop(input.auth, input.loopId);
+  if (!loop) return;
+  await pool.query(
+    `INSERT INTO loop_chat_threads (
+       loop_id, workspace_id, tenant_id, user_id, kind, messages_json, spec_revision, compiled_plan_id, updated_at
+     )
+     SELECT $1, $2, $3, $4, 'build', '[]'::jsonb, $5, $6, NOW()
+     WHERE NOT EXISTS (
+       SELECT 1 FROM loop_chat_threads
+       WHERE loop_id = $1
+         AND tenant_id = $3
+         AND user_id = $4
+         AND kind = 'build'
+         AND run_id IS NULL
+     )`,
+    [
+      input.loopId,
+      loop.workspaceId,
+      input.auth.tenantId,
+      input.auth.userId,
+      input.specRevision ?? null,
+      input.compiledPlanId ?? null,
+    ],
+  );
+  await pool.query(
+    `UPDATE loop_chat_threads
+     SET spec_revision = COALESCE($4, spec_revision),
+         compiled_plan_id = COALESCE($5, compiled_plan_id),
+         updated_at = NOW()
+     WHERE loop_id = $1
+       AND tenant_id = $2
+       AND user_id = $3
+       AND kind = 'build'
+       AND run_id IS NULL`,
+    [
+      input.loopId,
+      input.auth.tenantId,
+      input.auth.userId,
+      input.specRevision ?? null,
+      input.compiledPlanId ?? null,
+    ],
+  );
+}
+
+export async function ensureRunChatThread(input: {
+  loopId: string;
+  runId: string;
+  workspaceId: string;
+  tenantId: string;
+  userId: string;
+  compiledPlanId: string;
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO loop_chat_threads (
+       loop_id, workspace_id, tenant_id, user_id, kind, run_id, compiled_plan_id, messages_json, updated_at
+     )
+     SELECT $1, $2, $3, $4, 'run', $5, $6, '[]'::jsonb, NOW()
+     WHERE NOT EXISTS (
+       SELECT 1 FROM loop_chat_threads WHERE run_id = $5 AND kind = 'run'
+     )`,
+    [
+      input.loopId,
+      input.workspaceId,
+      input.tenantId,
+      input.userId,
+      input.runId,
+      input.compiledPlanId,
+    ],
+  );
+}
+
+export async function getRunChatMessages(
+  auth: AuthContext,
+  loopId: string,
+  runId: string,
+): Promise<import("ai").UIMessage[]> {
+  const run = await getLoopRun(auth, loopId, runId);
+  if (!run) return [];
+  const { parseStoredConductorChatMessages } = await import("./conductor-chat.js");
+  const result = await pool.query<{ messages_json: unknown }>(
+    `SELECT messages_json
+     FROM loop_chat_threads
+     WHERE run_id = $1
+       AND loop_id = $2
+       AND tenant_id = $3
+       AND user_id = $4
+       AND kind = 'run'
+     LIMIT 1`,
+    [runId, loopId, auth.tenantId, auth.userId],
+  );
+  return parseStoredConductorChatMessages(result.rows[0]?.messages_json ?? []);
+}
+
+export async function appendRunChatMessages(
+  runId: string,
+  incoming: import("ai").UIMessage[],
+): Promise<void> {
+  if (!incoming.length) return;
+  const run = await getLoopRunById(runId);
+  if (!run) return;
+  const loop = await pool.query<{ tenant_id: string; user_id: string }>(
+    `SELECT tenant_id, user_id FROM loops WHERE id = $1 LIMIT 1`,
+    [run.loop_id],
+  );
+  const owner = loop.rows[0];
+  if (!owner) return;
+
+  const { sanitizeConductorChatMessages, parseStoredConductorChatMessages } = await import("./conductor-chat.js");
+  const { mergeChatMessages } = await import("./loop-chat.js");
+  const existing = await pool.query<{ messages_json: unknown }>(
+    `SELECT messages_json FROM loop_chat_threads WHERE run_id = $1 AND kind = 'run' LIMIT 1`,
+    [runId],
+  );
+  const merged = mergeChatMessages(
+    parseStoredConductorChatMessages(existing.rows[0]?.messages_json ?? []),
+    sanitizeConductorChatMessages(incoming),
+  );
+  await ensureRunChatThread({
+    loopId: run.loop_id,
+    runId,
+    workspaceId: run.workspace_id,
+    tenantId: owner.tenant_id,
+    userId: owner.user_id,
+    compiledPlanId: run.compiled_plan_id,
+  });
+  await pool.query(
+    `UPDATE loop_chat_threads
+     SET messages_json = $2::jsonb, updated_at = NOW()
+     WHERE run_id = $1 AND kind = 'run'`,
+    [runId, JSON.stringify(merged)],
+  );
 }

@@ -34,7 +34,7 @@ function isStreamingChatPath(path: string): boolean {
   return path.endsWith("/chat");
 }
 
-async function proxy(req: NextRequest, method: "GET" | "POST" | "PATCH" | "DELETE"): Promise<Response> {
+async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"): Promise<Response> {
   if (!SECRET) {
     return Response.json(
       { error: "Dashboard misconfigured: INTERNAL_API_SECRET is not set." },
@@ -103,6 +103,10 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   return proxy(req, "POST");
+}
+
+export async function PUT(req: NextRequest) {
+  return proxy(req, "PUT");
 }
 
 export async function PATCH(req: NextRequest) {

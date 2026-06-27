@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Circle, CornerDownLeft, Pencil, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Circle, CornerDownLeft, Pencil, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,8 @@ export type InteractivePromptOption = {
   value: string;
   description?: string;
   icon?: string;
+  outcomeId?: string;
+  role?: string;
 };
 
 export type InteractivePromptAnswer = {
@@ -77,6 +79,10 @@ export function InteractivePromptMenu({
   disabled = false,
   submittedAnswer,
   placement = "transcript",
+  step,
+  selectionHint,
+  rankedAppsLayout = false,
+  topAppCount = 5,
   onSubmit,
   onDismiss,
 }: {
@@ -88,6 +94,11 @@ export function InteractivePromptMenu({
   disabled?: boolean;
   submittedAnswer?: InteractivePromptAnswer;
   placement?: "transcript" | "composer";
+  step?: { index: number; total: number };
+  selectionHint?: string;
+  /** Top N recommended apps + searchable "More apps" section. */
+  rankedAppsLayout?: boolean;
+  topAppCount?: number;
   onSubmit: (answer: InteractivePromptAnswer) => void;
   onDismiss?: () => void;
 }) {
@@ -95,11 +106,105 @@ export function InteractivePromptMenu({
     submittedAnswer?.selectedOptionIds ?? []
   );
   const [otherText, setOtherText] = useState(submittedAnswer?.otherText ?? "");
+  const [appSearch, setAppSearch] = useState("");
   const recommended = useMemo(
     () => new Set(recommendedOptionIds),
     [recommendedOptionIds]
   );
   const isSubmitted = Boolean(submittedAnswer);
+
+  const hasOutcomeGroups = useMemo(
+    () => options.some((option) => Boolean(option.outcomeId)),
+    [options]
+  );
+
+  const { topOptions, moreOptions, rankedDisplayOptions } = useMemo(() => {
+    if (!rankedAppsLayout) {
+      return {
+        topOptions: options,
+        moreOptions: [] as InteractivePromptOption[],
+        rankedDisplayOptions: options,
+      };
+    }
+
+    const topIds = recommendedOptionIds.slice(0, topAppCount);
+    const top = topIds
+      .map((id) => options.find((option) => option.id === id))
+      .filter((option): option is InteractivePromptOption => Boolean(option));
+
+    const resolvedTop = top.length > 0 ? top : options.slice(0, topAppCount);
+    const topIdSet = new Set(resolvedTop.map((option) => option.id));
+    const rest = options.filter((option) => !topIdSet.has(option.id));
+
+    const query = appSearch.trim().toLowerCase();
+    const filterOptions = (rows: InteractivePromptOption[]) => {
+      if (!query) return rows;
+      return rows.filter((option) => {
+        const haystack = `${option.label} ${option.value} ${option.description ?? ""}`.toLowerCase();
+        return haystack.includes(query);
+      });
+    };
+
+    const filteredTop = filterOptions(resolvedTop);
+    const filteredMore = filterOptions(rest);
+    const searching = query.length > 0;
+
+    return {
+      topOptions: resolvedTop,
+      moreOptions: rest,
+      rankedDisplayOptions: searching
+        ? filterOptions(options)
+        : [...filteredTop, ...filteredMore],
+    };
+  }, [options, rankedAppsLayout, recommendedOptionIds, topAppCount, appSearch]);
+
+  const isSearching = rankedAppsLayout && appSearch.trim().length > 0;
+  const showRankedMoreLabel = rankedAppsLayout && !isSearching && moreOptions.length > 0;
+
+  function renderOption(option: InteractivePromptOption, index: number) {
+    const selected = selectedIds.includes(option.id);
+    return (
+      <button
+        className={cn(
+          "flex w-full items-start gap-3 border border-transparent px-3 py-2.5 text-left transition-colors",
+          selected ? "border-[#d1d5db] bg-[#fafafa] text-[#111827]" : "hover:bg-[#fafafa]",
+          (disabled || isSubmitted) && "cursor-default"
+        )}
+        disabled={disabled || isSubmitted}
+        key={option.id ?? `option-${index}`}
+        onClick={() => toggle(option.id)}
+        type="button"
+      >
+        <ProviderLogo
+          icon={option.icon}
+          index={index}
+          label={option.label}
+          selected={selected}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+            <span>{option.label}</span>
+            {recommended.has(option.id) && (
+              <span className="border border-[#e5e7eb] bg-[#fafafa] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280]">
+                Recommended
+              </span>
+            )}
+          </span>
+          {option.description && (
+            <span className="mt-0.5 block text-xs text-[#6b7280]">
+              {option.description}
+            </span>
+          )}
+        </span>
+        <Circle
+          className={cn(
+            "mt-2 size-2 text-[#d1d5db]",
+            selected && "fill-[#111827] text-[#111827]"
+          )}
+        />
+      </button>
+    );
+  }
 
   useEffect(() => {
     if (!onDismiss || isSubmitted || disabled) return;
@@ -112,13 +217,23 @@ export function InteractivePromptMenu({
 
   function toggle(optionId: string) {
     if (disabled || isSubmitted) return;
-    setSelectedIds((current) =>
-      allowMultiple
+    const option = options.find((row) => row.id === optionId);
+    setSelectedIds((current) => {
+      if (allowMultiple && option?.outcomeId) {
+        const withoutSameOutcome = current.filter((id) => {
+          const row = options.find((opt) => opt.id === id);
+          return row?.outcomeId !== option.outcomeId;
+        });
+        return current.includes(optionId)
+          ? withoutSameOutcome
+          : [...withoutSameOutcome, optionId];
+      }
+      return allowMultiple
         ? current.includes(optionId)
           ? current.filter((id) => id !== optionId)
           : [...current, optionId]
-        : [optionId]
-    );
+        : [optionId];
+    });
   }
 
   function submit() {
@@ -148,54 +263,61 @@ export function InteractivePromptMenu({
           : "my-3 border border-[#d1d5db] shadow-sm"
       )}
     >
-      <div className="border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
-        {question}
+      <div className="flex items-center justify-between gap-3 border-b border-[#e5e7eb] bg-[#fafafa] px-4 py-3">
+        <div className="min-w-0 flex-1 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
+          {question}
+        </div>
+        {step ? (
+          <div className="flex shrink-0 items-center gap-1 text-xs text-[#6b7280]">
+            <ChevronLeft className="size-3.5 opacity-40" />
+            <span>{step.index} of {step.total}</span>
+            <ChevronRight className="size-3.5 opacity-40" />
+          </div>
+        ) : null}
       </div>
-      <div className="space-y-1 p-2">
-        {options.map((option, index) => {
-          const selected = selectedIds.includes(option.id);
-          return (
-            <button
-              className={cn(
-                "flex w-full items-start gap-3 border border-transparent px-3 py-2.5 text-left transition-colors",
-                selected ? "border-[#d1d5db] bg-[#fafafa] text-[#111827]" : "hover:bg-[#fafafa]",
-                (disabled || isSubmitted) && "cursor-default"
-              )}
+      {rankedAppsLayout ? (
+        <div className="border-b border-[#e5e7eb] px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Search className="size-4 shrink-0 text-[#9ca3af]" />
+            <Input
+              className="h-9 border-[#e5e7eb] bg-[#fafafa] text-sm shadow-none placeholder:text-[#9ca3af] focus-visible:ring-1 focus-visible:ring-[#d1d5db]"
               disabled={disabled || isSubmitted}
-              key={option.id ?? `option-${index}`}
-              onClick={() => toggle(option.id)}
-              type="button"
-            >
-              <ProviderLogo
-                icon={option.icon}
-                index={index}
-                label={option.label}
-                selected={selected}
-              />
-              <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[#111827]" style={{ fontFamily: "var(--font-title)" }}>
-                  <span>{option.label}</span>
-                  {recommended.has(option.id) && (
-                    <span className="border border-[#e5e7eb] bg-[#fafafa] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#6b7280]">
-                      Recommended
-                    </span>
-                  )}
-                </span>
-                {option.description && (
-                  <span className="mt-0.5 block text-xs text-[#6b7280]">
-                    {option.description}
-                  </span>
-                )}
-              </span>
-              <Circle
-                className={cn(
-                  "mt-2 size-2 text-[#d1d5db]",
-                  selected && "fill-[#111827] text-[#111827]"
-                )}
-              />
-            </button>
-          );
-        })}
+              onChange={(event) => setAppSearch(event.target.value)}
+              placeholder="Search apps…"
+              value={appSearch}
+            />
+          </div>
+        </div>
+      ) : null}
+      <div className="p-2">
+        {rankedAppsLayout ? (
+          <div className="max-h-[21rem] space-y-1 overflow-y-auto">
+            {rankedDisplayOptions.length > 0 ? (
+              rankedDisplayOptions.map((option, index) => {
+                const showMoreDivider =
+                  showRankedMoreLabel
+                  && index === topOptions.length
+                  && index > 0;
+                return (
+                  <div key={option.id ?? `option-${index}`}>
+                    {showMoreDivider ? (
+                      <p className="sticky top-0 z-10 bg-white px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-[#9ca3af]">
+                        More apps
+                      </p>
+                    ) : null}
+                    {renderOption(option, index)}
+                  </div>
+                );
+              })
+            ) : (
+              <p className="px-3 py-2 text-xs text-[#9ca3af]">No apps match your search.</p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {options.map((option, index) => renderOption(option, index))}
+          </div>
+        )}
       </div>
       {allowOther && !isSubmitted && (
         <div className="mx-3 mt-2 border-t border-[#e5e7eb] pt-3">
@@ -235,9 +357,16 @@ export function InteractivePromptMenu({
           <span className="text-xs text-[#6b7280]">
             {isSubmitted
               ? `Answered: ${submittedAnswer?.answerText}`
-              : allowMultiple
-                ? "Select one or more options, or describe your own approach below"
-                : "Pick an option, or describe your own approach below"}
+              : selectionHint
+                ?? (rankedAppsLayout
+                  ? "Search or scroll to find an app"
+                  : allowMultiple && hasOutcomeGroups
+                  ? "Pick one connector per part of the loop, or describe your own approach below"
+                  : allowMultiple
+                    ? "Select one or more options, or describe your own approach below"
+                    : recommendedOptionIds.length > 0
+                      ? "Pick a recommended app above, or browse more apps below"
+                      : "Pick an option, or describe your own approach below")}
           </span>
         </div>
         {!isSubmitted && (
@@ -252,7 +381,7 @@ export function InteractivePromptMenu({
             type="button"
             style={{ borderRadius: 0 }}
           >
-            Submit <CornerDownLeft className="size-3.5" />
+            {placement === "composer" ? "Continue" : "Submit"} <CornerDownLeft className="size-3.5" />
           </Button>
         )}
       </div>

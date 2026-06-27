@@ -318,10 +318,11 @@ const providerRoleJsonSchema = {
 
 let plannerClient: OpenAI | null = null;
 
-function getPlannerClient(): OpenAI {
-  if (plannerClient) return plannerClient;
-  plannerClient = createLoopChatOpenAiSdk();
-  return plannerClient;
+function getPlannerClient(userId?: string): OpenAI {
+  if (!userId && plannerClient) return plannerClient;
+  const client = createLoopChatOpenAiSdk({ userId });
+  if (!userId) plannerClient = client;
+  return client;
 }
 
 function normalizeWebSearches(value: unknown): WebSearchResult[] {

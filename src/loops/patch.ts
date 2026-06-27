@@ -12,6 +12,7 @@ export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
     trigger: patch.trigger ?? current.trigger,
     profile: patch.profile ?? current.profile,
     bindings: patch.bindings ?? current.bindings,
+    taskBlueprint: patch.taskBlueprint ?? current.taskBlueprint,
     agent: patch.agent
       ? { ...(current.agent ?? { instructions: "", maxSteps: 12, maxTokens: 8_000 }), ...patch.agent }
       : current.agent,
@@ -29,7 +30,8 @@ export function getMissingSlots(spec: LoopSpec): string[] {
   if (!spec.intent.goal.trim()) missing.push("intent.goal");
   if (!spec.intent.outcome.trim()) missing.push("intent.outcome");
   if (spec.trigger.kind === "schedule" && !spec.trigger.cron.trim()) missing.push("trigger.cron");
-  if (spec.trigger.kind === "event" && !spec.trigger.eventType.trim()) missing.push("trigger.eventType");
+  if (spec.trigger.kind === "event" && !spec.trigger.composioSlug.trim()) missing.push("trigger.composioSlug");
+  if (spec.trigger.kind === "event" && !spec.trigger.source.trim()) missing.push("trigger.source");
   if (spec.profile === "agentic" && !spec.agent?.instructions?.trim()) missing.push("agent.instructions");
   if (spec.bindings.length === 0) missing.push("bindings");
   if (spec.output.kind !== "none" && !spec.output.target?.trim()) missing.push("output.target");
@@ -54,7 +56,6 @@ export function seedSpecFromTemplate(
           successCriteria: ["Relevant sources", "Actionable summary"],
         },
         profile: "agentic",
-        bindings: [{ capability: "web.search", connector: "composio", optional: true }],
         trigger: { kind: "schedule", cron: "0 7 * * *", timezone: "UTC" },
         output: { kind: "chat" },
       });
@@ -66,10 +67,6 @@ export function seedSpecFromTemplate(
           successCriteria: ["Quality curation", "Delivered on schedule"],
         },
         profile: "agentic",
-        bindings: [
-          { capability: "web.search", connector: "composio", optional: true },
-          { capability: "email.send", connector: "gmail", optional: true },
-        ],
         trigger: { kind: "schedule", cron: "0 9 * * 5", timezone: "UTC" },
         output: { kind: "email" },
         approval: { mode: "ask", sensitiveCapabilities: ["email.send"] },
@@ -82,12 +79,8 @@ export function seedSpecFromTemplate(
           successCriteria: ["Consistent scoring", "Timely notification"],
         },
         profile: "agentic",
-        trigger: { kind: "event", source: "crm", eventType: "lead.created" },
-        bindings: [
-          { capability: "crm.contact.read", connector: "hubspot", optional: true },
-          { capability: "chat.send", connector: "slack", optional: true },
-        ],
-        output: { kind: "chat", connector: "slack" },
+        trigger: { kind: "event", source: "hubspot", composioSlug: "HUBSPOT_NEW_CONTACT", eventType: "lead.created" },
+        output: { kind: "chat" },
       });
     case "support_auto_reply":
       return applySpecPatch(base, {
@@ -97,8 +90,7 @@ export function seedSpecFromTemplate(
           successCriteria: ["Accurate classification", "Safe replies"],
         },
         profile: "agentic",
-        trigger: { kind: "event", source: "zendesk", eventType: "ticket.created" },
-        bindings: [{ capability: "support.reply.send", connector: "zendesk", optional: true }],
+        trigger: { kind: "event", source: "zendesk", composioSlug: "ZENDESK_NEW_TICKET", eventType: "ticket.created" },
         approval: { mode: "ask", sensitiveCapabilities: ["support.reply.send"] },
       });
     case "smart_alerts":

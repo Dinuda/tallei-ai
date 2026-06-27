@@ -1,9 +1,6 @@
-import { generateText } from "ai";
-
-import { getStreamingLanguageModel } from "../../providers/ai/streaming/language-model.js";
 import {
   buildRuntimePlannerPrompt,
-  parsePlannerDecisionText,
+  runPlannerDecision,
 } from "../../loops/planning-agent.js";
 import { type CompiledPlan } from "../../loops/spec.js";
 import { insertRunStep } from "../../loops/store.js";
@@ -16,7 +13,7 @@ export async function plannerActivity(input: {
   plan: CompiledPlan;
   runId: string;
   state: AgentRunState;
-}): Promise<ReturnType<typeof parsePlannerDecisionText>> {
+}): Promise<Awaited<ReturnType<typeof runPlannerDecision>>> {
   const memoryHits = await searchWorkspaceMemories(input.auth, input.plan.intent.goal, 5, {
     workflowId: input.plan.loopId,
   }).catch(() => []);
@@ -27,18 +24,14 @@ export async function plannerActivity(input: {
       id: t.id,
       capability: t.capability,
       connector: t.connector,
+      actionSlug: t.actionSlug,
+      inputSchema: t.inputSchema,
     })),
     stepHistory: input.state.toolResults,
     workspaceMemory: memoryHits.map((m) => m.text),
   });
 
-  const { text } = await generateText({
-    model: getStreamingLanguageModel("planner"),
-    system: "You are Tallei's loop runtime planner. Reply with a single JSON object only.",
-    prompt,
-  });
-
-  const decision = parsePlannerDecisionText(text);
+  const decision = await runPlannerDecision(prompt, { userId: input.auth.userId });
 
   await insertRunStep({
     runId: input.runId,

@@ -22,16 +22,25 @@ export default function LoopRunsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void (async () => {
+    let cancelled = false;
+    const load = async () => {
       setLoading(true);
       try {
         const res = await apiFetch(`/api/loops/${loopId}/runs`);
         const data = await res.json();
-        if (res.ok) setRuns(data.runs ?? []);
+        if (!cancelled && res.ok) setRuns(data.runs ?? []);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    })();
+    };
+    void load();
+    const interval = window.setInterval(() => {
+      void load();
+    }, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [loopId]);
 
   return (
@@ -44,8 +53,15 @@ export default function LoopRunsPage() {
       </div>
       {loading ? <p className="text-sm text-muted-foreground">Loading...</p> : null}
       {!loading && runs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No runs yet.</p>
-      ) : (
+        <p className="text-sm text-muted-foreground">
+          No runs yet. Event-triggered runs appear here after Composio delivers a webhook (not the same as test runs).
+        </p>
+      ) : !loading && runs.every((run) => run.trigger_kind === "test") ? (
+        <p className="mb-3 text-sm text-[#3d5c18]">
+          Only smoke tests so far — send a real email to the connected inbox. Gmail triggers are polled by Composio (can take a few minutes).
+        </p>
+      ) : null}
+      {!loading && runs.length === 0 ? null : (
         <ul className="space-y-2">
           {runs.map((run) => (
             <li key={run.id}>
@@ -54,7 +70,10 @@ export default function LoopRunsPage() {
                 className="flex items-center justify-between rounded-lg border border-[#e4f5c6] bg-white px-4 py-3 hover:bg-[#f8fdf2]"
               >
                 <span className="font-mono text-sm">{run.id.slice(0, 8)}…</span>
-                <span className="text-xs uppercase tracking-wide text-[#7a9a4a]">{run.status}</span>
+                <span className="flex items-center gap-2 text-xs uppercase tracking-wide text-[#7a9a4a]">
+                  <span>{run.trigger_kind}</span>
+                  <span>{run.status}</span>
+                </span>
               </Link>
             </li>
           ))}

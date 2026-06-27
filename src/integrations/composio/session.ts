@@ -98,7 +98,7 @@ function mapToolkitItem(item: {
 
 export async function listSessionToolkits(
   session: ComposioAgentSession,
-  options?: { limit?: number; search?: string; isConnected?: boolean },
+  options?: { limit?: number; search?: string; isConnected?: boolean; page?: number },
 ): Promise<ComposioToolkitView[]> {
   const limit =
     options?.limit !== undefined
@@ -106,10 +106,33 @@ export async function listSessionToolkits(
       : undefined;
   const response = await session.client.toolkits({
     ...(limit !== undefined ? { limit } : {}),
+    ...(options?.page !== undefined ? { page: options.page } : {}),
     ...(options?.search ? { search: options.search } : {}),
     ...(options?.isConnected !== undefined ? { isConnected: options.isConnected } : {}),
   });
   return (response.items ?? []).map(mapToolkitItem);
+}
+
+/** Paginate session toolkit rows to build a full connected-account map for the workspace entity. */
+export async function listAllSessionToolkits(
+  session: ComposioAgentSession,
+  options?: { isConnected?: boolean },
+): Promise<ComposioToolkitView[]> {
+  const merged = new Map<string, ComposioToolkitView>();
+  const maxPages = 20;
+  for (let page = 1; page <= maxPages; page += 1) {
+    const batch = await listSessionToolkits(session, {
+      limit: 50,
+      page,
+      ...(options?.isConnected !== undefined ? { isConnected: options.isConnected } : {}),
+    });
+    if (batch.length === 0) break;
+    for (const toolkit of batch) {
+      merged.set(toolkit.slug.toLowerCase(), toolkit);
+    }
+    if (batch.length < 50) break;
+  }
+  return [...merged.values()];
 }
 
 export async function listToolkitsForUser(

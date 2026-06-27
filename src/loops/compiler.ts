@@ -1,11 +1,11 @@
 import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../domain/auth/index.js";
-import { getAllTools, searchTools } from "../integrations/composio/tools.js";
+import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/composio/auth.js";
 import { listToolkitsForUser } from "../integrations/composio/session.js";
+import { resolveBindingAction, alignCapabilityWithAction, looksLikeComposioActionSlug } from "./binding-discovery.js";
 import {
   compiledPlanSchema,
-  DEFAULT_SENSITIVE_CAPABILITIES,
   loopSpecSchema,
   type CompiledPlan,
   type LoopSpec,
@@ -17,6 +17,7 @@ import {
   hashPlan,
   saveCompiledPlan,
 } from "./store.js";
+import { scoreSchemaFitForCapability, semanticCapabilityForAction, summarizeInputSchema } from "./tool-schema.js";
 
 export type CompileError = {
   code: string;
@@ -26,124 +27,7 @@ export type CompileError = {
   connectUrl?: string;
 };
 
-const CAPABILITY_ACTION_MAP: Record<string, Record<string, string>> = {
-  gmail: {
-    "email.read": "GMAIL_FETCH_EMAILS",
-    "email.send": "GMAIL_SEND_EMAIL",
-  },
-  outlook: {
-    "email.read": "OUTLOOK_LIST_MESSAGES",
-    "email.send": "OUTLOOK_SEND_EMAIL",
-  },
-  slack: {
-    "chat.send": "SLACK_SEND_MESSAGE",
-  },
-  composio: {
-    "web.search": "COMPOSIO_SEARCH_WEB",
-  },
-  hubspot: {
-    "crm.contact.read": "HUBSPOT_GET_CONTACT",
-    "crm.contact.write": "HUBSPOT_CREATE_CONTACT",
-  },
-  zendesk: {
-    "support.reply.send": "ZENDESK_CREATE_TICKET_REPLY",
-  },
-  notion: {
-    "docs.read": "NOTION_FETCH_PAGE",
-    "docs.write": "NOTION_CREATE_PAGE",
-  },
-  airtable: {
-    "crm.contact.read": "AIRTABLE_LIST_RECORDS",
-    "crm.contact.write": "AIRTABLE_CREATE_RECORD",
-  },
-};
-
-const CAPABILITY_SEARCH_HINTS: Record<string, string> = {
-  "email.read": "fetch read emails messages",
-  "email.send": "send email message",
-  "chat.send": "send message chat",
-  "web.search": "search web",
-  "crm.contact.read": "list get contacts",
-  "crm.contact.write": "create update contact",
-  "support.reply.send": "reply ticket support",
-  "docs.read": "fetch read page document",
-  "docs.write": "create write page document",
-};
-
-function resolveStaticActionSlug(connector: string, capability: string): string | null {
-  const toolkit = CAPABILITY_ACTION_MAP[connector.toLowerCase()];
-  if (!toolkit) return null;
-  return toolkit[capability] ?? null;
-}
-
-function scoreToolForCapability(
-  capability: string,
-  actionSlug: string,
-  name: string,
-  description: string,
-): number {
-  const capTokens = capability.split(/[._]/).filter(Boolean);
-  const haystack = `${actionSlug} ${name} ${description}`.toLowerCase();
-  return capTokens.reduce((score, token) => (haystack.includes(token) ? score + 1 : score), 0);
-}
-
-export async function resolveBindingAction(
-  connector: string,
-  capability: string,
-): Promise<{ actionSlug: string; inputSchema: Record<string, unknown>; toolkitVersion?: string } | null> {
-  const staticSlug = resolveStaticActionSlug(connector, capability);
-  if (staticSlug) {
-    const tools = await getAllTools(connector);
-    const match = tools.find((tool) => tool.actionSlug.toUpperCase() === staticSlug.toUpperCase());
-    return {
-      actionSlug: staticSlug,
-      inputSchema: match?.inputSchema ?? {},
-      ...(match?.toolkitVersion ? { toolkitVersion: match.toolkitVersion } : {}),
-    };
-  }
-
-  const hint = CAPABILITY_SEARCH_HINTS[capability] ?? capability.replace(/\./g, " ");
-  const searchQuery = `${connector} ${hint}`.trim();
-  const searchResults = await searchTools(searchQuery, 24);
-  const normalizedConnector = connector.toLowerCase();
-  const searchMatch = searchResults.find((r) => r.toolkit.toLowerCase() === normalizedConnector);
-  if (searchMatch) {
-    return {
-      actionSlug: searchMatch.actionSlug,
-      inputSchema: searchMatch.inputSchema ?? {},
-      ...(searchMatch.toolkitVersion ? { toolkitVersion: searchMatch.toolkitVersion } : {}),
-    };
-  }
-
-  const toolkitTools = await getAllTools(connector);
-  let best: {
-    actionSlug: string;
-    inputSchema: Record<string, unknown>;
-    toolkitVersion?: string;
-    score: number;
-  } | null = null;
-  for (const tool of toolkitTools) {
-    const score = scoreToolForCapability(capability, tool.actionSlug, tool.name, tool.description);
-    if (score === 0) continue;
-    if (!best || score > best.score) {
-      best = {
-        actionSlug: tool.actionSlug,
-        inputSchema: tool.inputSchema ?? {},
-        ...(tool.toolkitVersion ? { toolkitVersion: tool.toolkitVersion } : {}),
-        score,
-      };
-    }
-  }
-  if (best) {
-    return {
-      actionSlug: best.actionSlug,
-      inputSchema: best.inputSchema,
-      ...(best.toolkitVersion ? { toolkitVersion: best.toolkitVersion } : {}),
-    };
-  }
-
-  return null;
-}
+export { scoreToolForCapability } from "./binding-discovery.js";
 
 function validateCron(cron: string): boolean {
   const parts = cron.trim().split(/\s+/);
@@ -181,12 +65,23 @@ export async function compileLoopSpec(
     errors.push({ code: "INCOMPLETE_SPEC", message: "Sync profile requires sync.mapping", binding: "sync.mapping" });
   }
 
+  if (parsed.trigger.kind === "event") {
+    if (!parsed.trigger.composioSlug.trim()) {
+      errors.push({
+        code: "MISSING_TRIGGER_SLUG",
+        message: "Event triggers require composioSlug from the connector catalogue",
+        binding: "trigger.composioSlug",
+      });
+    }
+  }
+
   const { toolkits } = await listToolkitsForUser(auth, { isConnected: true, limit: 50 });
-  const connectedBySlug = new Map(toolkits.map((t) => [t.slug.toLowerCase(), t]));
+  const connectedBySlug = new Map(toolkits.map((t) => [normalizeToolkitSlug(t.slug), t]));
 
   const toolCatalog: ResolvedTool[] = [];
   for (const binding of parsed.bindings) {
-    const toolkit = connectedBySlug.get(binding.connector.toLowerCase());
+    const resolvedConnector = await resolveToolkitSlug(binding.connector);
+    const toolkit = connectedBySlug.get(normalizeToolkitSlug(resolvedConnector));
     if (!toolkit?.connected || !toolkit.connectedAccountId) {
       if (!binding.optional) {
         errors.push({
@@ -208,15 +103,40 @@ export async function compileLoopSpec(
       });
       continue;
     }
-    const sensitive = (
-      parsed.approval.sensitiveCapabilities.length > 0
-        ? parsed.approval.sensitiveCapabilities
-        : [...DEFAULT_SENSITIVE_CAPABILITIES]
-    ).includes(binding.capability);
+    let catalogCapability = binding.capability;
+    const schemaFit = scoreSchemaFitForCapability(
+      catalogCapability,
+      resolved.inputSchema,
+      resolved.actionSlug,
+    );
+    if (schemaFit < 0) {
+      const domain = looksLikeComposioActionSlug(catalogCapability)
+        ? (catalogCapability.split("_")[0]?.toLowerCase() || "tool")
+        : (catalogCapability.split(".")[0] || "tool");
+      const aligned = alignCapabilityWithAction(
+        looksLikeComposioActionSlug(catalogCapability)
+          ? semanticCapabilityForAction(resolved.actionSlug, resolved.inputSchema, domain)
+          : catalogCapability,
+        resolved.actionSlug,
+        resolved.inputSchema,
+      );
+      const retryFit = scoreSchemaFitForCapability(aligned, resolved.inputSchema, resolved.actionSlug);
+      if (retryFit < 0) {
+        const required = summarizeInputSchema(resolved.inputSchema).required.join(", ") || "specific fields";
+        errors.push({
+          code: "SCHEMA_MISMATCH",
+          message: `${catalogCapability} does not match ${resolved.actionSlug} — use capability ${aligned} (action requires: ${required})`,
+          binding: catalogCapability,
+        });
+        continue;
+      }
+      catalogCapability = aligned;
+    }
+    const sensitive = parsed.approval.sensitiveCapabilities.includes(catalogCapability);
 
     toolCatalog.push({
-      id: `tool_${binding.capability.replace(/\./g, "_")}`,
-      capability: binding.capability,
+      id: `tool_${catalogCapability.replace(/\./g, "_")}`,
+      capability: catalogCapability,
       connector: binding.connector,
       actionSlug: resolved.actionSlug,
       inputSchema: resolved.inputSchema,
