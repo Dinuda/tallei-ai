@@ -26,7 +26,7 @@ import {
 } from "../../../loops/service.js";
 import { specPatchSchema } from "../../../loops/spec.js";
 import { saveSpecDraft, getLoopRun, getPendingApprovalForRun, listLoopRunSteps } from "../../../loops/store.js";
-import { buildPlannerSystemPrompt } from "../../../loops/planning-agent.js";
+import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
 import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
 import { listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
 import { getWorkspace } from "../../../services/workspace/index.js";
@@ -215,8 +215,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
     const initialConnectors = await listWorkspaceConnectors(auth);
 
     const result = streamText({
-      model: getStreamingLanguageModel("builder"),
-      system: buildPlannerSystemPrompt({
+      model: getStreamingLanguageModel("conductor"),
+      system: buildConductorSystemPrompt({
         workspaceName: workspace.name,
         spec: currentSpec,
         connectedToolkits: initialConnectors.map((t) => ({
@@ -277,7 +277,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
 
     result.pipeUIMessageStreamToResponse(res);
   } catch (error) {
-    sendError(res, error, "Failed to stream builder chat");
+    sendError(res, error, "Failed to stream Conductor chat");
   }
 });
 

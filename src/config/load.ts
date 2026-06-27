@@ -15,7 +15,7 @@ function resolveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
-/** OpenCode Go (/zen/go/v1) is Anthropic-format; loop builder uses OpenAI chat completions on /zen/v1. */
+/** OpenCode Go (/zen/go/v1) is Anthropic-format; Conductor uses OpenAI chat completions on /zen/v1. */
 function normalizeOpenCodeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (trimmed.endsWith("/zen/go/v1") || trimmed.endsWith("/zen/go")) {
@@ -254,7 +254,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
     opencodeModel: defaultOpenCodeModel,
     opencodeApiKey: readStringEnv(e, "TALLEI_LLM__OPENCODE_API_KEY") || readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
-    loopBuilderModel: readResolvedChatModel("TALLEI_LOOP_BUILDER__OPENAI_MODEL", defaultOpenCodeModel),
+    conductorModel: readResolvedChatModel(
+      "TALLEI_CONDUCTOR__MODEL",
+      readResolvedChatModel("TALLEI_LOOP_BUILDER__OPENAI_MODEL", defaultOpenCodeModel),
+    ),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
     uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),

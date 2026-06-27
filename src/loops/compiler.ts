@@ -194,7 +194,7 @@ export async function compileLoopSpec(
           message: `${binding.connector} is not connected in this workspace`,
           binding: binding.capability,
           toolkit: binding.connector,
-          connectUrl: `/dashboard/loops/${loopId}/builder?connect=${encodeURIComponent(binding.connector)}`,
+          connectUrl: `/dashboard/loops/${loopId}/conductor?connect=${encodeURIComponent(binding.connector)}`,
         });
       }
       continue;

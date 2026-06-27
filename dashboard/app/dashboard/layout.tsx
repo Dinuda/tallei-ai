@@ -6,7 +6,7 @@ import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, Suspense } from "react";
 import { Code2, Menu, Sparkles, Workflow, X, Settings } from "lucide-react";
-import { LoopBuilderHeader } from "@/components/loop-builder-header";
+import { ConductorHeader } from "@/components/conductor-header";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -283,12 +283,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <Suspense fallback={
                 <div className="ml-4 hidden min-w-0 flex-1 items-center gap-4 border-l border-slate-200 pl-6 md:flex">
                   <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Loop Builder</div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Conductor</div>
                     <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
                   </div>
                 </div>
               }>
-                <LoopBuilderHeader />
+                <ConductorHeader />
               </Suspense>
             ) : null}
           </div>

@@ -2,14 +2,14 @@ import type { LoopSpec } from "./spec.js";
 import { plannerDecisionSchema, type PlannerDecision } from "./spec.js";
 import { getMissingSlots } from "./patch.js";
 
-export function buildPlannerSystemPrompt(input: {
+export function buildConductorSystemPrompt(input: {
   workspaceName?: string;
   spec: LoopSpec;
   connectedToolkits: Array<{ slug: string; name: string; connected: boolean }>;
 }): string {
   const missing = getMissingSlots(input.spec);
   return [
-    "You are Tallei's loop builder. Help the user configure an automation loop.",
+    "You are Tallei's Conductor. Help the user configure an automation loop.",
     "Use the patchLoopSpec tool to update the loop configuration incrementally.",
     "Use listConnectors when you need to know which apps are connected in this workspace.",
     "Keep agent instructions outcome-based, not provider-specific (e.g. 'read important email' not 'use Gmail API').",
@@ -20,6 +20,9 @@ export function buildPlannerSystemPrompt(input: {
     `Connected toolkits: ${input.connectedToolkits.map((t) => `${t.slug}(${t.connected ? "connected" : "not connected"})`).join(", ") || "none"}`,
   ].filter(Boolean).join("\n\n");
 }
+
+/** @deprecated Use buildConductorSystemPrompt */
+export const buildPlannerSystemPrompt = buildConductorSystemPrompt;
 
 export function buildRuntimePlannerPrompt(input: {
   planGoal: string;

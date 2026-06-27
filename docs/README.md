@@ -14,7 +14,7 @@ Start here to understand the system:
   - Entity relationship graphs
   - Database schema
 - **[Runtime Flows](./flows/README.md)** — End-to-end Mermaid docs for the hottest operational paths:
-  - Loop Builder
+  - [Conductor](./conductor.md) — loop authoring chat, compile, activate, run
   - Loop Miner
   - Memory Cleanup
   - Vertex document embeddings and search

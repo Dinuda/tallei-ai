@@ -15,7 +15,7 @@ export default function ConnectorCompletePage() {
       <div className="border border-[#e8e5f0] bg-white p-8 text-center">
         <span className="mx-auto flex size-12 items-center justify-center bg-emerald-600 text-white"><Check /></span>
         <h1 className="mt-4 text-lg font-semibold">Connection received</h1>
-        <p className="mt-1 text-sm text-slate-500">Returning to the loop builder...</p>
+        <p className="mt-1 text-sm text-slate-500">Returning to Conductor...</p>
       </div>
     </main>
   );

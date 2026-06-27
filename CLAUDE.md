@@ -215,7 +215,7 @@ Look at `src/services/memory.ts` cache validity:
 
 ## Loop Engine (spec-driven + Temporal)
 
-Loops are saved as `loop_spec_v1` runnable specs from the builder. Headless execution and cron scheduling run through **self-hosted Temporal** (`src/temporal/`) when `TALLEI_TEMPORAL__ENABLED=true`:
+Loops are saved as `loop_spec_v1` runnable specs from **Conductor** (`/dashboard/loops/:id/conductor`). See [docs/conductor.md](docs/conductor.md). Headless execution and cron scheduling run through **self-hosted Temporal** (`src/temporal/`) when `TALLEI_TEMPORAL__ENABLED=true`:
 
 - `loopRunWorkflow` activity wraps `executeSpecRunHeadless`
 - `upsertLoopSchedule` registers Temporal Schedules on loop activation

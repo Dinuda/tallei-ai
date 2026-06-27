@@ -1,6 +1,6 @@
 # Composio agent integrations (conductor guide)
 
-Conposio connector logic for Tallei agents lives in [`src/integrations/composio/`](../../integrations/composio/). Conductor (loop builder, spec-run, verification) should import from there — not call `@composio/core` directly.
+Conposio connector logic for Tallei agents lives in [`src/integrations/composio/`](../../integrations/composio/). Conductor, spec-run, and verification flows should import from there — not call `@composio/core` directly.
 
 This layer implements Composio v3 **sessions**: agents discover tools at runtime via meta tools (`COMPOSIO_SEARCH_TOOLS`, connection management, workbench) instead of loading every action up front.
 
@@ -46,8 +46,8 @@ flowchart TD
 
 | Path | When to use | Entry points |
 |------|-------------|--------------|
-| **Agentic (session)** | Loop builder, spec-run agents, anything that should search/connect at runtime | `createSession`, `listSessionToolkits`, `searchToolsViaSession`, `getSessionTools`, `authorizeToolkit` |
-| **Direct (catalogue)** | Dashboard toolkit browser, builder UI that needs full schemas without meta tools | `listToolkits`, `getAllTools`, `searchTools` |
+| **Agentic (session)** | Conductor chat, spec-run agents, anything that should search/connect at runtime | `createSession`, `listSessionToolkits`, `searchToolsViaSession`, `getSessionTools`, `authorizeToolkit` |
+| **Direct (catalogue)** | Dashboard toolkit browser, Conductor UI that needs full schemas without meta tools | `listToolkits`, `getAllTools`, `searchTools` |
 
 Prefer the session path for agents. Use direct catalogue only when you already know the toolkit or need offline-style listing.
 

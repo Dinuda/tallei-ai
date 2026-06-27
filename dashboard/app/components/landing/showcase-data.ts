@@ -16,7 +16,7 @@ export const SHOWCASE_LOOPS: ShowcaseLoop[] = [
     cadence: "Every Friday",
     category: "work",
     agents: ["Researcher", "Writer", "Publisher"],
-    outputPreview: "Shipped: memory sync, loop builder v3, dashboard refresh…",
+    outputPreview: "Shipped: memory sync, Conductor, dashboard refresh…",
   },
   {
     id: "newsletter",

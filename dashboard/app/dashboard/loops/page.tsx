@@ -55,7 +55,7 @@ export default function LoopsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to create loop");
-      window.location.href = `/dashboard/loops/${data.loop.id}/builder`;
+      window.location.href = `/dashboard/loops/${data.loop.id}/conductor`;
     } catch (error) {
       console.error(error);
       alert(error instanceof Error ? error.message : "Failed to create loop");
@@ -107,7 +107,7 @@ export default function LoopsPage() {
           <ul className="space-y-2">
             {loops.map((loop) => (
               <li key={loop.id}>
-                <Link href={`/dashboard/loops/${loop.id}/builder`} className="flex items-center justify-between rounded-lg border border-[#e4f5c6] bg-white px-4 py-3 hover:bg-[#f8fdf2]">
+                <Link href={`/dashboard/loops/${loop.id}/conductor`} className="flex items-center justify-between rounded-lg border border-[#e4f5c6] bg-white px-4 py-3 hover:bg-[#f8fdf2]">
                   <span className="font-medium">{loop.name}</span>
                   <span className="text-xs uppercase tracking-wide text-[#7a9a4a]">{loop.status}</span>
                 </Link>

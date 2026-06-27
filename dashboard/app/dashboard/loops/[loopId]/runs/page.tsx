@@ -39,7 +39,7 @@ export default function LoopRunsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-[#182506]">Loop runs</h1>
         <Button variant="outline" asChild>
-          <Link href={`/dashboard/loops/${loopId}/builder`}>Back to builder</Link>
+          <Link href={`/dashboard/loops/${loopId}/conductor`}>Back to Conductor</Link>
         </Button>
       </div>
       {loading ? <p className="text-sm text-muted-foreground">Loading...</p> : null}

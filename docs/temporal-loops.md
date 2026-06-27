@@ -1,5 +1,7 @@
 # Temporal loop engine (local dev)
 
+See **[Conductor](./conductor.md)** for the full loop authoring flow (chat → compile → activate → run).
+
 Tallei runs workspace-scoped loops through a generic `loopRunWorkflow` when `TALLEI_TEMPORAL__ENABLED=true`.
 
 ## Prerequisites
@@ -13,7 +15,8 @@ TALLEI_LLM__LOCAL_MODEL_MODE=false
 TALLEI_LLM__PROVIDER=opencode
 TALLEI_LLM__OPENCODE_BASE_URL=https://opencode.ai/zen/v1
 TALLEI_LLM__OPENCODE_MODEL=big-pickle
-TALLEI_LOOP_BUILDER__OPENAI_MODEL=big-pickle
+TALLEI_CONDUCTOR__MODEL=big-pickle
+# legacy alias: TALLEI_LOOP_BUILDER__OPENAI_MODEL
 TALLEI_TEMPORAL__ENABLED=true
 TALLEI_TEMPORAL__ADDRESS=127.0.0.1:7233
 TALLEI_TEMPORAL__NAMESPACE=default
@@ -39,7 +42,7 @@ cd dashboard && npm run dev
 ## Verify
 
 1. Open `/dashboard/loops`, pick a starter card
-2. Builder chat streams via `POST /api/loops/:id/chat` (proxied through Next.js with session auth)
+2. Conductor chat streams via `POST /api/loops/:id/chat` (proxied through Next.js with session auth)
 3. Compile → Activate (registers Temporal Schedule when trigger is `schedule`)
 4. Run now → check `loop_runs` in Postgres or Temporal UI at http://localhost:8233
 5. Sensitive tool steps create `approval_requests`; decide at `/dashboard/approvals` (signals workflow)

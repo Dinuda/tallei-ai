@@ -22,7 +22,7 @@ export default function NewLoopPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to create loop");
-      router.push(`/dashboard/loops/${data.loop.id}/builder`);
+      router.push(`/dashboard/loops/${data.loop.id}/conductor`);
     } catch (error) {
       alert(error instanceof Error ? error.message : "Failed to create loop");
     } finally {
@@ -35,7 +35,7 @@ export default function NewLoopPage() {
       <h1 className="text-2xl font-bold">New loop</h1>
       <Input placeholder="Loop name" value={name} onChange={(e) => setName(e.target.value)} />
       <Button onClick={() => void handleCreate()} disabled={saving || !name.trim()}>
-        {saving ? "Creating..." : "Continue to builder"}
+        {saving ? "Creating..." : "Continue to Conductor"}
       </Button>
     </div>
   );

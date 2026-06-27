@@ -2,7 +2,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
 import { config } from "../../../config/index.js";
 
-export type StreamingPurpose = "builder" | "run_transcript" | "planner";
+export type StreamingPurpose = "conductor" | "run_transcript" | "planner";
 
 export function getStreamingLanguageModel(purpose: StreamingPurpose) {
   if (!config.opencodeApiKey) {
@@ -13,8 +13,8 @@ export function getStreamingLanguageModel(purpose: StreamingPurpose) {
     baseURL: config.opencodeBaseUrl,
     apiKey: config.opencodeApiKey,
   });
-  const model = purpose === "builder"
-    ? config.loopBuilderModel
+  const model = purpose === "conductor"
+    ? config.conductorModel
     : config.opencodeModel;
   return provider.chatModel(model);
 }
