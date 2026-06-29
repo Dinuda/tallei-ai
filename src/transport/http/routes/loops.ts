@@ -8,17 +8,23 @@ import {
   type UIMessage,
 } from "ai";
 
+import { repairStaleOutcomeBriefConfirms } from "../../../loops/conductor-chat.js";
 import { applySpecPatch } from "../../../loops/patch.js";
 import {
   activateLoopInputSchema,
+  analyzeIntentInputSchema,
   askQuestionInputSchema,
   compileLoopInputSchema,
+  confirmOutcomeBriefInputSchema,
   discoverBindingsInputSchema,
   discoverConnectorsForBlueprintInputSchema,
   pickConnectorAppInputSchema,
   presentReplyOptionsInputSchema,
   testRunLoopInputSchema,
 } from "../../../loops/conductor-tools.js";
+import { unresolvedIntentQuestions } from "../../../loops/intent-discovery.js";
+import { buildOutcomeBrief, computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
+import { summarizeOutcomeBriefForUser } from "../../../loops/outcome-brief-summary.js";
 import { discoverOutcomeBindings } from "../../../loops/binding-discovery.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
 import { validateConnectorChoicesBeforeSpecPatch } from "../../../loops/task-decomposition.js";
@@ -36,7 +42,6 @@ import {
   pauseLoop,
   resumeLoop,
   resolveLoopAuthWorkspace,
-  setLoopStatus,
   triggerManualRun,
 } from "../../../loops/service.js";
 import { specPatchSchema } from "../../../loops/spec.js";
@@ -285,6 +290,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       return;
     }
 
+    const chatMessages = repairStaleOutcomeBriefConfirms(body.messages);
+
     let currentSpec = await getLatestSpec(auth, loopId);
     if (!currentSpec) {
       res.status(400).json({ error: "Loop spec not found" });
@@ -315,11 +322,57 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           connected: Boolean(t.connected),
         })),
       }),
-      messages: await convertToModelMessages(body.messages),
+      messages: await convertToModelMessages(chatMessages),
       tools: {
+        analyzeIntent: tool({
+          description:
+            "Analyze the user's current intent before connector discovery and again after each clarification. Return zero questions when the request is clear. Include only material business questions; never ask implementation or API questions.",
+          inputSchema: analyzeIntentInputSchema,
+          execute: async (analysis) => {
+            const unresolved = unresolvedIntentQuestions(analysis, currentSpec!.intentDiscovery);
+            const nextQuestion = unresolved[0];
+            const askedQuestionIds = [...new Set([
+              ...currentSpec!.intentDiscovery.askedQuestionIds,
+              ...(nextQuestion ? [nextQuestion.id] : []),
+            ])];
+            currentSpec = applySpecPatch(currentSpec!, {
+              intent: {
+                outcome: analysis.normalizedOutcome,
+                successCriteria: analysis.successCriteria,
+              },
+              intentDiscovery: {
+                status: nextQuestion ? "needs_input" : "ready",
+                analysis,
+                decisions: analysis.decisions,
+                assumptions: analysis.assumptions,
+                askedQuestionIds,
+                confirmedBriefHash: undefined,
+              },
+            });
+            await saveSpecDraft(auth, loopId, currentSpec, "intent-analysis");
+            latestCompiledPlanId = null;
+            latestTestRunPass = null;
+            return {
+              ok: true,
+              status: currentSpec.intentDiscovery.status,
+              analysis,
+              spec: currentSpec,
+              ...(nextQuestion ? {
+                nextQuestion: {
+                  questionId: nextQuestion.id,
+                  question: nextQuestion.question,
+                  options: nextQuestion.options,
+                  recommendedOptionIds: [nextQuestion.recommendedOptionId],
+                  allowMultiple: false,
+                  allowOther: true,
+                },
+              } : {}),
+            };
+          },
+        }),
         patchLoopSpec: tool({
           description:
-            "Apply a partial update to the loop spec. On new loops, patch intent (goal, outcome, successCriteria), taskBlueprint (outcome roles), agent.instructions, and approval here — you analyze intent directly, no separate analyst tool. Patch taskBlueprint after pickConnectorApp answers. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome is chosen.",
+            "Apply a partial update to the loop spec after analyzeIntent. Store each explicit connector on its matching taskBlueprint outcome. When discoverBindings returns suggestedBindings and suggestedComposioActions, patch both together. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome has an explicit connector.",
           inputSchema: specPatchSchema,
           execute: async (patch) => {
             const gate = validateConnectorChoicesBeforeSpecPatch(currentSpec!, patch);
@@ -360,6 +413,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               };
             }
             await saveSpecDraft(auth, loopId, currentSpec, "chat");
+            latestCompiledPlanId = null;
+            latestTestRunPass = null;
             const { getMissingSlots } = await import("../../../loops/patch.js");
             return {
               ok: true,
@@ -420,13 +475,18 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         discoverConnectorsForBlueprint: tool({
           description:
-            "REQUIRED once taskBlueprint exists. Ranks unique apps (each once). Returns askOptions, recommendedOptionIds, defaultQuestion, autoApplyConnector when sole connected app is #1. autoApplyConnector → patchLoopSpec immediately; else MUST call pickConnectorApp (tool, not plain text).",
+            "Run after intent is ready. Returns one role-scoped connector group per pending blueprint outcome, with five ranked recommendations and the searchable app catalogue. Always call pickConnectorApp for each group; never auto-select a connected app.",
           inputSchema: discoverConnectorsForBlueprintInputSchema,
-          execute: async (input) => discoverConnectorsForBlueprint(auth, input),
+          execute: async (input) => discoverConnectorsForBlueprint(auth, {
+            ...input,
+            previousConnectors: (currentSpec!.taskBlueprint?.outcomes ?? [])
+              .map((outcome) => outcome.selectedConnector)
+              .filter((connector): connector is string => Boolean(connector)),
+          }),
         }),
         pickConnectorApp: tool({
           description:
-            "Present app picker after discoverConnectorsForBlueprint when autoApplyConnector is not set. Pass optional question text only — UI injects ranked options. Required tool call; do not ask in plain text only.",
+            "Present the server-ranked app picker for one outcomeId and role after discoverConnectorsForBlueprint. This choice is always user-visible, even when one connected app ranks first.",
           inputSchema: pickConnectorAppInputSchema,
         }),
         presentReplyOptions: tool({
@@ -461,7 +521,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         discoverBindings: tool({
           description:
-            "Search Composio and rank action bindings for inferred outcomes. Returns suggestedBindings — auto-apply them. needsUserChoice is rare (send vs draft forks only); never ask about fetch/list API details.",
+            "Search Composio and rank exact action bindings for inferred outcomes. Returns suggestedBindings and suggestedComposioActions — auto-apply both in patchLoopSpec. needsUserChoice is rare (send vs draft forks only); never ask about fetch/list API details.",
           inputSchema: discoverBindingsInputSchema,
           execute: async (input) => discoverOutcomeBindings(input.toolkit, input.outcomes),
         }),
@@ -483,8 +543,30 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         askQuestion: tool({
           description:
-            "Ask the user ONE question for genuine business forks (approval, schedule, destination). Forbidden: connector app choice (use pickConnectorApp), Composio slugs, fetch strategies, or API implementation details.",
+            "Ask the ONE highest-priority unresolved intent question returned by analyzeIntent. Also valid for later genuine business forks. Forbidden: connector choices, Composio slugs, fetch strategies, or API implementation details.",
           inputSchema: askQuestionInputSchema,
+        }),
+        reviewOutcomeBrief: tool({
+          description:
+            "Build the authoritative outcome brief after intent, connectors, bindings, trigger, output, approvals, and guardrails are resolved. Returns technical brief + userSummary for the confirmation UI. Then call confirmOutcomeBrief with this exact output.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const brief = buildOutcomeBrief(currentSpec!);
+            const userSummary = await summarizeOutcomeBriefForUser({
+              spec: currentSpec!,
+              brief,
+              userId: auth.userId,
+            });
+            return {
+              brief: { ...brief, userSummary },
+              briefHash: computeOutcomeBriefHash(currentSpec!),
+            };
+          },
+        }),
+        confirmOutcomeBrief: tool({
+          description:
+            "Show the outcome brief for explicit confirmation or editing. Pass briefHash from reviewOutcomeBrief plus a plain-language question and 2–4 options. Each option value must be one of: confirm, change_outcome, change_trigger, change_connectors, change_approvals, other. On confirm, patch intentDiscovery.status=confirmed and confirmedBriefHash to this hash before compiling.",
+          inputSchema: confirmOutcomeBriefInputSchema,
         }),
         compileLoop: tool({
           description:
@@ -554,7 +636,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
 
     result.pipeUIMessageStreamToResponse(res, {
       sendReasoning: true,
-      originalMessages: body.messages,
+      originalMessages: chatMessages,
       onFinish: async ({ messages, isAborted }) => {
         if (isAborted) return;
         try {

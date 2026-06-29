@@ -10,6 +10,7 @@ import {
   createLoopRun,
   getCompiledPlan,
   getLatestSpec,
+  getLatestSpecRevision,
   getLoop,
   listLoopRuns,
   listLoops,
@@ -55,6 +56,10 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
   if (!loop) throw new Error("Loop not found");
   const plan = await getCompiledPlan(compiledPlanId);
   if (!plan || plan.loopId !== loopId) throw new Error("Compiled plan not found");
+  const latestSpecRevision = await getLatestSpecRevision(loopId);
+  if (plan.specRevision !== latestSpecRevision) {
+    throw new Error("Compiled plan is stale; confirm and compile the current outcome brief");
+  }
   const ctx = await resolveLoopAuthWorkspace(auth, loop.workspaceId);
 
   try {

@@ -1,4 +1,9 @@
-import type { DynamicToolUIPart, ReasoningUIPart, UIMessage } from "ai";
+import {
+  lastAssistantMessageIsCompleteWithToolCalls,
+  type DynamicToolUIPart,
+  type ReasoningUIPart,
+  type UIMessage,
+} from "ai";
 
 import type { InteractivePromptOption } from "@/components/ai-elements/interactive-prompt-menu";
 import type {
@@ -6,7 +11,7 @@ import type {
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
 
-export type BindingRow = { connector: string; capability: string; optional?: boolean; role?: string };
+export type BindingRow = { connector: string; capability: string; role?: string };
 
 export type BlueprintOutcome = {
   id: string;
@@ -14,7 +19,6 @@ export type BlueprintOutcome = {
   description: string;
   selectedConnector?: string;
   status: string;
-  candidates?: Array<{ connector: string; connected: boolean; rationale?: string }>;
 };
 
 export type TaskBlueprint = {
@@ -30,6 +34,8 @@ export type AskQuestionInput = {
   allowMultiple?: boolean;
   allowOther?: boolean;
   step?: { index: number; total: number };
+  outcomeId?: string;
+  role?: string;
 };
 
 export type AskQuestionOutput = {
@@ -42,6 +48,8 @@ export type AskQuestionOutput = {
 };
 
 export type PickConnectorAppInput = {
+  outcomeId: string;
+  role: "trigger" | "source" | "destination";
   question?: string;
 };
 
@@ -54,10 +62,14 @@ export type PickConnectorAppToolPart = {
 };
 
 export type ConnectorDiscoveryOutput = {
-  askOptions?: InteractivePromptOption[];
-  recommendedOptionIds?: string[];
-  defaultQuestion?: string;
-  autoApplyConnector?: string;
+  groups?: Array<{
+    outcomeId: string;
+    role: string;
+    outcomeDescription: string;
+    askOptions: InteractivePromptOption[];
+    recommendedOptionIds: string[];
+    defaultQuestion: string;
+  }>;
 };
 
 export function uiMessagesEqual(a: UIMessage[], b: UIMessage[]): boolean {
@@ -75,110 +87,10 @@ export function blueprintNeedsConnectorPick(spec: Record<string, unknown> | null
   const blueprint = readTaskBlueprint(spec);
   if (!blueprint?.outcomes?.length) return true;
   return blueprint.outcomes.some(
-    (outcome) =>
-      outcome.role !== "transform"
-      && outcome.status !== "chosen"
-      && outcome.status !== "skipped"
-      && !outcome.selectedConnector,
+    (outcome) => outcome.role !== "transform"
+      && (outcome.status !== "chosen" || !outcome.selectedConnector)
+      && outcome.status !== "skipped",
   );
-}
-
-export function resolveAutoConnectorPick(
-  askOptions: InteractivePromptOption[],
-  recommendedOptionIds: string[],
-): string | null {
-  const connected = askOptions.filter((option) => option.description === "Already connected");
-  if (connected.length !== 1) return null;
-  const pick = connected[0]!;
-  const topId = recommendedOptionIds[0];
-  if (topId && pick.id !== topId) return null;
-  return pick.value;
-}
-
-export function resolveDiscoveryAutoConnector(discovery: ConnectorDiscoveryOutput | null): string | null {
-  if (!discovery) return null;
-  if (discovery.autoApplyConnector) return discovery.autoApplyConnector;
-  if (!discovery.askOptions?.length) return null;
-  return resolveAutoConnectorPick(
-    discovery.askOptions,
-    discovery.recommendedOptionIds ?? discovery.askOptions.slice(0, 5).map((option) => option.id),
-  );
-}
-
-export type AutoConnectorPromptTarget = {
-  toolCallId: string;
-  toolName: "askQuestion" | "pickConnectorApp";
-  autoConnector: string;
-  connectorOptionId: string;
-  connectorLabel: string;
-};
-
-export function findAutoConnectorPromptTarget(
-  messages: UIMessage[],
-  spec: Record<string, unknown> | null,
-): AutoConnectorPromptTarget | null {
-  if (!blueprintNeedsConnectorPick(spec)) return null;
-
-  const discovery = findLatestConnectorDiscovery(messages);
-  const autoConnector = resolveDiscoveryAutoConnector(discovery);
-  if (!autoConnector || !discovery?.askOptions?.length) return null;
-
-  const connectorOption = discovery.askOptions.find(
-    (option) => option.value.toLowerCase() === autoConnector.toLowerCase(),
-  );
-  if (!connectorOption) return null;
-
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (message.role !== "assistant") continue;
-    const parts = message.parts ?? [];
-    for (let j = parts.length - 1; j >= 0; j -= 1) {
-      const part = parts[j];
-
-      if (isPickConnectorAppPart(part)) {
-        const pickPart = part as PickConnectorAppToolPart;
-        if (pickPart.state === "input-available" && pickPart.output == null) {
-          return {
-            toolCallId: pickPart.toolCallId,
-            toolName: "pickConnectorApp",
-            autoConnector,
-            connectorOptionId: connectorOption.id,
-            connectorLabel: connectorOption.label,
-          };
-        }
-      }
-
-      if (isAskQuestionPart(part)) {
-        const askPart = part as AskQuestionToolPart;
-        if (askPart.state === "input-available" && askPart.output == null) {
-          const input = askPart.input;
-          if (!input?.question || !input.options?.length) continue;
-          if (isConnectorConfirmationQuestion(input)) {
-            return {
-              toolCallId: askPart.toolCallId,
-              toolName: "askQuestion",
-              autoConnector,
-              connectorOptionId: connectorOption.id,
-              connectorLabel: connectorOption.label,
-            };
-          }
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-export function isConnectorConfirmationQuestion(input: AskQuestionInput): boolean {
-  const question = input.question.toLowerCase();
-  const labels = input.options.map((option) => option.label.toLowerCase());
-  const yesNo =
-    labels.includes("yes")
-    && (labels.includes("not yet") || labels.includes("no"));
-  const mentionsConnector =
-    /which app|what app|handles your|already connected|for trigger|for send|receiving|saving draft/.test(question);
-  return yesNo && mentionsConnector;
 }
 
 export type PendingInteractivePrompt = {
@@ -193,6 +105,67 @@ export const DEFAULT_CONNECTOR_PICK_QUESTION =
 export type PendingPresentReplyOptions = {
   toolCallId: string;
   input: PresentReplyOptionsInput;
+};
+
+export type OutcomeBriefUserSummary = {
+  whenItRuns: string;
+  appsInvolved: string[];
+  steps: string[];
+  beforeSending: string;
+  howYouKnowItWorked: string;
+  whereResultsGo: string;
+  safetyLimits: string[];
+  assumptionsNote?: string;
+};
+
+export type OutcomeBrief = {
+  outcome: string;
+  successCriteria: string[];
+  trigger: string;
+  actions: string[];
+  connectors: Array<{ outcomeId: string; role: string; description: string; connector: string }>;
+  output: string;
+  approvals: string;
+  guardrails: string[];
+  assumptions: string[];
+  userSummary?: OutcomeBriefUserSummary;
+};
+
+export type ConfirmOutcomeBriefInput = {
+  briefHash: string;
+  question: string;
+  options: InteractivePromptOption[];
+  recommendedOptionIds?: string[];
+  allowOther?: boolean;
+};
+
+export type OutcomeBriefReviewOutput = {
+  brief: OutcomeBrief;
+  briefHash: string;
+};
+
+export type ConfirmOutcomeBriefOutput = {
+  action: "confirm" | "change_outcome" | "change_trigger" | "change_connectors" | "change_approvals" | "other";
+  briefHash: string;
+  answerText: string;
+  selectedOptionIds: string[];
+  selectedValues: string[];
+  otherText?: string;
+};
+
+export type ConfirmOutcomeBriefToolPart = {
+  type: string;
+  toolCallId: string;
+  state: DynamicToolUIPart["state"];
+  input?: ConfirmOutcomeBriefInput;
+  output?: ConfirmOutcomeBriefOutput;
+};
+
+export type PendingOutcomeBrief = {
+  toolCallId: string;
+  input: OutcomeBriefReviewOutput;
+  confirmBriefHash: string;
+  confirmPrompt: Pick<ConfirmOutcomeBriefInput, "question" | "options" | "recommendedOptionIds" | "allowOther">;
 };
 
 export type PresentReplyOptionsToolPart = {
@@ -240,6 +213,143 @@ export function isPresentReplyOptionsPart(part: { type: string; toolName?: strin
   return resolveToolPartName(part) === "presentReplyOptions";
 }
 
+export function isConfirmOutcomeBriefPart(part: { type: string; toolName?: string }): part is ConfirmOutcomeBriefToolPart {
+  return resolveToolPartName(part) === "confirmOutcomeBrief";
+}
+
+const CONDUCTOR_UI_ONLY_TOOLS = new Set([
+  "askQuestion",
+  "pickConnectorApp",
+  "presentReplyOptions",
+  "confirmOutcomeBrief",
+]);
+
+export type StaleConfirmOutcomeBriefCall = {
+  toolCallId: string;
+  briefHash: string;
+};
+
+function isUnansweredUiToolPart(part: { type: string; toolName?: string; state?: string; output?: unknown }): boolean {
+  if (!isToolPart(part.type)) return false;
+  const toolName = resolveToolPartName(part);
+  if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName)) return false;
+  return part.state === "input-available" && part.output == null;
+}
+
+export function findLatestReviewOutcomeBrief(messages: UIMessage[]): OutcomeBriefReviewOutput | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    for (let j = (message.parts ?? []).length - 1; j >= 0; j -= 1) {
+      const part = message.parts[j];
+      if (!part || resolveToolPartName(part as { type: string; toolName?: string }) !== "reviewOutcomeBrief") continue;
+      const toolPart = part as DynamicToolUIPart & { output?: unknown };
+      if (toolPart.state !== "output-available" || !toolPart.output) continue;
+      const output = toolPart.output as OutcomeBriefReviewOutput;
+      if (output.briefHash && output.brief) return output;
+    }
+  }
+  return null;
+}
+
+/** Any UI-only tool call in the transcript still waiting for addToolOutput. */
+export function hasUnansweredUiToolCalls(messages: UIMessage[]): boolean {
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (isUnansweredUiToolPart(part as { type: string; toolName?: string; state?: string; output?: unknown })) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Unanswered confirmOutcomeBrief calls superseded by a later reviewOutcomeBrief. */
+export function findStaleConfirmOutcomeBriefCalls(messages: UIMessage[]): StaleConfirmOutcomeBriefCall[] {
+  const stale: StaleConfirmOutcomeBriefCall[] = [];
+
+  for (let i = 0; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    const parts = message.parts ?? [];
+    for (let j = 0; j < parts.length; j += 1) {
+      const part = parts[j];
+      if (!isConfirmOutcomeBriefPart(part)) continue;
+      const toolPart = part as ConfirmOutcomeBriefToolPart;
+      if (toolPart.state !== "input-available" || toolPart.output != null) continue;
+      const confirmHash = toolPart.input?.briefHash;
+      if (!confirmHash) continue;
+
+      let superseded = false;
+      outer: for (let mi = i; mi < messages.length; mi += 1) {
+        const laterMessage = messages[mi];
+        if (laterMessage.role !== "assistant") continue;
+        const laterParts = laterMessage.parts ?? [];
+        const startJ = mi === i ? j + 1 : 0;
+        for (let mj = startJ; mj < laterParts.length; mj += 1) {
+          const laterPart = laterParts[mj];
+          if (resolveToolPartName(laterPart as { type: string; toolName?: string }) !== "reviewOutcomeBrief") {
+            continue;
+          }
+          const reviewPart = laterPart as { state?: string; output?: { briefHash?: string } };
+          if (reviewPart.state !== "output-available" || !reviewPart.output?.briefHash) continue;
+          if (reviewPart.output.briefHash !== confirmHash) {
+            superseded = true;
+            break outer;
+          }
+        }
+      }
+
+      if (superseded) {
+        stale.push({ toolCallId: toolPart.toolCallId, briefHash: confirmHash });
+      }
+    }
+  }
+  return stale;
+}
+
+export function shouldAutoSendConductorChat({
+  messages,
+}: {
+  messages: UIMessage[];
+}): boolean {
+  if (hasUnansweredUiToolCalls(messages)) return false;
+  return lastAssistantMessageIsCompleteWithToolCalls({ messages });
+}
+
+export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBrief | null {
+  const review = findLatestReviewOutcomeBrief(messages);
+  if (!review) return null;
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    const parts = message.parts ?? [];
+    for (let j = parts.length - 1; j >= 0; j -= 1) {
+      const part = parts[j];
+      if (!isConfirmOutcomeBriefPart(part)) continue;
+      const toolPart = part as ConfirmOutcomeBriefToolPart;
+      if (toolPart.state === "input-available" && toolPart.output == null) {
+        const confirmInput = toolPart.input;
+        if (!confirmInput?.briefHash || !confirmInput.question || !confirmInput.options?.length) continue;
+        return {
+          toolCallId: toolPart.toolCallId,
+          input: review,
+          confirmBriefHash: confirmInput.briefHash,
+          confirmPrompt: {
+            question: confirmInput.question,
+            options: confirmInput.options,
+            recommendedOptionIds: confirmInput.recommendedOptionIds,
+            allowOther: confirmInput.allowOther ?? true,
+          },
+        };
+      }
+    }
+  }
+  return null;
+}
+
 export function findLatestConnectorDiscovery(messages: UIMessage[]): ConnectorDiscoveryOutput | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
@@ -254,35 +364,29 @@ export function findLatestConnectorDiscovery(messages: UIMessage[]): ConnectorDi
       const toolPart = part as DynamicToolUIPart & { output?: unknown };
       if (toolPart.state !== "output-available" || !toolPart.output) continue;
       const output = toolPart.output as ConnectorDiscoveryOutput;
-      if (output.askOptions?.length) return output;
+      if (output.groups?.length) return output;
     }
   }
   return null;
 }
 
-function looksLikeRoleBasedConnectorOptions(options: InteractivePromptOption[]): boolean {
-  if (options.some((option) => /-(trigger|source|destination|read|send)\b/i.test(option.label))) {
-    return true;
-  }
-  const appNames = options.map((option) => {
-    const split = option.label.split(" - ")[0]?.trim().toLowerCase();
-    return split || option.value.toLowerCase();
-  });
-  return new Set(appNames).size < appNames.length;
-}
-
 export function buildConnectorPickInput(
   discovery: ConnectorDiscoveryOutput,
+  outcomeId: string,
   questionOverride?: string,
-): AskQuestionInput {
-  const askOptions = discovery.askOptions ?? [];
+): AskQuestionInput | null {
+  const group = discovery.groups?.find((candidate) => candidate.outcomeId === outcomeId);
+  if (!group?.askOptions.length) return null;
+  const askOptions = group.askOptions;
   return {
-    questionId: "connector-app",
-    question: questionOverride?.trim() || discovery.defaultQuestion || DEFAULT_CONNECTOR_PICK_QUESTION,
+    questionId: `connector-app:${group.outcomeId}`,
+    question: questionOverride?.trim() || group.defaultQuestion || DEFAULT_CONNECTOR_PICK_QUESTION,
     options: askOptions,
-    recommendedOptionIds: discovery.recommendedOptionIds ?? askOptions.slice(0, 5).map((option) => option.id),
+    recommendedOptionIds: group.recommendedOptionIds ?? askOptions.slice(0, 5).map((option) => option.id),
     allowMultiple: false,
     allowOther: true,
+    outcomeId: group.outcomeId,
+    role: group.role,
   };
 }
 
@@ -290,10 +394,7 @@ export function findPendingInteractivePrompt(
   messages: UIMessage[],
   spec: Record<string, unknown> | null = null,
 ): PendingInteractivePrompt | null {
-  if (!blueprintNeedsConnectorPick(spec)) return null;
-
   const discovery = findLatestConnectorDiscovery(messages);
-  const autoConnector = resolveDiscoveryAutoConnector(discovery);
 
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
@@ -305,12 +406,13 @@ export function findPendingInteractivePrompt(
       if (isPickConnectorAppPart(part)) {
         const pickPart = part as PickConnectorAppToolPart;
         if (pickPart.state === "input-available" && pickPart.output == null) {
-          if (!discovery?.askOptions?.length) return null;
-          if (autoConnector) return null;
+          if (!blueprintNeedsConnectorPick(spec) || !discovery || !pickPart.input?.outcomeId) continue;
+          const input = buildConnectorPickInput(discovery, pickPart.input.outcomeId, pickPart.input.question);
+          if (!input) continue;
           return {
             toolCallId: pickPart.toolCallId,
             toolName: "pickConnectorApp",
-            input: buildConnectorPickInput(discovery, pickPart.input?.question),
+            input,
           };
         }
       }
@@ -320,26 +422,6 @@ export function findPendingInteractivePrompt(
         if (askPart.state === "input-available" && askPart.output == null) {
           const input = askPart.input;
           if (!input?.question || !input.options?.length) continue;
-
-          if (autoConnector && isConnectorConfirmationQuestion(input)) {
-            return null;
-          }
-
-          if (discovery?.askOptions?.length && isConnectorConfirmationQuestion(input)) {
-            return {
-              toolCallId: askPart.toolCallId,
-              toolName: "askQuestion",
-              input: buildConnectorPickInput(discovery, input.question),
-            };
-          }
-
-          if (discovery?.askOptions?.length && looksLikeRoleBasedConnectorOptions(input.options)) {
-            return {
-              toolCallId: askPart.toolCallId,
-              toolName: "askQuestion",
-              input: buildConnectorPickInput(discovery, input.question),
-            };
-          }
 
           return { toolCallId: askPart.toolCallId, toolName: "askQuestion", input };
         }
@@ -397,6 +479,79 @@ export function makeUserMessage(text: string): UIMessage {
   };
 }
 
+const TECHNICAL_TEXT = /[A-Z]{2,}_[A-Z0-9_]+|composio|\/[A-Z_]+|gmail:|slack:|cron\s/i;
+
+function isTechnicalLine(text: string): boolean {
+  return TECHNICAL_TEXT.test(text);
+}
+
+/** Plain-language lines for the confirmation card when userSummary is missing. */
+export function plainLanguageBriefSummary(brief: OutcomeBrief): {
+  whenItRuns: string;
+  steps: string[];
+  beforeSending: string;
+} {
+  if (brief.userSummary) {
+    return {
+      whenItRuns: brief.userSummary.whenItRuns,
+      steps: brief.userSummary.steps.slice(0, 4),
+      beforeSending: brief.userSummary.beforeSending,
+    };
+  }
+
+  const connectorSteps = brief.connectors
+    .map((row) => row.description.trim())
+    .filter(Boolean)
+    .filter((line) => !isTechnicalLine(line));
+  const steps = connectorSteps.length > 0
+    ? connectorSteps.slice(0, 4)
+    : [brief.outcome];
+
+  const triggerLine = brief.connectors.find((row) => row.role === "trigger")?.description?.trim();
+  const whenItRuns = triggerLine && !isTechnicalLine(triggerLine)
+    ? triggerLine
+    : brief.outcome;
+
+  const beforeSending = /ask|review|approv/i.test(brief.approvals)
+    ? "You'll review before anything is sent."
+    : "It runs automatically — no extra approval step.";
+
+  return { whenItRuns, steps, beforeSending };
+}
+
+/**
+ * useChat addToolOutput only patches the last message. Drop trailing user messages and
+ * ensure the target tool part is on the final assistant message before applying output.
+ */
+export function prepareMessagesForUiToolOutput(
+  messages: UIMessage[],
+  toolCallId: string,
+  output: unknown,
+): UIMessage[] {
+  const withOutput = messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    let changed = false;
+    const parts = (message.parts ?? []).map((part) => {
+      const toolPart = part as DynamicToolUIPart & { toolCallId?: string };
+      if (toolPart.toolCallId !== toolCallId) return part;
+      changed = true;
+      return {
+        ...part,
+        state: "output-available",
+        output,
+      } as UIMessage["parts"][number];
+    });
+    return changed ? { ...message, parts } : message;
+  });
+
+  const toolMessageIndex = withOutput.findIndex((message) =>
+    message.role === "assistant"
+    && (message.parts ?? []).some((part) => (part as { toolCallId?: string }).toolCallId === toolCallId),
+  );
+  if (toolMessageIndex < 0) return withOutput;
+  return withOutput.slice(0, toolMessageIndex + 1);
+}
+
 export function outcomeRoleLabel(role: string): string {
   switch (role) {
     case "source": return "Source";
@@ -408,7 +563,7 @@ export function outcomeRoleLabel(role: string): string {
 }
 
 export function promptVariantForQuestion(questionId: string): "connector" | "violet" | "amber" | "neutral" {
-  if (questionId === "connector-app") return "connector";
+  if (questionId.startsWith("connector-app:")) return "connector";
   if (questionId === "knowledge-sources") return "violet";
   if (questionId === "review-gates") return "amber";
   return "neutral";

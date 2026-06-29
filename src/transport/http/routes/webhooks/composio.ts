@@ -6,7 +6,10 @@ import {
   normalizeComposioWebhookPayload,
   verifyComposioWebhookSignatureDetailed,
 } from "../../../../integrations/composio/webhooks.js";
-import { dispatchComposioTriggerToLoops } from "../../../../integrations/composio/webhook-dispatch.js";
+import {
+  dispatchComposioTriggerToLoops,
+  extractConnectedAccountId,
+} from "../../../../integrations/composio/webhook-dispatch.js";
 import {
   composioWebhookSecretsToTry,
   ensureComposioWebhookSecretsHydrated,
@@ -51,9 +54,21 @@ async function handleComposioWebhook(req: Request, res: Response): Promise<void>
       return;
     }
     if (normalized.kind === "ignored") {
+      console.info("[webhook/composio] ignored envelope", {
+        type: typeof req.body === "object" && req.body && !Array.isArray(req.body)
+          ? String((req.body as Record<string, unknown>).type ?? "")
+          : "",
+      });
       res.json({ ok: true, kind: "ignored", started: [] });
       return;
     }
+
+    console.info("[webhook/composio] trigger received", {
+      triggerSlug: normalized.triggerSlug,
+      entityId: normalized.entityId,
+      externalEventId: normalized.externalEventId,
+      connectedAccountId: extractConnectedAccountId(normalized.payload),
+    });
 
     const result = await dispatchComposioTriggerToLoops({
       entityId: normalized.entityId,

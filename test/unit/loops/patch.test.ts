@@ -20,6 +20,21 @@ test("applySpecPatch updates bindings", () => {
   assert.equal(updated.bindings[0]?.role, "source");
 });
 
+test("applySpecPatch preserves an explicit Composio action slug", () => {
+  const workspaceId = "00000000-0000-4000-8000-000000000001";
+  const base = seedSpecFromTemplate(workspaceId, "research_digest");
+  const updated = applySpecPatch(base, {
+    bindings: [{
+      capability: "records.read",
+      connector: "generic",
+      actionSlug: "GENERIC_FETCH_RECORDS_EXACT",
+      role: "source",
+    }],
+  });
+
+  assert.equal(updated.bindings[0]?.actionSlug, "GENERIC_FETCH_RECORDS_EXACT");
+});
+
 test("applySpecPatch round-trips taskBlueprint", () => {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   const base = seedSpecFromTemplate(workspaceId, "research_digest");
@@ -31,14 +46,48 @@ test("applySpecPatch round-trips taskBlueprint", () => {
         id: "dest",
         role: "destination",
         description: "Send newsletter",
-        candidates: [],
+        selectedConnector: "mailchimp",
         status: "chosen",
-        selectedConnector: "gmail",
       }],
     },
   });
   assert.equal(updated.taskBlueprint?.summary, "Newsletter");
-  assert.equal(updated.taskBlueprint?.outcomes[0]?.selectedConnector, "gmail");
+  assert.equal(updated.taskBlueprint?.outcomes[0]?.status, "chosen");
+  assert.equal(updated.taskBlueprint?.outcomes[0]?.selectedConnector, "mailchimp");
+});
+
+test("changing a connector invalidates only dependent generated configuration", () => {
+  const workspaceId = "00000000-0000-4000-8000-000000000001";
+  const base = seedSpecFromTemplate(workspaceId, "research_digest");
+  base.taskBlueprint = {
+    version: 1,
+    summary: "Digest",
+    outcomes: [
+      { id: "source", role: "source", description: "Read mail", selectedConnector: "gmail", status: "chosen" },
+      { id: "destination", role: "destination", description: "Post alert", selectedConnector: "slack", status: "chosen" },
+    ],
+  };
+  base.bindings = [
+    { capability: "email.read", connector: "gmail", role: "source" },
+    { capability: "chat.send", connector: "slack", role: "destination" },
+  ];
+  base.composioActions = [
+    { toolkit: "gmail", actionSlug: "GMAIL_FETCH", inputInstructions: [], outputInstructions: [], dependsOn: [] },
+    { toolkit: "slack", actionSlug: "SLACK_SEND", inputInstructions: [], outputInstructions: [], dependsOn: [] },
+  ];
+
+  const updated = applySpecPatch(base, {
+    taskBlueprint: {
+      ...base.taskBlueprint,
+      outcomes: [
+        { ...base.taskBlueprint.outcomes[0]!, selectedConnector: "outlook" },
+        base.taskBlueprint.outcomes[1]!,
+      ],
+    },
+  });
+
+  assert.deepEqual(updated.bindings.map((binding) => binding.connector), ["slack"]);
+  assert.deepEqual(updated.composioActions.map((action) => action.toolkit), ["slack"]);
 });
 
 test("getMissingSlots detects empty bindings on draft template", () => {

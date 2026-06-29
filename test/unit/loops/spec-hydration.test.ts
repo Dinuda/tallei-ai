@@ -45,6 +45,50 @@ test("parseStoredLoopSpec accepts missing composioSlug for draft event loops", (
   }
 });
 
+test("parseStoredLoopSpec hydrates legacy blueprint connector selection into chosen status", () => {
+  const spec = parseStoredLoopSpec({
+    workspaceId,
+    intent: { goal: "g", outcome: "o", successCriteria: [] },
+    trigger: { kind: "manual" },
+    profile: "agentic",
+    bindings: [],
+    taskBlueprint: {
+      version: 1,
+      summary: "Support triage",
+      outcomes: [{
+        id: "out-1",
+        role: "source",
+        description: "Read email",
+        status: "pending",
+        selectedConnector: "gmail",
+      }],
+    },
+    output: { kind: "none" },
+  });
+
+  assert.equal(spec.taskBlueprint?.outcomes[0]?.status, "chosen");
+  assert.equal(spec.taskBlueprint?.outcomes[0]?.selectedConnector, "gmail");
+});
+
+test("parseStoredLoopSpec infers one legacy role connector from bindings", () => {
+  const spec = parseStoredLoopSpec({
+    workspaceId,
+    intent: { goal: "g", outcome: "o", successCriteria: [] },
+    trigger: { kind: "manual" },
+    profile: "agentic",
+    bindings: [{ capability: "email.read", connector: "outlook", role: "source" }],
+    taskBlueprint: {
+      version: 1,
+      summary: "Support triage",
+      outcomes: [{ id: "out-1", role: "source", description: "Read email", status: "chosen" }],
+    },
+    output: { kind: "none" },
+  });
+
+  assert.equal(spec.taskBlueprint?.outcomes[0]?.status, "chosen");
+  assert.equal(spec.taskBlueprint?.outcomes[0]?.selectedConnector, "outlook");
+});
+
 test("hydrateStoredTrigger leaves schedule triggers unchanged", () => {
   const trigger = hydrateStoredTrigger({ kind: "schedule", cron: "0 7 * * *", timezone: "UTC" });
   assert.deepEqual(trigger, { kind: "schedule", cron: "0 7 * * *", timezone: "UTC" });

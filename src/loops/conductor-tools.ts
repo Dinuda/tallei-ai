@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { intentAnalysisSchema } from "./intent-discovery.js";
+
 export const askQuestionOptionSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
@@ -30,6 +32,8 @@ export const askQuestionOutputSchema = z.object({
   selectedValues: z.array(z.string()),
   otherText: z.string().optional(),
   skipped: z.boolean().optional(),
+  outcomeId: z.string().min(1).optional(),
+  role: z.enum(["trigger", "source", "transform", "destination"]).optional(),
 });
 
 export type AskQuestionInput = z.infer<typeof askQuestionInputSchema>;
@@ -37,10 +41,85 @@ export type AskQuestionOutput = z.infer<typeof askQuestionOutputSchema>;
 
 /** Server-driven connector picker — options come from discoverConnectorsForBlueprint, not the model. */
 export const pickConnectorAppInputSchema = z.object({
+  outcomeId: z.string().min(1),
+  role: z.enum(["trigger", "source", "destination"]),
   question: z.string().min(1).optional(),
 });
 
 export type PickConnectorAppInput = z.infer<typeof pickConnectorAppInputSchema>;
+
+export const analyzeIntentInputSchema = intentAnalysisSchema;
+export type AnalyzeIntentInput = z.infer<typeof analyzeIntentInputSchema>;
+
+const outcomeBriefUserSummarySchema = z.object({
+  whenItRuns: z.string().min(1),
+  appsInvolved: z.array(z.string().min(1)),
+  steps: z.array(z.string().min(1)).min(1),
+  beforeSending: z.string().min(1),
+  howYouKnowItWorked: z.string().min(1),
+  whereResultsGo: z.string().min(1),
+  safetyLimits: z.array(z.string().min(1)),
+  assumptionsNote: z.string().optional(),
+});
+
+const outcomeBriefSchema = z.object({
+  outcome: z.string().min(1),
+  successCriteria: z.array(z.string()),
+  trigger: z.string().min(1),
+  actions: z.array(z.string()),
+  connectors: z.array(z.object({
+    outcomeId: z.string().min(1),
+    role: z.string().min(1),
+    description: z.string().min(1),
+    connector: z.string().min(1),
+  })),
+  output: z.string(),
+  approvals: z.string(),
+  guardrails: z.array(z.string()),
+  assumptions: z.array(z.string()),
+  userSummary: outcomeBriefUserSummarySchema.optional(),
+});
+
+export const outcomeBriefOutputSchema = z.object({
+  brief: outcomeBriefSchema,
+  briefHash: z.string().min(1),
+});
+
+export const confirmOutcomeBriefActionSchema = z.enum([
+  "confirm",
+  "change_outcome",
+  "change_trigger",
+  "change_connectors",
+  "change_approvals",
+  "other",
+]);
+
+export const confirmOutcomeBriefInputSchema = z.object({
+  briefHash: z.string().min(1),
+  question: z.string().min(1),
+  options: z.array(askQuestionOptionSchema).min(2).max(5),
+  recommendedOptionIds: z.array(z.string()).optional(),
+  allowOther: z.boolean().optional(),
+});
+
+export const confirmOutcomeBriefOutputSchema = z.object({
+  action: confirmOutcomeBriefActionSchema,
+  briefHash: z.string().min(1),
+  answerText: z.string().min(1),
+  selectedOptionIds: z.array(z.string()),
+  selectedValues: z.array(z.string()),
+  otherText: z.string().optional(),
+});
+
+export function resolveConfirmOutcomeBriefAction(
+  selectedValue: string,
+): z.infer<typeof confirmOutcomeBriefActionSchema> {
+  const parsed = confirmOutcomeBriefActionSchema.safeParse(selectedValue);
+  return parsed.success ? parsed.data : "other";
+}
+
+export type ConfirmOutcomeBriefInput = z.infer<typeof confirmOutcomeBriefInputSchema>;
+export type ConfirmOutcomeBriefOutput = z.infer<typeof confirmOutcomeBriefOutputSchema>;
 
 /** Clickable quick-reply chips for conversational yes/no or next-step choices. */
 export const presentReplyOptionsInputSchema = z.object({
@@ -64,6 +143,7 @@ export const discoverBindingsInputSchema = z.object({
   outcomes: z.array(z.object({
     id: z.string().min(1),
     description: z.string().min(1),
+    role: z.enum(["trigger", "source", "transform", "destination"]).optional(),
   })).min(1),
 });
 

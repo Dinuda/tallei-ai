@@ -9,9 +9,50 @@ import {
   MIN_CAPABILITY_SCORE,
   outcomeFramedOptionLabel,
   pickRecommendedBinding,
+  selectExplicitBindingAction,
   suggestCapabilityLabel,
   type BindingCandidate,
 } from "../../../src/loops/binding-discovery.js";
+
+test("selectExplicitBindingAction uses the exact scoped action schema", () => {
+  const result = selectExplicitBindingAction({
+    connector: "generic",
+    actionSlug: "GENERIC_EXACT_ACTION",
+    scopedTools: [{
+      actionSlug: "GENERIC_EXACT_ACTION",
+      inputSchema: { required: ["record_id"] },
+      outputSchema: { properties: { record: { type: "object" } } },
+    }, {
+      actionSlug: "GENERIC_DEFAULT_ACTION",
+      inputSchema: {},
+    }],
+    globalMatches: [],
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.action.actionSlug, "GENERIC_EXACT_ACTION");
+    assert.deepEqual(result.action.inputSchema, { required: ["record_id"] });
+  }
+});
+
+test("selectExplicitBindingAction distinguishes toolkit mismatch from missing action", () => {
+  const mismatch = selectExplicitBindingAction({
+    connector: "generic",
+    actionSlug: "OTHER_EXACT_ACTION",
+    scopedTools: [],
+    globalMatches: [{ actionSlug: "OTHER_EXACT_ACTION", toolkit: "other" }],
+  });
+  const missing = selectExplicitBindingAction({
+    connector: "generic",
+    actionSlug: "GENERIC_MISSING_ACTION",
+    scopedTools: [],
+    globalMatches: [],
+  });
+
+  assert.deepEqual(mismatch, { ok: false, code: "ACTION_TOOLKIT_MISMATCH", actualToolkit: "other" });
+  assert.deepEqual(missing, { ok: false, code: "ACTION_NOT_FOUND" });
+});
 
 function candidate(overrides: Partial<BindingCandidate> & Pick<BindingCandidate, "actionSlug" | "score">): BindingCandidate {
   return {

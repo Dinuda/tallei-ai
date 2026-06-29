@@ -8,21 +8,77 @@ import { isEventTriggerReadyForCompile } from "./event-trigger.js";
 import { normalizeTaskBlueprint } from "./task-decomposition.js";
 
 export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
+  const nextBlueprint = patch.taskBlueprint
+    ? normalizeTaskBlueprint(patch.taskBlueprint)
+    : current.taskBlueprint;
+  const intentChanged = patch.intent !== undefined
+    && JSON.stringify({ ...current.intent, ...patch.intent }) !== JSON.stringify(current.intent);
+  const currentOutcomes = new Map((current.taskBlueprint?.outcomes ?? []).map((outcome) => [outcome.id, outcome]));
+  const changedConnectorRoles = new Set<string>();
+  const changedConnectorSlugs = new Set<string>();
+  if (patch.taskBlueprint) {
+    for (const outcome of nextBlueprint?.outcomes ?? []) {
+      const previous = currentOutcomes.get(outcome.id);
+      if (previous?.selectedConnector === outcome.selectedConnector) continue;
+      changedConnectorRoles.add(outcome.role);
+      if (previous?.selectedConnector) changedConnectorSlugs.add(previous.selectedConnector.toLowerCase());
+      if (outcome.selectedConnector) changedConnectorSlugs.add(outcome.selectedConnector.toLowerCase());
+    }
+  }
+
+  const clearAllGenerated = intentChanged;
+  const clearGeneratedForConnector = changedConnectorRoles.size > 0;
+  const retainedBindings = clearAllGenerated
+    ? []
+    : clearGeneratedForConnector
+      ? current.bindings.filter((binding) =>
+          !changedConnectorRoles.has(binding.role ?? "")
+          && !changedConnectorSlugs.has(binding.connector.toLowerCase()),
+        )
+      : current.bindings;
+  const retainedComposioActions = clearAllGenerated
+    ? []
+    : clearGeneratedForConnector
+      ? current.composioActions.filter((action) => !changedConnectorSlugs.has(action.toolkit.toLowerCase()))
+      : current.composioActions;
+  const materialPatch = patch.intent !== undefined
+    || patch.trigger !== undefined
+    || patch.taskBlueprint !== undefined
+    || patch.bindings !== undefined
+    || patch.composioActions !== undefined
+    || patch.output !== undefined
+    || patch.approval !== undefined
+    || patch.guardrails !== undefined;
+  const mergedIntentDiscovery = patch.intentDiscovery
+    ? { ...current.intentDiscovery, ...patch.intentDiscovery }
+    : current.intentDiscovery;
+
   const merged: LoopSpec = {
     ...current,
     intent: patch.intent ? { ...current.intent, ...patch.intent } : current.intent,
-    trigger: patch.trigger ?? current.trigger,
+    trigger: patch.trigger
+      ?? (clearAllGenerated || changedConnectorRoles.has("trigger") ? { kind: "manual" as const } : current.trigger),
     profile: patch.profile ?? current.profile,
-    bindings: patch.bindings ?? current.bindings,
-    taskBlueprint: patch.taskBlueprint
-      ? normalizeTaskBlueprint(patch.taskBlueprint)
-      : current.taskBlueprint,
+    bindings: patch.bindings ?? retainedBindings,
+    composioActions: patch.composioActions ?? retainedComposioActions,
+    taskBlueprint: nextBlueprint,
+    intentDiscovery: materialPatch
+      ? {
+          ...mergedIntentDiscovery,
+          status: mergedIntentDiscovery.status === "confirmed" ? "ready" : mergedIntentDiscovery.status,
+          confirmedBriefHash: undefined,
+        }
+      : mergedIntentDiscovery,
     agent: patch.agent
       ? { ...(current.agent ?? { instructions: "", maxSteps: 12, maxTokens: 8_000 }), ...patch.agent }
       : current.agent,
     monitor: patch.monitor ?? current.monitor,
     sync: patch.sync ?? current.sync,
-    output: patch.output ? { ...current.output, ...patch.output } : current.output,
+    output: patch.output
+      ? { ...current.output, ...patch.output }
+      : clearAllGenerated || changedConnectorRoles.has("destination")
+        ? { kind: "none" as const }
+        : current.output,
     approval: patch.approval ? { ...current.approval, ...patch.approval } : current.approval,
     guardrails: patch.guardrails ? { ...current.guardrails, ...patch.guardrails } : current.guardrails,
   };

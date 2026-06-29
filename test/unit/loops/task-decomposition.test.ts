@@ -18,7 +18,6 @@ test("normalizeTaskBlueprint assigns ids and defaults", () => {
   });
   assert.equal(normalized.outcomes[0]!.id.length > 0, true);
   assert.equal(normalized.outcomes[0]!.status, "pending");
-  assert.deepEqual(normalized.outcomes[0]!.candidates, []);
 });
 
 test("isBlueprintComplete requires chosen connectors on required outcomes", () => {
@@ -30,16 +29,14 @@ test("isBlueprintComplete requires chosen connectors on required outcomes", () =
         id: "a",
         role: "source",
         description: "source",
-        candidates: [],
         status: "pending",
       },
       {
         id: "b",
         role: "destination",
         description: "dest",
-        candidates: [],
         status: "chosen",
-        selectedConnector: "gmail",
+        selectedConnector: "zendesk",
       },
     ],
   };
@@ -48,7 +45,7 @@ test("isBlueprintComplete requires chosen connectors on required outcomes", () =
   const done: TaskBlueprint = {
     ...pending,
     outcomes: [
-      { ...pending.outcomes[0]!, status: "chosen", selectedConnector: "notion" },
+      { ...pending.outcomes[0]!, status: "chosen", selectedConnector: "gmail" },
       pending.outcomes[1]!,
     ],
   };
@@ -75,7 +72,6 @@ test("validateConnectorChoicesBeforeSpecPatch blocks bindings with pending outco
       id: "t1",
       role: "trigger",
       description: "New email",
-      candidates: [],
       status: "pending",
     }],
   };
@@ -94,7 +90,6 @@ test("validateConnectorChoicesBeforeSpecPatch allows bindings when outcomes chos
       id: "t1",
       role: "trigger",
       description: "New email",
-      candidates: [],
       status: "chosen",
       selectedConnector: "gmail",
     }],

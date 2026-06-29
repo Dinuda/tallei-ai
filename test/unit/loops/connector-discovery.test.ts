@@ -8,7 +8,6 @@ import {
   buildConnectorRecommendedIds,
   CONNECTED_TOOLKIT_BOOST,
   inferCatalogToolkitHints,
-  resolveAutoConnectorPick,
   TOP_CONNECTOR_RECOMMENDATIONS,
   type ConnectorCandidate,
 } from "../../../src/loops/connector-discovery.js";
@@ -54,28 +53,20 @@ test("inferCatalogToolkitHints includes email apps for support outcomes", () => 
   assert.ok(hints.includes("outlook") || hints.includes("zendesk"));
 });
 
-test("resolveAutoConnectorPick returns sole connected top recommendation", () => {
-  const options = buildConnectorAskOptions([
-    candidate({ connector: "gmail", score: 10, connected: true, name: "Gmail" }),
-    candidate({ connector: "outlook", score: 9, connected: false, name: "Outlook" }),
-  ]);
-  const ids = buildConnectorRecommendedIds(options);
-  assert.equal(resolveAutoConnectorPick(options, ids), "gmail");
-});
-
 test("applyPrimaryConnectorToBlueprint marks all pending outcomes", () => {
   const blueprint = {
     version: 1 as const,
     summary: "Support triage",
     outcomes: [
-      { id: "out-1", role: "trigger" as const, description: "On email", candidates: [], status: "pending" as const },
-      { id: "out-2", role: "source" as const, description: "Read email", candidates: [], status: "pending" as const },
-      { id: "out-3", role: "transform" as const, description: "Draft reply", candidates: [], status: "pending" as const },
+      { id: "out-1", role: "trigger" as const, description: "On email", status: "pending" as const },
+      { id: "out-2", role: "source" as const, description: "Read email", status: "pending" as const },
+      { id: "out-3", role: "transform" as const, description: "Draft reply", status: "pending" as const },
     ],
   };
   const merged = applyPrimaryConnectorToBlueprint(blueprint, "gmail");
+  assert.equal(merged.outcomes[0]?.status, "chosen");
   assert.equal(merged.outcomes[0]?.selectedConnector, "gmail");
-  assert.equal(merged.outcomes[1]?.selectedConnector, "gmail");
+  assert.equal(merged.outcomes[1]?.status, "chosen");
   assert.equal(merged.outcomes[2]?.status, "pending");
 });
 
@@ -84,17 +75,18 @@ test("applyConnectorSelectionsToBlueprint marks outcomes chosen", () => {
     version: 1 as const,
     summary: "Support triage",
     outcomes: [
-      { id: "out-1", role: "trigger" as const, description: "On email", candidates: [], status: "pending" as const },
-      { id: "out-2", role: "source" as const, description: "Read email", candidates: [], status: "pending" as const },
+      { id: "out-1", role: "trigger" as const, description: "On email", status: "pending" as const },
+      { id: "out-2", role: "source" as const, description: "Read email", status: "pending" as const },
     ],
   };
   const merged = applyConnectorSelectionsToBlueprint(blueprint, [
     { outcomeId: "out-1", connector: "gmail" },
-    { outcomeId: "out-2", connector: "gmail" },
+    { outcomeId: "out-2", connector: "zendesk" },
   ]);
-  assert.equal(merged.outcomes[0]?.selectedConnector, "gmail");
   assert.equal(merged.outcomes[0]?.status, "chosen");
   assert.equal(merged.outcomes[1]?.status, "chosen");
+  assert.equal(merged.outcomes[0]?.selectedConnector, "gmail");
+  assert.equal(merged.outcomes[1]?.selectedConnector, "zendesk");
 });
 
 test("buildConnectorRecommendedIds prefers connected when scores tie in top five", () => {

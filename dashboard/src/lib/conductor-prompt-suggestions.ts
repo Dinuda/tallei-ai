@@ -149,6 +149,23 @@ export function findPendingPresentReplyOptions(
   return null;
 }
 
+export function deriveConductorPromptSuggestionsQuestion(messages: UIMessage[]): string {
+  const text = getLastAssistantText(messages);
+  if (!text) return "How would you like to proceed?";
+
+  const questionMatch = text.match(/[^.!?\n]*\?/);
+  if (questionMatch) {
+    return questionMatch[0].trim();
+  }
+
+  if (text.length <= 120) return text;
+
+  const firstLine = text.split("\n")[0]?.trim();
+  if (firstLine && firstLine.length <= 200) return firstLine;
+
+  return "How would you like to proceed?";
+}
+
 export function deriveConductorPromptSuggestions(input: DeriveSuggestionsInput): ConductorPromptSuggestion[] {
   if (input.hasPendingQuestion || input.chatBusy) return [];
 

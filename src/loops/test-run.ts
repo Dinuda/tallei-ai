@@ -14,7 +14,8 @@ import {
 } from "./spec.js";
 import { assertAgenticCompiledPlan } from "./plan-validators.js";
 import { validateToolArgsAgainstSchema } from "./tool-schema.js";
-import { createLoopRun, getCompiledPlan, updateLoopRun } from "./store.js";
+import { createLoopRun, getCompiledPlan, getLatestSpecRevision, updateLoopRun } from "./store.js";
+import { resolveComposioActionArgs } from "./composio-action-instructions.js";
 
 export type TestRunStep =
   | { kind: "plan"; decision: PlannerDecision }
@@ -60,6 +61,9 @@ function mapToolCatalog(plan: CompiledPlan) {
     connector: tool.connector,
     actionSlug: tool.actionSlug,
     plannerCard: tool.plannerCard,
+    ...(tool.modifiedInputSchema ? { modifiedInputSchema: tool.modifiedInputSchema } : {}),
+    ...(tool.behaviorInstructions.length ? { behaviorInstructions: tool.behaviorInstructions } : {}),
+    ...(tool.composioAction ? { composioAction: tool.composioAction } : {}),
   }));
 }
 
@@ -212,7 +216,28 @@ async function runAgenticTestLoop(input: {
       };
     }
 
-    const validation = validateToolArgsAgainstSchema(decision.args, tool.inputSchema);
+    const resolvedArgs = resolveComposioActionArgs({
+      plan: input.plan,
+      tool,
+      args: decision.args,
+      ...(input.scenario.triggerPayload !== undefined ? { eventPayload: input.scenario.triggerPayload } : {}),
+      toolResults,
+    });
+    if (resolvedArgs.missing.length > 0) {
+      return {
+        steps: [
+          ...steps,
+          {
+            kind: "error",
+            code: "MISSING_INPUT_SOURCE",
+            message: `Missing input source: ${resolvedArgs.missing.map((row) => `${row.actionSlug}.${row.field}`).join(", ")}`,
+          },
+        ],
+        error: `MISSING_INPUT_SOURCE: ${resolvedArgs.missing.map((row) => row.field).join(", ")}`,
+      };
+    }
+
+    const validation = validateToolArgsAgainstSchema(resolvedArgs.args, tool.inputSchema);
     if (!validation.ok) {
       return {
         steps: [
@@ -232,14 +257,14 @@ async function runAgenticTestLoop(input: {
       simulated: true,
       toolId: tool.id,
       capability: tool.capability,
-      args: decision.args,
+      args: resolvedArgs.args,
     };
     steps.push({
       kind: "tool",
       toolId: tool.id,
       capability: tool.capability,
       simulated: true,
-      args: decision.args,
+      args: resolvedArgs.args,
       result: simulated,
     });
     toolResults.push({ toolId: tool.id, result: simulated });
@@ -278,6 +303,17 @@ export async function executeLoopTestRun(
       status: "failed",
       error: "Compiled plan not found",
       steps: [{ kind: "error", code: "PLAN_NOT_FOUND", message: "Compiled plan not found" }],
+    };
+  }
+
+  const latestSpecRevision = await getLatestSpecRevision(input.loopId);
+  if (planRow.specRevision !== latestSpecRevision) {
+    return {
+      ok: false,
+      runId: "",
+      status: "failed",
+      error: "Compiled plan is stale; confirm and compile the current outcome brief",
+      steps: [{ kind: "error", code: "STALE_PLAN", message: "Compiled plan does not match the latest loop spec" }],
     };
   }
 

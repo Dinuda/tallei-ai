@@ -39,26 +39,16 @@ export const DEFAULT_CONNECTOR_PICK_QUESTION =
   "Which app should power this loop? Triggers and actions are configured automatically after you pick.";
 
 export type BlueprintConnectorDiscoveryResult = {
-  askOptions: ConnectorAskOption[];
-  recommendedOptionIds: string[];
-  defaultQuestion: string;
+  groups: Array<{
+    outcomeId: string;
+    role: OutcomeRole;
+    outcomeDescription: string;
+    askOptions: ConnectorAskOption[];
+    recommendedOptionIds: string[];
+    defaultQuestion: string;
+  }>;
   pickerKind: "app";
-  /** Sole connected app that is also #1 recommended — Conductor may patch without pickConnectorApp. */
-  autoApplyConnector?: string;
 };
-
-/** Auto-pick when exactly one connected app is the top recommendation. */
-export function resolveAutoConnectorPick(
-  askOptions: ConnectorAskOption[],
-  recommendedOptionIds: string[],
-): string | null {
-  const connected = askOptions.filter((option) => option.description === "Already connected");
-  if (connected.length !== 1) return null;
-  const pick = connected[0]!;
-  const topId = recommendedOptionIds[0];
-  if (topId && pick.id !== topId) return null;
-  return pick.value;
-}
 
 export function inferCatalogToolkitHints(
   outcomeDescription: string,
@@ -194,6 +184,7 @@ export async function discoverConnectorsForBlueprint(
   auth: AuthContext,
   input: {
     outcomes: Array<{ id: string; role: OutcomeRole; description: string }>;
+    previousConnectors?: string[];
   },
 ): Promise<BlueprintConnectorDiscoveryResult> {
   const pending = input.outcomes.filter((outcome) => outcome.role !== "transform");
@@ -202,32 +193,39 @@ export async function discoverConnectorsForBlueprint(
     pending.map(async (outcome) => discoverConnectorsForOutcome(auth, {
       outcomeDescription: outcome.description,
       role: outcome.role,
-      limit: 12,
+      includeFullCatalog: true,
     })),
   );
 
-  const byConnector = new Map<string, ConnectorCandidate>();
-  for (const discovery of discoveries) {
-    for (const candidate of discovery.candidates) {
-      const key = candidate.connector.toLowerCase();
-      const existing = byConnector.get(key);
-      if (!existing || candidate.score > existing.score) {
-        byConnector.set(key, candidate);
-      }
-    }
-  }
-
-  const ranked = [...byConnector.values()].sort((a, b) => b.score - a.score);
-  const askOptions = buildConnectorAskOptions(ranked);
-  const recommendedOptionIds = buildConnectorRecommendedIds(askOptions);
-  const autoApplyConnector = resolveAutoConnectorPick(askOptions, recommendedOptionIds) ?? undefined;
-
   return {
-    askOptions,
-    recommendedOptionIds,
-    defaultQuestion: DEFAULT_CONNECTOR_PICK_QUESTION,
+    groups: discoveries.map((discovery, index) => {
+      const outcome = pending[index]!;
+      const reusable = (input.previousConnectors ?? []).find((connector) =>
+        discovery.candidates.some((candidate) =>
+          candidate.connector.toLowerCase() === connector.toLowerCase() && candidate.score > 0,
+        ),
+      );
+      const reusableOptionId = reusable
+        ? discovery.askOptions.find((option) => option.value.toLowerCase() === reusable.toLowerCase())?.id
+        : undefined;
+      const recommendedOptionIds = [
+        ...(reusableOptionId ? [reusableOptionId] : []),
+        ...discovery.recommendedOptionIds,
+      ].filter((id, position, all) => all.indexOf(id) === position).slice(0, TOP_CONNECTOR_RECOMMENDATIONS);
+      return {
+        outcomeId: outcome.id,
+        role: outcome.role,
+        outcomeDescription: outcome.description,
+        askOptions: discovery.askOptions.map((option) => ({
+          ...option,
+          outcomeId: outcome.id,
+          role: outcome.role,
+        })),
+        recommendedOptionIds,
+        defaultQuestion: `Which app should handle ${outcome.description}?`,
+      };
+    }),
     pickerKind: "app",
-    ...(autoApplyConnector ? { autoApplyConnector } : {}),
   };
 }
 
@@ -237,9 +235,10 @@ export async function discoverConnectorsForOutcome(
     outcomeDescription: string;
     role: "trigger" | "source" | "transform" | "destination";
     limit?: number;
+    includeFullCatalog?: boolean;
   },
 ): Promise<ConnectorDiscoveryResult> {
-  const limit = Math.max(3, Math.min(input.limit ?? 8, 12));
+  const limit = Math.max(3, input.limit ?? 8);
   const { toolkits } = await listAllToolkitsWithStatus(auth);
   const suggestedCapability = suggestCapabilityLabel(input.outcomeDescription);
   const searchQuery = `${input.outcomeDescription} ${roleSearchHints(input.role)}`.trim();
@@ -278,7 +277,7 @@ export async function discoverConnectorsForOutcome(
     const slug = normalizeToolkitSlug(toolkit.slug);
     const match = scoresByToolkit.get(slug);
     const baseScore = match?.score ?? 0;
-    if (baseScore <= 0 && input.role !== "trigger") continue;
+    if (!input.includeFullCatalog && baseScore <= 0 && input.role !== "trigger") continue;
 
     const finalScore = baseScore + (toolkit.connected ? CONNECTED_TOOLKIT_BOOST : 0);
     candidates.push({
@@ -307,7 +306,7 @@ export async function discoverConnectorsForOutcome(
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const ranked = candidates.slice(0, limit);
+  const ranked = input.includeFullCatalog ? candidates : candidates.slice(0, limit);
   const askOptions = buildConnectorAskOptions(ranked);
   const recommendedOptionIds = buildConnectorRecommendedIds(askOptions);
 

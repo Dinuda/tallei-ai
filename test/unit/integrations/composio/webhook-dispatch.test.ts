@@ -10,8 +10,8 @@ test("findActiveLoopsByComposioTriggerSlug joins subscriptions within a workspac
       capturedParams = params;
       return {
         rows: [
-          { loop_id: "loop-a", active_plan_id: "plan-a", workspace_id: "ws-1" },
-          { loop_id: "loop-b", active_plan_id: "plan-b", workspace_id: "ws-1" },
+          { loop_id: "loop-a", active_plan_id: "plan-a", workspace_id: "ws-1", tenant_id: "t-1", user_id: "u-1" },
+          { loop_id: "loop-b", active_plan_id: "plan-b", workspace_id: "ws-1", tenant_id: "t-1", user_id: "u-1" },
         ],
       };
     },
@@ -21,13 +21,47 @@ test("findActiveLoopsByComposioTriggerSlug joins subscriptions within a workspac
   Object.assign(dbModule.pool, pool);
 
   const { findActiveLoopsByComposioTriggerSlug } = await import("../../../../src/loops/store.js");
-  const matches = await findActiveLoopsByComposioTriggerSlug("ws-1", "GMAIL_NEW_GMAIL_MESSAGE");
+  const matches = await findActiveLoopsByComposioTriggerSlug("GMAIL_NEW_GMAIL_MESSAGE", {
+    workspaceId: "ws-1",
+  });
 
   assert.equal(matches.length, 2);
   assert.ok(capturedSql.includes("loop_trigger_subscriptions"));
   assert.ok(capturedSql.includes("workspace_trigger_channels"));
   assert.ok(capturedSql.includes("l.workspace_id"));
-  assert.deepEqual(capturedParams?.slice(0, 2), ["ws-1", "GMAIL_NEW_GMAIL_MESSAGE"]);
+  assert.deepEqual(capturedParams?.slice(0, 2), ["GMAIL_NEW_GMAIL_MESSAGE", "ws-1"]);
+});
+
+test("findActiveLoopsByComposioTriggerSlug can match by connected account without workspace", async () => {
+  let capturedSql = "";
+  let capturedParams: unknown[] | undefined;
+  const pool = {
+    async query(sql: string, params?: unknown[]) {
+      capturedSql = sql;
+      capturedParams = params;
+      return {
+        rows: [{
+          loop_id: "loop-a",
+          active_plan_id: "plan-a",
+          workspace_id: "ws-2",
+          tenant_id: "tenant-1",
+          user_id: "user-1",
+        }],
+      };
+    },
+  };
+
+  const dbModule = await import("../../../../src/infrastructure/db/index.js");
+  Object.assign(dbModule.pool, pool);
+
+  const { findActiveLoopsByComposioTriggerSlug } = await import("../../../../src/loops/store.js");
+  const matches = await findActiveLoopsByComposioTriggerSlug("GMAIL_NEW_GMAIL_MESSAGE", {
+    connectedAccountId: "ca_gmail_1",
+  });
+
+  assert.equal(matches.length, 1);
+  assert.ok(capturedSql.includes("c.connected_account_id"));
+  assert.deepEqual(capturedParams, ["GMAIL_NEW_GMAIL_MESSAGE", "ca_gmail_1"]);
 });
 
 test("dispatchComposioTriggerToLoops skips loops when delivery claim fails", async () => {

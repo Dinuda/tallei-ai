@@ -221,9 +221,14 @@ export function InteractivePromptMenu({
   onDismiss?: () => void;
 }) {
   const theme = PROMPT_THEMES[variant];
-  const [selectedIds, setSelectedIds] = useState<string[]>(
-    submittedAnswer?.selectedOptionIds ?? []
-  );
+  const [selectedIds, setSelectedIds] = useState<string[]>(() => {
+    if (submittedAnswer?.selectedOptionIds?.length) return submittedAnswer.selectedOptionIds;
+    if (!allowMultiple && recommendedOptionIds.length === 1) {
+      const recommendedId = recommendedOptionIds[0];
+      if (options.some((option) => option.id === recommendedId)) return [recommendedId];
+    }
+    return [];
+  });
   const [otherText, setOtherText] = useState(submittedAnswer?.otherText ?? "");
   const [appSearch, setAppSearch] = useState("");
   const recommended = useMemo(

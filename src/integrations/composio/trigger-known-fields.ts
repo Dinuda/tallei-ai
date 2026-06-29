@@ -56,6 +56,11 @@ export function extractTriggerKnownFields(
 
   if (messageId) fields.message_id = messageId;
   if (threadId) fields.thread_id = threadId;
+  if (messageId && threadId) {
+    fields.gmail_id_note = "Use message_id (not thread_id) for email.get and email.labels tools.";
+  } else if (threadId && !messageId) {
+    fields.gmail_id_note = "Only thread_id in trigger — call email.read first; do not pass thread_id to label/get tools.";
+  }
   if (subject) fields.subject = subject;
   if (from) fields.from = from;
   if (triggerSlug) fields.trigger_slug = triggerSlug;

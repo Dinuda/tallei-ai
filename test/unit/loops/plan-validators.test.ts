@@ -28,6 +28,7 @@ const basePlan = (): CompiledPlan => ({
     sensitive: false,
     credentialRef: "acc-1",
   }],
+  composioActions: [],
   output: { kind: "none" },
   approval: { mode: "mixed", sensitiveCapabilities: [], defaultTimeoutHours: 24, onTimeout: "reject" },
   guardrails: { allowedTools: [], deniedTools: [], maxRetriesPerStep: 3, maxRunDurationMinutes: 60 },

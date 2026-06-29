@@ -9,11 +9,17 @@ import {
   PlaybookFetchError,
 } from "../integrations/composio/playbook.js";
 import { listToolkitsForUser } from "../integrations/composio/session.js";
-import { resolveBindingAction, alignCapabilityWithAction, looksLikeComposioActionSlug } from "./binding-discovery.js";
+import {
+  resolveBindingAction,
+  resolveExplicitBindingAction,
+  alignCapabilityWithAction,
+  looksLikeComposioActionSlug,
+} from "./binding-discovery.js";
 import {
   compiledPlanSchema,
   loopSpecSchema,
   type CompiledPlan,
+  type ComposioActionInstruction,
   type LoopSpec,
   type ResolvedTool,
 } from "./spec.js";
@@ -26,11 +32,25 @@ import {
 import { validateAgenticCompileArtifacts } from "./plan-validators.js";
 import { validateEventTriggerForCompile } from "./event-trigger.js";
 import { scoreSchemaFitForCapability, semanticCapabilityForAction, summarizeInputSchema } from "./tool-schema.js";
+import {
+  attachComposioActionInstructionsToTools,
+  validateComposioActionInstructions,
+} from "./composio-action-instructions.js";
+import { buildComposioToolContract } from "./composio-schema-contract.js";
+import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
+import { getPendingConnectorOutcomes } from "./task-decomposition.js";
 
 const MAX_AUTO_EXPAND_TOOLS = 2;
 
+type ToolCatalogDraft = Omit<ResolvedTool, "plannerCard" | "behaviorInstructions" | "outputSufficiencyPaths"> & {
+  plannerCard?: ResolvedTool["plannerCard"];
+  behaviorInstructions?: string[];
+  outputSufficiencyPaths?: string[];
+  bindingRole?: LoopSpec["bindings"][number]["role"];
+};
+
 function attachPlaybookToCatalog(
-  toolCatalog: Array<Omit<ResolvedTool, "plannerCard"> & { plannerCard?: ResolvedTool["plannerCard"] }>,
+  toolCatalog: ToolCatalogDraft[],
   playbookResult: Awaited<ReturnType<typeof fetchConnectorPlaybook>>,
 ): void {
   for (let i = 0; i < toolCatalog.length; i++) {
@@ -46,7 +66,7 @@ function attachPlaybookToCatalog(
 
 async function autoExpandRelatedTools(
   parsed: LoopSpec,
-  toolCatalog: Array<Omit<ResolvedTool, "plannerCard"> & { plannerCard?: ResolvedTool["plannerCard"] }>,
+  toolCatalog: ToolCatalogDraft[],
   connectedBySlug: Map<string, { connectedAccountId?: string }>,
   playbookResult: Awaited<ReturnType<typeof fetchConnectorPlaybook>>,
 ): Promise<void> {
@@ -88,6 +108,7 @@ async function autoExpandRelatedTools(
       ),
       sensitive,
       credentialRef: toolkit.connectedAccountId,
+      bindingRole: "source",
       ...(resolved?.toolkitVersion ? { toolkitVersion: resolved.toolkitVersion } : {}),
     });
     autoAdded++;
@@ -128,6 +149,38 @@ export async function compileLoopSpec(
     errors.push({ code: "WORKSPACE_MISMATCH", message: "Spec workspace does not match active workspace" });
   }
 
+  if (!isOutcomeBriefConfirmed(parsed)) {
+    errors.push({
+      code: "OUTCOME_BRIEF_UNCONFIRMED",
+      message: "Confirm the current outcome brief before compiling",
+      binding: "intentDiscovery.confirmedBriefHash",
+    });
+  }
+
+  for (const outcome of getPendingConnectorOutcomes(parsed.taskBlueprint)) {
+    errors.push({
+      code: "CONNECTOR_CHOICE_REQUIRED",
+      message: `Choose a connector for ${outcome.description}`,
+      binding: `taskBlueprint.${outcome.id}.selectedConnector`,
+    });
+  }
+
+  for (const outcome of parsed.taskBlueprint?.outcomes ?? []) {
+    if (!outcome.selectedConnector) continue;
+    const mismatchedBinding = parsed.bindings.find((binding) =>
+      binding.role === outcome.role
+      && normalizeToolkitSlug(binding.connector) !== normalizeToolkitSlug(outcome.selectedConnector!),
+    );
+    if (mismatchedBinding) {
+      errors.push({
+        code: "CONNECTOR_ROLE_MISMATCH",
+        message: `${outcome.description} selected ${outcome.selectedConnector}, but its binding uses ${mismatchedBinding.connector}`,
+        binding: mismatchedBinding.capability,
+        toolkit: mismatchedBinding.connector,
+      });
+    }
+  }
+
   if (parsed.trigger.kind === "schedule" && !validateCron(parsed.trigger.cron)) {
     errors.push({ code: "INVALID_CRON", message: `Invalid cron: ${parsed.trigger.cron}` });
   }
@@ -138,6 +191,23 @@ export async function compileLoopSpec(
 
   if (parsed.profile === "sync" && !parsed.sync?.mapping) {
     errors.push({ code: "INCOMPLETE_SPEC", message: "Sync profile requires sync.mapping", binding: "sync.mapping" });
+  }
+
+  for (const binding of parsed.bindings) {
+    if (!binding.actionSlug) continue;
+    const conflictingInstruction = parsed.composioActions.find((instruction) =>
+      normalizeToolkitSlug(instruction.toolkit) === normalizeToolkitSlug(binding.connector)
+      && instruction.label?.trim().toLowerCase() === binding.capability.trim().toLowerCase()
+      && instruction.actionSlug.toUpperCase() !== binding.actionSlug!.toUpperCase()
+    );
+    if (conflictingInstruction) {
+      errors.push({
+        code: "ACTION_INSTRUCTION_MISMATCH",
+        message: `${binding.capability} binds ${binding.actionSlug}, but its Composio instructions target ${conflictingInstruction.actionSlug}`,
+        binding: binding.capability,
+        toolkit: binding.connector,
+      });
+    }
   }
 
   if (parsed.trigger.kind === "event") {
@@ -171,24 +241,42 @@ export async function compileLoopSpec(
   const { toolkits } = await listToolkitsForUser(auth, { isConnected: true, limit: 50 });
   const connectedBySlug = new Map(toolkits.map((t) => [normalizeToolkitSlug(t.slug), t]));
 
-  type ToolCatalogDraft = Omit<ResolvedTool, "plannerCard"> & { plannerCard?: ResolvedTool["plannerCard"] };
   const toolCatalog: ToolCatalogDraft[] = [];
   for (const binding of parsed.bindings) {
     const resolvedConnector = await resolveToolkitSlug(binding.connector);
     const toolkit = connectedBySlug.get(normalizeToolkitSlug(resolvedConnector));
     if (!toolkit?.connected || !toolkit.connectedAccountId) {
-      if (!binding.optional) {
-        errors.push({
-          code: "CONNECTOR_NOT_CONNECTED",
-          message: `${binding.connector} is not connected in this workspace`,
-          binding: binding.capability,
-          toolkit: binding.connector,
-          connectUrl: `/dashboard/loops/${loopId}/conductor?connect=${encodeURIComponent(binding.connector)}`,
-        });
-      }
+      errors.push({
+        code: "CONNECTOR_NOT_CONNECTED",
+        message: `${binding.connector} is not connected in this workspace`,
+        binding: binding.capability,
+        toolkit: binding.connector,
+        connectUrl: `/dashboard/loops/${loopId}/conductor?connect=${encodeURIComponent(binding.connector)}`,
+      });
       continue;
     }
-    const resolved = await resolveBindingAction(binding.connector, binding.capability);
+    const explicitResolution = binding.actionSlug
+      ? await resolveExplicitBindingAction(binding.connector, binding.actionSlug)
+      : null;
+    if (explicitResolution && !explicitResolution.ok) {
+      errors.push({
+        code: explicitResolution.code,
+        message: explicitResolution.code === "ACTION_TOOLKIT_MISMATCH"
+          ? `${binding.actionSlug} belongs to ${explicitResolution.actualToolkit ?? "another toolkit"}, not ${binding.connector}`
+          : `${binding.actionSlug} was not found for ${binding.connector}`,
+        binding: binding.capability,
+        toolkit: binding.connector,
+      });
+      continue;
+    }
+    const resolved: {
+      actionSlug: string;
+      inputSchema: Record<string, unknown>;
+      outputSchema?: Record<string, unknown>;
+      toolkitVersion?: string;
+    } | null = explicitResolution?.ok
+      ? explicitResolution.action
+      : await resolveBindingAction(binding.connector, binding.capability);
     if (!resolved) {
       errors.push({
         code: "UNSUPPORTED_CAPABILITY",
@@ -198,7 +286,7 @@ export async function compileLoopSpec(
       continue;
     }
     let catalogCapability = binding.capability;
-    const schemaFit = scoreSchemaFitForCapability(
+    const schemaFit = binding.actionSlug ? 0 : scoreSchemaFitForCapability(
       catalogCapability,
       resolved.inputSchema,
       resolved.actionSlug,
@@ -234,8 +322,10 @@ export async function compileLoopSpec(
       connector: binding.connector,
       actionSlug: resolved.actionSlug,
       inputSchema: resolved.inputSchema,
+      ...(resolved.outputSchema ? { outputSchema: resolved.outputSchema } : {}),
       sensitive,
       credentialRef: toolkit.connectedAccountId,
+      bindingRole: binding.role,
       ...(resolved.toolkitVersion ? { toolkitVersion: resolved.toolkitVersion } : {}),
     });
   }
@@ -264,10 +354,58 @@ export async function compileLoopSpec(
   attachPlaybookToCatalog(toolCatalog, playbookResult);
   await autoExpandRelatedTools(parsed, toolCatalog, connectedBySlug, playbookResult);
 
+  const existingInstructions = new Map(
+    parsed.composioActions.map((instruction) => [
+      `${instruction.toolkit.toLowerCase()}:${instruction.actionSlug.toUpperCase()}`,
+      instruction,
+    ]),
+  );
+  const composioActions: ComposioActionInstruction[] = [];
+  for (let i = 0; i < toolCatalog.length; i += 1) {
+    const tool = toolCatalog[i]!;
+    const playbookEntry = playbookResult.toolsBySlug.get(tool.actionSlug.toUpperCase());
+    const originalInputSchema = playbookEntry?.inputSchema ?? tool.inputSchema;
+    const originalOutputSchema = playbookEntry?.outputSchema ?? tool.outputSchema;
+    const key = `${tool.connector.toLowerCase()}:${tool.actionSlug.toUpperCase()}`;
+    const { contract, composioAction } = buildComposioToolContract({
+      toolkit: tool.connector,
+      actionSlug: tool.actionSlug,
+      label: tool.capability,
+      description: playbookEntry?.description ?? tool.plannerCard?.summary,
+      inputSchema: originalInputSchema,
+      outputSchema: originalOutputSchema,
+      existingInstruction: existingInstructions.get(key),
+      bindingRole: tool.bindingRole,
+    });
+    composioActions.push(composioAction);
+    toolCatalog[i] = {
+      ...tool,
+      inputSchema: contract.originalInputSchema,
+      ...(contract.originalOutputSchema ? { outputSchema: contract.originalOutputSchema } : {}),
+      originalInputSchema: contract.originalInputSchema,
+      ...(contract.originalOutputSchema ? { originalOutputSchema: contract.originalOutputSchema } : {}),
+      modifiedInputSchema: contract.modifiedInputSchema,
+      behaviorInstructions: contract.behaviorInstructions,
+      outputSufficiencyPaths: contract.outputSufficiencyPaths,
+    };
+  }
+
+  errors.push(...validateComposioActionInstructions({
+    tools: toolCatalog.map((tool) => ({
+      connector: tool.connector,
+      actionSlug: tool.actionSlug,
+      inputSchema: tool.inputSchema,
+    })),
+    instructions: composioActions,
+  }));
+
   errors.push(...validateAgenticCompileArtifacts(parsed.profile, toolCatalog, playbookResult.playbook));
   if (errors.length > 0) return { errors };
 
-  const resolvedCatalog = toolCatalog as ResolvedTool[];
+  const resolvedCatalog = attachComposioActionInstructionsToTools(
+    toolCatalog as ResolvedTool[],
+    composioActions,
+  );
 
   const specRevision = await getLatestSpecRevision(loopId);
   const revision = await getNextPlanRevision(loopId);
@@ -283,6 +421,7 @@ export async function compileLoopSpec(
     intent: parsed.intent,
     trigger: parsed.trigger,
     toolCatalog: resolvedCatalog,
+    composioActions,
     connectorPlaybook: playbookResult.playbook,
     agent: parsed.agent,
     monitor: parsed.monitor,

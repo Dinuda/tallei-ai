@@ -5,6 +5,7 @@ import { buildConductorSystemPrompt, buildRuntimePlannerPrompt, buildTestRunPlan
 import { compactStepHistoryForPlanner } from "../../../src/loops/tool-result-compact.js";
 import { seedSpecFromTemplate } from "../../../src/loops/patch.js";
 import { createEmptyLoopSpec } from "../../../src/loops/spec.js";
+import { computeOutcomeBriefHash } from "../../../src/loops/outcome-brief.js";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 
@@ -29,7 +30,6 @@ test("buildConductorSystemPrompt reports ready when slots filled", () => {
       id: "src",
       role: "source",
       description: "Web research",
-      candidates: [],
       status: "chosen",
       selectedConnector: "composio",
     }],
@@ -37,6 +37,12 @@ test("buildConductorSystemPrompt reports ready when slots filled", () => {
   spec.bindings = [{ capability: "web.search", connector: "composio" }];
   spec.trigger = { kind: "schedule", cron: "0 7 * * 1-5", timezone: "UTC" };
   spec.output = { kind: "chat", target: "#general", connector: "slack" };
+  spec.intentDiscovery = { status: "ready", decisions: [], assumptions: [], askedQuestionIds: [] };
+  spec.intentDiscovery = {
+    ...spec.intentDiscovery,
+    status: "confirmed",
+    confirmedBriefHash: computeOutcomeBriefHash(spec),
+  };
   const prompt = buildConductorSystemPrompt({
     spec,
     connectedToolkits: [],
@@ -85,10 +91,28 @@ test("buildRuntimePlannerPrompt includes connector playbook and trigger context"
       capability: "email.read",
       connector: "gmail",
       actionSlug: "GMAIL_FETCH_EMAILS",
+      modifiedInputSchema: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+      },
+      behaviorInstructions: ["Use existing messages output when available."],
       plannerCard: {
         summary: "List Gmail",
         argGuides: {},
         antiPatterns: ["Never use id: in query"],
+      },
+      composioAction: {
+        toolkit: "gmail",
+        actionSlug: "GMAIL_FETCH_EMAILS",
+        label: "Read email",
+        inputInstructions: [{
+          field: "query",
+          required: true,
+          sources: [{ type: "planner", description: "Construct from current run context." }],
+        }],
+        outputInstructions: [{ name: "messages", path: "data.messages" }],
+        dependsOn: [],
       },
     }],
     stepHistory: [],
@@ -102,8 +126,12 @@ test("buildRuntimePlannerPrompt includes connector playbook and trigger context"
   assert.match(prompt, /Outcome: Customers receive timely support replies/);
   assert.match(prompt, /Connector playbook/);
   assert.match(prompt, /Never use id:/);
+  assert.match(prompt, /composioAction/);
+  assert.match(prompt, /modifiedInputSchema/);
+  assert.match(prompt, /Use existing messages output when available/);
+  assert.match(prompt, /Planner args are suggestions only/);
   assert.match(prompt, /message_id: abc123/);
-  assert.match(prompt, /do not call email.read again/i);
+  assert.match(prompt, /run history already satisfies a tool's output instructions/i);
 });
 
 test("compactStepHistoryForPlanner keeps latest 2 messages and shrinks payloads", () => {
@@ -137,8 +165,11 @@ test("buildConductorSystemPrompt includes first principles ownership and tool pl
   assert.match(prompt, /## First principles/);
   assert.match(prompt, /## Ownership/);
   assert.match(prompt, /## Tool playbook/);
-  assert.match(prompt, /autoApplyConnector/);
+  assert.doesNotMatch(prompt, /autoApplyConnector/);
   assert.match(prompt, /pickConnectorApp/);
+  assert.match(prompt, /analyzeIntent/);
+  assert.match(prompt, /confirmOutcomeBrief/);
+  assert.match(prompt, /plain-language question/);
   assert.match(prompt, /presentReplyOptions/);
 });
 
@@ -151,7 +182,6 @@ test("buildConductorSystemPrompt includes full spec JSON once", () => {
       id: "src",
       role: "source",
       description: "Content source",
-      candidates: [],
       status: "pending",
     }],
   };

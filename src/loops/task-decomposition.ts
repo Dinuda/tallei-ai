@@ -8,43 +8,30 @@ export function normalizeTaskBlueprint(blueprint: TaskBlueprint): TaskBlueprint 
     outcomes: blueprint.outcomes.map((outcome) => ({
       ...outcome,
       id: outcome.id?.trim() || randomUUID(),
-      candidates: outcome.candidates ?? [],
-      status: outcome.status ?? "pending",
+      status: outcome.role !== "transform" && outcome.selectedConnector
+        ? "chosen"
+        : outcome.role !== "transform" && outcome.status === "chosen"
+          ? "pending"
+          : outcome.status ?? "pending",
     })),
-  };
-}
-
-export function mergeBlueprintCandidates(
-  blueprint: TaskBlueprint,
-  outcomeId: string,
-  candidates: TaskBlueprint["outcomes"][number]["candidates"],
-  selectedConnector?: string,
-): TaskBlueprint {
-  return {
-    ...blueprint,
-    outcomes: blueprint.outcomes.map((outcome) => {
-      if (outcome.id !== outcomeId) return outcome;
-      return {
-        ...outcome,
-        candidates,
-        ...(selectedConnector
-          ? { selectedConnector, status: "chosen" as const }
-          : {}),
-      };
-    }),
   };
 }
 
 export function isBlueprintComplete(blueprint: TaskBlueprint | undefined): boolean {
   if (!blueprint?.outcomes.length) return false;
   const required = blueprint.outcomes.filter((outcome) => outcome.role !== "transform");
-  return required.every((outcome) => outcome.status === "chosen" || outcome.status === "skipped");
+  return required.every((outcome) =>
+    outcome.status === "skipped"
+    || (outcome.status === "chosen" && Boolean(outcome.selectedConnector)),
+  );
 }
 
 export function getPendingConnectorOutcomes(blueprint: TaskBlueprint | undefined): TaskBlueprint["outcomes"] {
   if (!blueprint) return [];
   return blueprint.outcomes.filter(
-    (outcome) => outcome.role !== "transform" && outcome.status !== "chosen" && outcome.status !== "skipped",
+    (outcome) => outcome.role !== "transform"
+      && (outcome.status !== "chosen" || !outcome.selectedConnector)
+      && outcome.status !== "skipped",
   );
 }
 
@@ -74,7 +61,7 @@ export function validateConnectorChoicesBeforeSpecPatch(
   if (pending.length > 0) {
     return {
       ok: false,
-      error: "Confirm the primary app via pickConnectorApp before patching bindings or triggers.",
+      error: "Choose an app for each connector role via pickConnectorApp before patching bindings or triggers.",
       pendingOutcomes: pending,
     };
   }

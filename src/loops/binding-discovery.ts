@@ -1,6 +1,8 @@
 import { getAllTools, searchTools } from "../integrations/composio/tools.js";
 import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/composio/auth.js";
 import { summarizeInputSchema, scoreSchemaFitForCapability, semanticCapabilityForAction, type SchemaFieldSummary } from "./tool-schema.js";
+import { buildComposioActionInstruction } from "./composio-action-instructions.js";
+import type { ComposioActionInstruction } from "./spec.js";
 
 export const MIN_CAPABILITY_SCORE = 2;
 /** Top candidates within this score gap are treated as ambiguous (user picks outcome-framed option). */
@@ -380,18 +382,86 @@ export async function resolveBindingAction(
   };
 }
 
+export type ExplicitActionResolution =
+  | {
+      ok: true;
+      action: {
+        actionSlug: string;
+        inputSchema: Record<string, unknown>;
+        outputSchema?: Record<string, unknown>;
+        toolkitVersion?: string;
+      };
+    }
+  | { ok: false; code: "ACTION_NOT_FOUND" | "ACTION_TOOLKIT_MISMATCH"; actualToolkit?: string };
+
+export function selectExplicitBindingAction(input: {
+  connector: string;
+  actionSlug: string;
+  scopedTools: Array<{
+    actionSlug: string;
+    inputSchema?: Record<string, unknown>;
+    outputSchema?: Record<string, unknown>;
+    toolkitVersion?: string;
+  }>;
+  globalMatches: Array<{ actionSlug: string; toolkit: string }>;
+}): ExplicitActionResolution {
+  const requestedSlug = input.actionSlug.trim().toUpperCase();
+  const exact = input.scopedTools.find((tool) => tool.actionSlug.toUpperCase() === requestedSlug);
+  if (exact) {
+    return {
+      ok: true,
+      action: {
+        actionSlug: exact.actionSlug,
+        inputSchema: exact.inputSchema ?? {},
+        ...(exact.outputSchema ? { outputSchema: exact.outputSchema } : {}),
+        ...(exact.toolkitVersion ? { toolkitVersion: exact.toolkitVersion } : {}),
+      },
+    };
+  }
+  const wrongToolkit = input.globalMatches.find((tool) => tool.actionSlug.toUpperCase() === requestedSlug);
+  if (wrongToolkit && normalizeToolkitSlug(wrongToolkit.toolkit) !== normalizeToolkitSlug(input.connector)) {
+    return { ok: false, code: "ACTION_TOOLKIT_MISMATCH", actualToolkit: wrongToolkit.toolkit };
+  }
+  return { ok: false, code: "ACTION_NOT_FOUND" };
+}
+
+export async function resolveExplicitBindingAction(
+  connector: string,
+  actionSlug: string,
+): Promise<ExplicitActionResolution> {
+  const normalizedConnector = await resolveToolkitSlug(connector);
+  const tools = await getAllTools(normalizedConnector);
+  const scopedResolution = selectExplicitBindingAction({
+    connector: normalizedConnector,
+    actionSlug,
+    scopedTools: tools,
+    globalMatches: [],
+  });
+  if (scopedResolution.ok) return scopedResolution;
+
+  const globalMatches = await searchTools(actionSlug, 50);
+  return selectExplicitBindingAction({
+    connector: normalizedConnector,
+    actionSlug,
+    scopedTools: tools,
+    globalMatches,
+  });
+}
+
 export async function discoverOutcomeBindings(
   toolkit: string,
-  outcomes: Array<{ id: string; description: string }>,
+  outcomes: Array<{ id: string; description: string; role?: "trigger" | "source" | "transform" | "destination" }>,
 ): Promise<{
   toolkit: string;
   outcomes: OutcomeDiscovery[];
-  suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string }>;
+  suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string; role?: "trigger" | "source" | "transform" | "destination" }>;
+  suggestedComposioActions: ComposioActionInstruction[];
   needsUserChoice: boolean;
 }> {
   const resolvedToolkit = await resolveToolkitSlug(toolkit);
   const discoveries: OutcomeDiscovery[] = [];
-  const suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string }> = [];
+  const suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string; role?: "trigger" | "source" | "transform" | "destination" }> = [];
+  const suggestedComposioActions: ComposioActionInstruction[] = [];
   let needsUserChoice = false;
 
   for (const outcome of outcomes) {
@@ -419,7 +489,15 @@ export async function discoverOutcomeBindings(
           outcome.description,
         ),
         actionSlug: recommended.actionSlug,
+        ...(outcome.role ? { role: outcome.role } : {}),
       });
+      suggestedComposioActions.push(buildComposioActionInstruction({
+        toolkit: resolvedToolkit,
+        actionSlug: recommended.actionSlug,
+        label: recommended.capability,
+        inputSchema,
+        outputSchema: matched?.outputSchema,
+      }));
     }
 
     discoveries.push({
@@ -437,6 +515,7 @@ export async function discoverOutcomeBindings(
     toolkit: resolvedToolkit,
     outcomes: discoveries,
     suggestedBindings,
+    suggestedComposioActions,
     needsUserChoice,
   };
 }

@@ -163,20 +163,25 @@ export function normalizeComposioWebhookPayload(payload: unknown): NormalizedCom
   const triggerSlug = String(
     metadata.trigger_slug
     ?? metadata.triggerSlug
+    ?? metadata.trigger_name
     ?? data.triggerName
     ?? data.trigger_slug
+    ?? data.trigger_name
     ?? event.trigger_name
     ?? "",
-  ).trim();
+  ).trim().toUpperCase();
 
   const entityId = String(
     metadata.user_id
     ?? metadata.userId
+    ?? metadata.entity_id
+    ?? metadata.entityId
     ?? data.entityId
     ?? data.entity_id
     ?? data.user_id
     ?? data.userId
     ?? event.entityId
+    ?? event.entity_id
     ?? "",
   ).trim();
 

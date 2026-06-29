@@ -6,6 +6,7 @@ import {
   askQuestionInputSchema,
   askQuestionOutputSchema,
   compileLoopInputSchema,
+  confirmOutcomeBriefInputSchema,
   testRunLoopInputSchema,
 } from "../../../src/loops/conductor-tools.js";
 import { buildConductorSystemPrompt } from "../../../src/loops/planning-agent.js";
@@ -56,6 +57,26 @@ test("askQuestionInputSchema rejects questions with fewer than two options", () 
   }));
 });
 
+test("confirmOutcomeBriefInputSchema requires LLM-provided question and options", () => {
+  const parsed = confirmOutcomeBriefInputSchema.parse({
+    briefHash: "abc123",
+    question: "Ready to build this?",
+    options: [
+      { id: "confirm", label: "Looks good", value: "confirm" },
+      { id: "changes", label: "Change something", value: "other" },
+    ],
+    recommendedOptionIds: ["confirm"],
+  });
+  assert.equal(parsed.question, "Ready to build this?");
+  assert.equal(parsed.options.length, 2);
+});
+
+test("confirmOutcomeBriefInputSchema rejects briefHash-only payloads", () => {
+  assert.throws(() => confirmOutcomeBriefInputSchema.parse({
+    briefHash: "abc123",
+  }));
+});
+
 test("askQuestionOutputSchema accepts user answers", () => {
   const parsed = askQuestionOutputSchema.parse({
     questionId: "trigger",
@@ -79,18 +100,26 @@ test("buildConductorSystemPrompt requires askQuestion only as last resort", () =
   assert.match(prompt, /discoverBindings/);
 });
 
-test("conductor builder renders interactive prompts and auto-continue", async () => {
-  const source = await import("node:fs/promises").then((fs) =>
-    fs.readFile(
-      new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url),
-      "utf8",
-    ),
-  );
+test("conductor builder renders interactive prompts without auto-selecting connectors", async () => {
+  const fs = await import("node:fs/promises");
+  const [source, layout, shared] = await Promise.all([
+    fs.readFile(new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-builder-layout.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url), "utf8"),
+  ]);
 
-  assert.match(source, /InteractivePromptMenu/);
-  assert.match(source, /pickConnectorApp/);
+  assert.match(layout, /InteractivePromptMenu/);
+  assert.match(shared, /pickConnectorApp/);
+  assert.match(shared, /hasUnansweredUiToolCalls/);
+  assert.match(shared, /shouldAutoSendConductorChat/);
   assert.match(source, /addToolOutput/);
-  assert.match(source, /lastAssistantMessageIsCompleteWithToolCalls/);
-  assert.match(source, /AnsweredAskQuestionCard/);
+  assert.match(source, /shouldAutoSendConductorChat/);
   assert.match(source, /findPendingInteractivePrompt/);
+  assert.doesNotMatch(source, /findAutoConnectorPromptTarget/);
+  assert.doesNotMatch(shared, /autoApplyConnector/);
+  const pendingResolver = shared.slice(
+    shared.indexOf("export function findPendingInteractivePrompt"),
+    shared.indexOf("export function shouldShowThinkingIndicator"),
+  );
+  assert.doesNotMatch(pendingResolver, /if \(!blueprintNeedsConnectorPick\(spec\)\) return null/);
 });

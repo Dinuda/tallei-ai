@@ -823,7 +823,11 @@ export async function linkBuildChatThread(input: {
   await pool.query(
     `UPDATE loop_chat_threads
      SET spec_revision = COALESCE($4, spec_revision),
-         compiled_plan_id = COALESCE($5, compiled_plan_id),
+         compiled_plan_id = CASE
+           WHEN $5::uuid IS NOT NULL THEN $5::uuid
+           WHEN $4::integer IS NOT NULL THEN NULL
+           ELSE compiled_plan_id
+         END,
          updated_at = NOW()
      WHERE loop_id = $1
        AND tenant_id = $2

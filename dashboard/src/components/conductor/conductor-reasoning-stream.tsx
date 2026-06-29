@@ -14,11 +14,14 @@ export const CONDUCTOR_REASONING_COLLAPSE_MS = 520;
 export function ConductorReasoningStream({
   children,
   isStreaming,
+  isMessageStreaming = false,
   textLength,
   maxHeight = CONDUCTOR_REASONING_STREAM_MAX_HEIGHT,
 }: {
   children: ReactNode;
   isStreaming: boolean;
+  /** When true, defer the collapse animation until the assistant turn finishes. */
+  isMessageStreaming?: boolean;
   textLength: number;
   maxHeight?: number;
 }) {
@@ -26,22 +29,21 @@ export function ConductorReasoningStream({
   const [collapseOut, setCollapseOut] = useState(false);
   const [panelHidden, setPanelHidden] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const wasStreamingRef = useRef(isStreaming);
+  const hadLiveStreamRef = useRef(isStreaming);
 
   useEffect(() => {
     if (isStreaming) {
+      hadLiveStreamRef.current = true;
       setCollapseOut(false);
       setPanelHidden(false);
       setExpanded(false);
-      wasStreamingRef.current = true;
       return;
     }
 
-    if (wasStreamingRef.current) {
+    if (hadLiveStreamRef.current && !isMessageStreaming) {
       setCollapseOut(true);
     }
-    wasStreamingRef.current = isStreaming;
-  }, [isStreaming]);
+  }, [isMessageStreaming, isStreaming]);
 
   useLayoutEffect(() => {
     if (!isStreaming || expanded || collapseOut) return;
@@ -52,6 +54,7 @@ export function ConductorReasoningStream({
 
   const handleTransitionEnd = (event: React.TransitionEvent<HTMLDivElement>) => {
     if (event.propertyName !== "max-height" || !collapseOut) return;
+    hadLiveStreamRef.current = false;
     setPanelHidden(true);
     setCollapseOut(false);
   };
@@ -66,6 +69,15 @@ export function ConductorReasoningStream({
 
   const showLivePanel = isStreaming || collapseOut;
   const clamped = showLivePanel && !expanded;
+  const liveScrollStyle =
+    clamped && !collapseOut
+      ? {
+          maxHeight,
+          // Keep the live viewport tall while streaming so text-window trims
+          // (or brief segment gaps) never snap the panel down to a single line.
+          ...(isStreaming ? { minHeight: maxHeight } : {}),
+        }
+      : undefined;
 
   return (
     <div
@@ -82,7 +94,7 @@ export function ConductorReasoningStream({
           collapseOut && "conductor-reasoning-stream__scroll--collapse-out",
         )}
         onTransitionEnd={handleTransitionEnd}
-        style={clamped ? { maxHeight } : undefined}
+        style={liveScrollStyle}
       >
         {children}
       </div>

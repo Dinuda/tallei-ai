@@ -108,6 +108,9 @@
 }
 
 .conductor-reasoning-stream__scroll--live {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;

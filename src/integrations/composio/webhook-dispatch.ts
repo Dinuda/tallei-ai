@@ -1,12 +1,16 @@
 import { randomUUID } from "crypto";
 
 import { config } from "../../config/index.js";
-import { pool } from "../../infrastructure/db/index.js";
 import { buildAuthContextFromEntity } from "./entity.js";
 import { claimWebhookEventDelivery, attachWebhookEventDeliveryRun } from "./trigger-channels.js";
-import { createLoopRun, countRunningEventRuns, findActiveLoopsByComposioTriggerSlug, updateLoopRun } from "../../loops/store.js";
+import {
+  createLoopRun,
+  countRunningEventRuns,
+  findActiveLoopsByComposioTriggerSlug,
+  updateLoopRun,
+} from "../../loops/store.js";
 
-function extractConnectedAccountId(payload: unknown): string | null {
+export function extractConnectedAccountId(payload: unknown): string | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const row = payload as Record<string, unknown>;
   const metadata = row.metadata && typeof row.metadata === "object"
@@ -29,27 +33,33 @@ function extractConnectedAccountId(payload: unknown): string | null {
   return null;
 }
 
-async function resolveWorkspaceIdForWebhook(input: {
+async function resolveLoopMatches(input: {
   entityId: string;
   triggerSlug: string;
   payload: unknown;
-}): Promise<string | null> {
-  const auth = buildAuthContextFromEntity(input.entityId);
-  if (auth?.workspaceId) return auth.workspaceId;
-
+}) {
   const connectedAccountId = extractConnectedAccountId(input.payload);
-  if (!connectedAccountId) return null;
+  const entityAuth = buildAuthContextFromEntity(input.entityId);
+  const slug = input.triggerSlug.toUpperCase();
 
-  const result = await pool.query<{ workspace_id: string }>(
-    `SELECT workspace_id
-     FROM workspace_trigger_channels
-     WHERE connected_account_id = $1
-       AND composio_trigger_slug = $2
-       AND status = 'active'
-     LIMIT 1`,
-    [connectedAccountId, input.triggerSlug.toUpperCase()],
-  );
-  return result.rows[0]?.workspace_id ?? null;
+  if (connectedAccountId) {
+    const byAccount = await findActiveLoopsByComposioTriggerSlug(slug, { connectedAccountId });
+    if (byAccount.length > 0) {
+      return { matches: byAccount, connectedAccountId, entityAuth, matchStrategy: "connected_account" as const };
+    }
+  }
+
+  if (entityAuth?.workspaceId) {
+    const byWorkspace = await findActiveLoopsByComposioTriggerSlug(slug, {
+      workspaceId: entityAuth.workspaceId,
+      ...(connectedAccountId ? { connectedAccountId } : {}),
+    });
+    if (byWorkspace.length > 0) {
+      return { matches: byWorkspace, connectedAccountId, entityAuth, matchStrategy: "workspace" as const };
+    }
+  }
+
+  return { matches: [], connectedAccountId, entityAuth, matchStrategy: "none" as const };
 }
 
 export async function dispatchComposioTriggerToLoops(input: {
@@ -64,36 +74,37 @@ export async function dispatchComposioTriggerToLoops(input: {
   skippedDueToCap?: number;
   runningEventRuns?: number;
   reason?: string;
+  matchStrategy?: string;
 }> {
-  const auth = buildAuthContextFromEntity(input.entityId);
-  if (!auth) {
+  const { matches, connectedAccountId, entityAuth, matchStrategy } = await resolveLoopMatches(input);
+
+  if (matches.length === 0) {
+    const reason = !entityAuth && !connectedAccountId
+      ? "invalid_entity_id"
+      : "no_active_loop_subscriptions_for_trigger";
+    console.info("[webhook/composio] no runs started", {
+      reason,
+      entityId: input.entityId,
+      triggerSlug: input.triggerSlug,
+      externalEventId: input.externalEventId,
+      connectedAccountId,
+      entityWorkspaceId: entityAuth?.workspaceId ?? null,
+      matchStrategy,
+    });
     return {
       started: [],
       matchedLoops: 0,
-      reason: "invalid_entity_id",
+      reason,
+      matchStrategy,
     };
   }
-
-  const workspaceId = await resolveWorkspaceIdForWebhook(input);
-  if (!workspaceId) {
-    return {
-      started: [],
-      matchedLoops: 0,
-      reason: "workspace_not_resolved",
-    };
-  }
-
-  const matches = await findActiveLoopsByComposioTriggerSlug(
-    workspaceId,
-    input.triggerSlug,
-  );
 
   const cap = config.loopMaxConcurrentEventRuns;
-  let runningCount = cap > 0 ? await countRunningEventRuns(workspaceId) : 0;
+  const started: string[] = [];
   let skippedDueToCap = 0;
 
-  const started: string[] = [];
   for (const match of matches) {
+    let runningCount = cap > 0 ? await countRunningEventRuns(match.workspaceId) : 0;
     if (cap > 0 && runningCount >= cap) {
       skippedDueToCap++;
       continue;
@@ -106,6 +117,8 @@ export async function dispatchComposioTriggerToLoops(input: {
     if (!claimed) continue;
 
     const runId = randomUUID();
+    const tenantId = match.tenantId;
+    const userId = match.userId;
 
     if (config.temporalEnabled) {
       await createLoopRun({
@@ -129,12 +142,11 @@ export async function dispatchComposioTriggerToLoops(input: {
         runId,
         triggerKind: "event",
         eventPayload: input.payload,
-        tenantId: auth.tenantId,
-        userId: auth.userId,
+        tenantId,
+        userId,
       });
       await updateLoopRun(runId, { temporalWorkflowId: temporal.workflowId });
       started.push(runId);
-      runningCount++;
       continue;
     }
 
@@ -159,18 +171,18 @@ export async function dispatchComposioTriggerToLoops(input: {
       runId: run.id,
       triggerKind: "event",
       eventPayload: input.payload,
-      tenantId: auth.tenantId,
-      userId: auth.userId,
+      tenantId,
+      userId,
     });
     started.push(run.id);
-    runningCount++;
   }
 
   const result = {
     started,
-    workspaceId,
+    workspaceId: matches[0]?.workspaceId,
     matchedLoops: matches.length,
-    ...(cap > 0 ? { skippedDueToCap, runningEventRuns: runningCount } : {}),
+    matchStrategy,
+    ...(cap > 0 ? { skippedDueToCap, runningEventRuns: started.length } : {}),
     ...(started.length === 0
       ? {
           reason: skippedDueToCap > 0 && matches.length > 0
@@ -184,24 +196,23 @@ export async function dispatchComposioTriggerToLoops(input: {
 
   if (started.length === 0) {
     console.info("[webhook/composio] no runs started", {
-      workspaceId,
+      workspaceId: matches[0]?.workspaceId,
       triggerSlug: input.triggerSlug,
       externalEventId: input.externalEventId,
       matchedLoops: matches.length,
       skippedDueToCap,
-      runningEventRuns: runningCount,
       cap,
+      matchStrategy,
       reason: result.reason,
     });
-  } else if (skippedDueToCap > 0) {
-    console.info("[webhook/composio] partial fan-out due to concurrency cap", {
-      workspaceId,
+  } else {
+    console.info("[webhook/composio] started event runs", {
+      workspaceId: matches[0]?.workspaceId,
       triggerSlug: input.triggerSlug,
       externalEventId: input.externalEventId,
       started: started.length,
-      skippedDueToCap,
-      runningEventRuns: runningCount,
-      cap,
+      loopIds: matches.map((row) => row.loopId),
+      matchStrategy,
     });
   }
 

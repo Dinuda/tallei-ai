@@ -1,7 +1,7 @@
 "use client";
 
 import type { DynamicToolUIPart, ReasoningUIPart } from "ai";
-import { MessageCircleQuestion } from "lucide-react";
+import { BadgeQuestionMark } from "lucide-react";
 import { useState } from "react";
 
 import { CollapsibleContent } from "@/components/ui/collapsible";
@@ -63,7 +63,11 @@ export function ConductorReasoningPart({
     >
       <ReasoningTrigger />
       <CollapsibleContent className="conductor-reasoning-collapsible mt-2 text-sm outline-none">
-        <ConductorReasoningStream isStreaming={isStreaming} textLength={text.length}>
+        <ConductorReasoningStream
+          isMessageStreaming={isMessageStreaming}
+          isStreaming={isStreaming}
+          textLength={text.length}
+        >
           {isStreaming ? (
             <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
               {liveText}
@@ -105,7 +109,7 @@ export function AnsweredAskQuestionCard({
 }) {
   return (
     <BuilderCompletedCard
-      icon={MessageCircleQuestion}
+      icon={BadgeQuestionMark}
       subtitle={output.skipped ? "Skipped" : output.answerText}
       title={input.question}
       variant="emerald"
@@ -125,7 +129,7 @@ export function ConductorToolPart({
   const toolName = resolveToolPartName(part);
   const [open, setOpen] = useState(false);
 
-  if (toolName === "askQuestion" || toolName === "pickConnectorApp") {
+  if (toolName === "askQuestion") {
     const toolPart = part as AskQuestionToolPart;
     if (toolPart.toolCallId === pendingQuestionCallId) return null;
     if (toolPart.state === "output-available" && toolPart.input && toolPart.output) {
@@ -134,6 +138,35 @@ export function ConductorToolPart({
           input={toolPart.input}
           output={toolPart.output}
         />
+      );
+    }
+    return null;
+  }
+
+  if (toolName === "pickConnectorApp") {
+    const input = part.input as { role?: string; question?: string } | undefined;
+    const output = part.output as AskQuestionOutput | undefined;
+    if (part.toolCallId === pendingQuestionCallId) return null;
+    if (part.state === "output-available" && output) {
+      return (
+        <BuilderCompletedCard
+          icon={BadgeQuestionMark}
+          subtitle={output.skipped ? "Skipped" : output.answerText}
+          title={input?.question || `App selected for ${input?.role ?? "workflow"}`}
+          variant="emerald"
+        />
+      );
+    }
+    return null;
+  }
+
+  if (toolName === "confirmOutcomeBrief") {
+    const output = part.output as { action?: string; otherText?: string } | undefined;
+    if (part.state === "output-available" && output?.action) {
+      return (
+        <div className="mb-2 border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+          {output.action === "confirm" ? "Plan confirmed — ready to build" : `Requested change: ${output.otherText || output.action.replaceAll("_", " ")}`}
+        </div>
       );
     }
     return null;
@@ -199,6 +232,8 @@ export function ConductorToolPart({
         ? formatConnectorSummary(part.output)
         : toolName === "discoverConnectorsForBlueprint" || toolName === "discoverBindings"
           ? formatDiscoverConnectorsSummary(part.output)
+          : toolName === "reviewOutcomeBrief"
+            ? "Prepared your automation summary for review"
           : toolName === "compileLoop"
             ? formatCompileSummary(part.output)
             : toolName === "testRunLoop"

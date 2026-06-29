@@ -1,4 +1,5 @@
 import type { ToolPlannerCard } from "./spec.js";
+import type { ComposioActionInstruction } from "./spec.js";
 import { summarizeInputSchema } from "./tool-schema.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -52,6 +53,11 @@ function gmailAntiPatterns(actionSlug: string, capability: string): string[] {
   }
   if (capability === "email.get" || slug.includes("MESSAGE_ID") || slug.includes("BY_ID")) {
     patterns.push("Pass message_id from prior step or trigger context — not in query.");
+    patterns.push("thread_id is not a substitute for message_id.");
+  }
+  if (capability === "email.labels" || slug.includes("LABEL")) {
+    patterns.push("Requires message_id — never pass thread_id.");
+    patterns.push("Not for reading email body; use email.get or email.read first.");
   }
   return patterns;
 }
@@ -70,6 +76,7 @@ export function buildPlannerCardFromSchemas(input: {
     || (slug.includes("GMAIL") && slug.includes("FETCH") && !slug.includes("MESSAGE_ID") && !slug.includes("BY_ID"));
   const isGet = input.capability === "email.get"
     || slug.includes("MESSAGE_ID") || slug.includes("BY_ID") || slug.includes("BY_THREAD");
+  const isLabel = input.capability === "email.labels" || slug.includes("LABEL");
 
   const antiPatterns = [
     ...gmailAntiPatterns(input.actionSlug, input.capability),
@@ -89,6 +96,11 @@ export function buildPlannerCardFromSchemas(input: {
       description: "Gmail API message resource ID from a prior list result or trigger context.",
     };
   }
+  if (isLabel && inputSummary.required.includes("message_id") && !argGuides.message_id) {
+    argGuides.message_id = {
+      description: "Gmail API message_id from trigger context or a prior email.read/email.get step — not thread_id.",
+    };
+  }
 
   return {
     summary: input.description || input.actionSlug,
@@ -96,12 +108,16 @@ export function buildPlannerCardFromSchemas(input: {
       ? "Search or list messages matching a Gmail query."
       : isGet
         ? "Fetch one message by API message_id."
-        : undefined,
+        : isLabel
+          ? "Apply or modify labels on one message (requires message_id)."
+          : undefined,
     whenNotToUse: isList
       ? "Not for fetch-by-id; use email.get with message_id instead."
       : isGet
         ? "Not for inbox search; use email.read with query instead."
-        : undefined,
+        : isLabel
+          ? "Not for fetching or reading message content; use email.get or email.read first."
+          : undefined,
     argGuides,
     ...(input.outputSchema ? { outputSummary: summarizeOutputFields(input.outputSchema) } : {}),
     ...(antiPatterns.length > 0 ? { antiPatterns: [...new Set(antiPatterns)] } : {}),
@@ -115,12 +131,29 @@ export function summarizeToolForPlanner(tool: {
   connector: string;
   actionSlug: string;
   plannerCard: ToolPlannerCard;
+  composioAction?: ComposioActionInstruction;
+  modifiedInputSchema?: Record<string, unknown>;
+  behaviorInstructions?: string[];
 }): Record<string, unknown> {
+  const visibleFields = tool.modifiedInputSchema
+    ? new Set(summarizeInputSchema(tool.modifiedInputSchema).properties)
+    : null;
+  const plannerCard = visibleFields
+    ? {
+        ...tool.plannerCard,
+        argGuides: Object.fromEntries(
+          Object.entries(tool.plannerCard.argGuides).filter(([field]) => visibleFields.has(field)),
+        ),
+      }
+    : tool.plannerCard;
   return {
     id: tool.id,
     capability: tool.capability,
     connector: tool.connector,
     actionSlug: tool.actionSlug,
-    plannerCard: tool.plannerCard,
+    ...(tool.modifiedInputSchema ? { modifiedInputSchema: tool.modifiedInputSchema } : {}),
+    ...(tool.behaviorInstructions?.length ? { behaviorInstructions: tool.behaviorInstructions } : {}),
+    ...(tool.composioAction ? { composioAction: tool.composioAction } : {}),
+    plannerCard,
   };
 }

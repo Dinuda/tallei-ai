@@ -3,10 +3,10 @@
 import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
-  lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { flushSync } from "react-dom";
 
 import { ConductorBuilderLayout } from "@/components/conductor/conductor-builder-layout";
 import type { LoopEventTriggerStatus } from "@/components/conductor/conductor-spec-sheet";
@@ -16,17 +16,21 @@ import {
   type ConductorChatApi,
 } from "@/components/conductor/conductor-chat-context";
 import {
-  findAutoConnectorPromptTarget,
   findPendingInteractivePrompt,
+  findPendingOutcomeBrief,
+  findStaleConfirmOutcomeBriefCalls,
+  hasUnansweredUiToolCalls,
   makeUserMessage,
+  prepareMessagesForUiToolOutput,
+  shouldAutoSendConductorChat,
   type ChatStatus,
 } from "@/components/conductor/conductor-shared";
 import type { InteractivePromptAnswer } from "@/components/ai-elements/interactive-prompt-menu";
 import { apiFetch, getStoredWorkspaceId } from "@/lib/api-fetch";
 import {
   deriveConductorPromptSuggestions,
+  deriveConductorPromptSuggestionsQuestion,
   findPendingPresentReplyOptions,
-  type ConductorPromptSuggestion,
 } from "@/lib/conductor-prompt-suggestions";
 
 type ConductorChatBridgeProps = {
@@ -70,15 +74,33 @@ function ConductorChatBridge({
 
   const { messages, sendMessage, status: chatStatus, addToolOutput, setMessages, stop } = useChat({
     transport,
-    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+    sendAutomaticallyWhen: shouldAutoSendConductorChat,
   });
 
   const chatLoadedRef = useRef(false);
   const processedToolMetaRef = useRef<Set<string>>(new Set());
+  const supersededConfirmRef = useRef<Set<string>>(new Set());
 
   const chatApi = useMemo<ConductorChatApi>(
-    () => ({ sendMessage, addToolOutput, stop }),
-    [addToolOutput, sendMessage, stop],
+    () => ({
+      sendMessage,
+      stop,
+      addToolOutput: (params) => {
+        flushSync(() => {
+          setMessages((current) => prepareMessagesForUiToolOutput(
+            current,
+            params.toolCallId,
+            params.output,
+          ));
+        });
+        return addToolOutput({
+          tool: params.tool,
+          toolCallId: params.toolCallId,
+          output: params.output,
+        });
+      },
+    }),
+    [addToolOutput, sendMessage, setMessages, stop],
   );
 
   const chatContextValue = {
@@ -90,6 +112,7 @@ function ConductorChatBridge({
   useEffect(() => {
     chatLoadedRef.current = false;
     processedToolMetaRef.current = new Set();
+    supersededConfirmRef.current = new Set();
 
     if (skipLoopFetch) {
       chatLoadedRef.current = true;
@@ -174,6 +197,23 @@ function ConductorChatBridge({
   }, [messages]);
 
   useEffect(() => {
+    if (!chatApi || chatStatus === "streaming" || chatStatus === "submitted") return;
+    for (const stale of findStaleConfirmOutcomeBriefCalls(messages)) {
+      if (supersededConfirmRef.current.has(stale.toolCallId)) continue;
+      supersededConfirmRef.current.add(stale.toolCallId);
+      void chatApi.addToolOutput({
+        tool: "confirmOutcomeBrief",
+        toolCallId: stale.toolCallId,
+        output: {
+          action: "other",
+          briefHash: stale.briefHash,
+          otherText: "Superseded by updated outcome brief",
+        },
+      });
+    }
+  }, [chatApi, chatStatus, messages]);
+
+  useEffect(() => {
     if (!chatLoadedRef.current || messages.length === 0) return;
     if (chatStatus === "streaming" || chatStatus === "submitted") return;
     const timer = window.setTimeout(() => {
@@ -205,10 +245,6 @@ function ConductorBuilderLive({
   creating,
   pendingUserBubble,
   setPendingUserBubble,
-  pendingPromptRef,
-  bootstrapPromptSentRef,
-  autoConnectorSubmittedRef,
-  createdInSessionRef,
   onCreateLoop,
   onRun,
 }: {
@@ -224,15 +260,14 @@ function ConductorBuilderLive({
   creating: boolean;
   pendingUserBubble: UIMessage | null;
   setPendingUserBubble: (message: UIMessage | null) => void;
-  pendingPromptRef: MutableRefObject<string | null>;
-  bootstrapPromptSentRef: MutableRefObject<boolean>;
-  autoConnectorSubmittedRef: MutableRefObject<string | null>;
-  createdInSessionRef: MutableRefObject<boolean>;
   onCreateLoop: (text: string) => void | Promise<void>;
   onRun?: () => void;
 }) {
   const liveChat = useConductorChat();
-  const messages = liveChat?.messages ?? (pendingUserBubble ? [pendingUserBubble] : []);
+  const messages = useMemo(
+    () => liveChat?.messages ?? (pendingUserBubble ? [pendingUserBubble] : []),
+    [liveChat?.messages, pendingUserBubble],
+  );
   const chatStatus: ChatStatus = creating
     ? "submitted"
     : liveChat?.chatStatus ?? "ready";
@@ -242,8 +277,17 @@ function ConductorBuilderLive({
     () => findPendingInteractivePrompt(messages, spec),
     [messages, spec],
   );
+  const pendingOutcomeBrief = useMemo(
+    () => findPendingOutcomeBrief(messages),
+    [messages],
+  );
   const pendingReplyOptions = useMemo(
     () => findPendingPresentReplyOptions(messages),
+    [messages],
+  );
+
+  const promptSuggestionsQuestion = useMemo(
+    () => deriveConductorPromptSuggestionsQuestion(messages),
     [messages],
   );
 
@@ -252,7 +296,7 @@ function ConductorBuilderLive({
       messages,
       missingSlots,
       status,
-      hasPendingQuestion: Boolean(pendingQuestion),
+      hasPendingQuestion: Boolean(pendingQuestion || pendingOutcomeBrief),
       hasPendingReplyOptions: Boolean(pendingReplyOptions),
       chatBusy: creating || chatStatus === "streaming" || chatStatus === "submitted",
       explicitOptions: pendingReplyOptions?.input.options,
@@ -263,6 +307,7 @@ function ConductorBuilderLive({
       messages,
       missingSlots,
       pendingQuestion,
+      pendingOutcomeBrief,
       pendingReplyOptions,
       status,
     ],
@@ -274,31 +319,9 @@ function ConductorBuilderLive({
     }
   }, [messages, setPendingUserBubble]);
 
-  useEffect(() => {
-    if (!chatApi || creating) return;
-    if (chatStatus === "streaming" || chatStatus === "submitted") return;
-
-    const target = findAutoConnectorPromptTarget(messages, spec);
-    if (!target) return;
-
-    const key = `${target.toolCallId}:${target.autoConnector}`;
-    if (autoConnectorSubmittedRef.current === key) return;
-    autoConnectorSubmittedRef.current = key;
-
-    void chatApi.addToolOutput({
-      tool: target.toolName,
-      toolCallId: target.toolCallId,
-      output: {
-        questionId: "connector-app",
-        answerText: target.connectorLabel,
-        selectedOptionIds: [target.connectorOptionId],
-        selectedValues: [target.autoConnector],
-      },
-    });
-  }, [autoConnectorSubmittedRef, chatApi, chatStatus, creating, messages, spec]);
-
   function handleSubmit(text: string) {
     if (creating) return;
+    if (hasUnansweredUiToolCalls(messages)) return;
     if (!loopId) {
       onCreateLoop(text);
       return;
@@ -317,6 +340,8 @@ function ConductorBuilderLive({
         selectedOptionIds: answer.selectedOptionIds,
         selectedValues: answer.selectedValues,
         ...(answer.otherText ? { otherText: answer.otherText } : {}),
+        ...(pendingQuestion.input.outcomeId ? { outcomeId: pendingQuestion.input.outcomeId } : {}),
+        ...(pendingQuestion.input.role ? { role: pendingQuestion.input.role } : {}),
       },
     });
   }
@@ -332,30 +357,66 @@ function ConductorBuilderLive({
         selectedOptionIds: [],
         selectedValues: [],
         skipped: true,
+        ...(pendingQuestion.input.outcomeId ? { outcomeId: pendingQuestion.input.outcomeId } : {}),
+        ...(pendingQuestion.input.role ? { role: pendingQuestion.input.role } : {}),
       },
     });
   }
 
-  function handlePromptSuggestionSelect(suggestion: ConductorPromptSuggestion) {
+  function submitOutcomeBriefAnswer(answer: InteractivePromptAnswer) {
+    if (!pendingOutcomeBrief || !chatApi) return;
+    const selectedValue = answer.selectedValues[0] ?? "other";
+    const knownActions = new Set([
+      "confirm",
+      "change_outcome",
+      "change_trigger",
+      "change_connectors",
+      "change_approvals",
+      "other",
+    ]);
+    const action = knownActions.has(selectedValue)
+      ? selectedValue as "confirm" | "change_outcome" | "change_trigger" | "change_connectors" | "change_approvals" | "other"
+      : "other";
+    void chatApi.addToolOutput({
+      tool: "confirmOutcomeBrief",
+      toolCallId: pendingOutcomeBrief.toolCallId,
+      output: {
+        action,
+        briefHash: pendingOutcomeBrief.confirmBriefHash,
+        answerText: answer.answerText,
+        selectedOptionIds: answer.selectedOptionIds,
+        selectedValues: answer.selectedValues,
+        ...(answer.otherText ? { otherText: answer.otherText } : {}),
+      },
+    });
+  }
+
+  function handlePromptSuggestionsSubmit(answer: InteractivePromptAnswer) {
     if (creating || chatStatus === "streaming" || chatStatus === "submitted") return;
 
+    const message = answer.answerText.trim();
+    if (!message) return;
+
     if (pendingReplyOptions && chatApi) {
+      const selectedOptionId = answer.selectedOptionIds[0] ?? "custom";
       void chatApi.addToolOutput({
         tool: "presentReplyOptions",
         toolCallId: pendingReplyOptions.toolCallId,
         output: {
-          selectedOptionId: suggestion.id,
-          message: suggestion.message,
+          selectedOptionId,
+          message,
         },
       });
       return;
     }
 
+    if (hasUnansweredUiToolCalls(messages)) return;
+
     if (!loopId) {
-      onCreateLoop(suggestion.message);
+      onCreateLoop(message);
       return;
     }
-    chatApi?.sendMessage({ text: suggestion.message });
+    chatApi?.sendMessage({ text: message });
   }
 
   return (
@@ -369,11 +430,14 @@ function ConductorBuilderLive({
       onSubmit={handleSubmit}
       onStop={() => chatApi?.stop()}
       pendingQuestion={pendingQuestion}
+      pendingOutcomeBrief={pendingOutcomeBrief}
       pendingReplyOptionsCallId={pendingReplyOptions?.toolCallId ?? null}
       promptSuggestions={promptSuggestions}
+      promptSuggestionsQuestion={promptSuggestionsQuestion}
       onAskQuestionAnswer={submitAskQuestionAnswer}
       onAskQuestionDismiss={dismissAskQuestion}
-      onPromptSuggestionSelect={handlePromptSuggestionSelect}
+      onOutcomeBriefAnswer={submitOutcomeBriefAnswer}
+      onPromptSuggestionsSubmit={handlePromptSuggestionsSubmit}
       spec={spec}
       missingSlots={missingSlots}
       status={status}
@@ -383,6 +447,7 @@ function ConductorBuilderLive({
       thinkingLabel={creating ? "Creating loop…" : "Thinking…"}
       forceThinking={creating}
       composerDisabled={creating}
+      sendBlocked={hasUnansweredUiToolCalls(messages)}
     />
   );
 }
@@ -400,7 +465,6 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
   const [pendingUserBubble, setPendingUserBubble] = useState<UIMessage | null>(null);
   const pendingPromptRef = useRef<string | null>(null);
   const bootstrapPromptSentRef = useRef(false);
-  const autoConnectorSubmittedRef = useRef<string | null>(null);
   const createdInSessionRef = useRef(false);
 
   const handleLoopMetaChange = useCallback((meta: {
@@ -495,10 +559,6 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     creating,
     pendingUserBubble,
     setPendingUserBubble,
-    pendingPromptRef,
-    bootstrapPromptSentRef,
-    autoConnectorSubmittedRef,
-    createdInSessionRef,
     onCreateLoop: createLoopFromPrompt,
     onRun: loopId ? () => void handleRun() : undefined,
   };

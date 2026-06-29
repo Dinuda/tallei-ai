@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { intentDiscoveryStateSchema } from "./intent-discovery.js";
+
 export const executionProfileSchema = z.enum(["agentic", "monitor", "sync"]);
 export type ExecutionProfile = z.infer<typeof executionProfileSchema>;
 
@@ -54,8 +56,7 @@ export function hydrateStoredTrigger(trigger: unknown): TriggerConfig | unknown 
 export const toolBindingSchema = z.object({
   capability: z.string().min(1),
   connector: z.string().min(1),
-  accountId: z.string().optional(),
-  optional: z.boolean().optional(),
+  actionSlug: z.string().min(1).optional(),
   role: z.enum(["trigger", "source", "transform", "destination"]).optional(),
 });
 export type ToolBinding = z.infer<typeof toolBindingSchema>;
@@ -63,22 +64,20 @@ export type ToolBinding = z.infer<typeof toolBindingSchema>;
 export const outcomeRoleSchema = z.enum(["trigger", "source", "transform", "destination"]);
 export type OutcomeRole = z.infer<typeof outcomeRoleSchema>;
 
-export const blueprintCandidateSchema = z.object({
-  connector: z.string().min(1),
-  connected: z.boolean(),
-  score: z.number(),
-  rationale: z.string(),
-  sampleActions: z.array(z.string()).optional(),
-});
-
 export const blueprintOutcomeSchema = z.object({
   id: z.string().min(1),
   role: outcomeRoleSchema,
   description: z.string().min(1),
-  selectedConnector: z.string().optional(),
-  selectedCapability: z.string().optional(),
-  candidates: z.array(blueprintCandidateSchema).default([]),
+  selectedConnector: z.string().min(1).optional(),
   status: z.enum(["pending", "chosen", "skipped"]).default("pending"),
+}).superRefine((outcome, ctx) => {
+  if (outcome.role !== "transform" && outcome.status === "chosen" && !outcome.selectedConnector) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "chosen connector outcomes require selectedConnector",
+      path: ["selectedConnector"],
+    });
+  }
 });
 
 export const taskBlueprintSchema = z.object({
@@ -150,13 +149,49 @@ export const intentSchema = z.object({
 });
 export type LoopIntent = z.infer<typeof intentSchema>;
 
+export const composioActionInputSourceSchema = z.object({
+  type: z.enum(["trigger", "static", "previous_action", "user_config", "planner"]),
+  path: z.string().min(1).optional(),
+  value: z.unknown().optional(),
+  actionSlug: z.string().min(1).optional(),
+  description: z.string().optional(),
+});
+export type ComposioActionInputSource = z.infer<typeof composioActionInputSourceSchema>;
+
+export const composioActionInputInstructionSchema = z.object({
+  field: z.string().min(1),
+  required: z.boolean().optional(),
+  description: z.string().optional(),
+  sources: z.array(composioActionInputSourceSchema).default([]),
+});
+export type ComposioActionInputInstruction = z.infer<typeof composioActionInputInstructionSchema>;
+
+export const composioActionOutputInstructionSchema = z.object({
+  name: z.string().min(1),
+  path: z.string().min(1).optional(),
+  description: z.string().optional(),
+});
+export type ComposioActionOutputInstruction = z.infer<typeof composioActionOutputInstructionSchema>;
+
+export const composioActionInstructionSchema = z.object({
+  toolkit: z.string().min(1),
+  actionSlug: z.string().min(1),
+  label: z.string().min(1).optional(),
+  inputInstructions: z.array(composioActionInputInstructionSchema).default([]),
+  outputInstructions: z.array(composioActionOutputInstructionSchema).default([]),
+  dependsOn: z.array(z.string().min(1)).default([]),
+});
+export type ComposioActionInstruction = z.infer<typeof composioActionInstructionSchema>;
+
 export const loopSpecSchema = z.object({
   workspaceId: z.string().uuid(),
   intent: intentSchema,
   trigger: triggerSchema,
   profile: executionProfileSchema.default("agentic"),
   bindings: z.array(toolBindingSchema).default([]),
+  composioActions: z.array(composioActionInstructionSchema).default([]),
   taskBlueprint: taskBlueprintSchema.optional(),
+  intentDiscovery: intentDiscoveryStateSchema.default({}),
   agent: agentConfigSchema.optional(),
   monitor: monitorConfigSchema.optional(),
   sync: syncConfigSchema.optional(),
@@ -171,7 +206,9 @@ export const specPatchSchema = z.object({
   trigger: triggerSchema.optional(),
   profile: executionProfileSchema.optional(),
   bindings: z.array(toolBindingSchema).optional(),
+  composioActions: z.array(composioActionInstructionSchema).optional(),
   taskBlueprint: taskBlueprintSchema.optional(),
+  intentDiscovery: intentDiscoveryStateSchema.partial().optional(),
   agent: agentConfigSchema.partial().optional(),
   monitor: monitorConfigSchema.optional(),
   sync: syncConfigSchema.optional(),
@@ -185,7 +222,7 @@ export const plannerDecisionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("tool_call"),
     toolId: z.string().min(1),
-    args: z.record(z.unknown()).default({}),
+    args: z.record(z.unknown()).optional().default({}),
     reasoning: z.string().optional(),
   }),
   z.object({
@@ -227,6 +264,15 @@ export const connectorPlaybookSchema = z.object({
 });
 export type ConnectorPlaybook = z.infer<typeof connectorPlaybookSchema>;
 
+export const composioToolContractSchema = z.object({
+  originalInputSchema: z.record(z.unknown()).default({}),
+  originalOutputSchema: z.record(z.unknown()).optional(),
+  modifiedInputSchema: z.record(z.unknown()).default({}),
+  behaviorInstructions: z.array(z.string()).default([]),
+  outputSufficiencyPaths: z.array(z.string()).default([]),
+});
+export type ComposioToolContract = z.infer<typeof composioToolContractSchema>;
+
 export const resolvedToolSchema = z.object({
   id: z.string().min(1),
   capability: z.string().min(1),
@@ -234,7 +280,13 @@ export const resolvedToolSchema = z.object({
   actionSlug: z.string().min(1),
   inputSchema: z.record(z.unknown()).default({}),
   outputSchema: z.record(z.unknown()).optional(),
+  originalInputSchema: z.record(z.unknown()).optional(),
+  originalOutputSchema: z.record(z.unknown()).optional(),
+  modifiedInputSchema: z.record(z.unknown()).optional(),
+  behaviorInstructions: z.array(z.string()).default([]),
+  outputSufficiencyPaths: z.array(z.string()).default([]),
   plannerCard: toolPlannerCardSchema,
+  composioAction: composioActionInstructionSchema.optional(),
   sensitive: z.boolean().default(false),
   credentialRef: z.string().min(1),
   toolkitVersion: z.string().min(1).optional(),
@@ -252,6 +304,7 @@ export const compiledPlanSchema = z.object({
   intent: intentSchema,
   trigger: triggerSchema,
   toolCatalog: z.array(resolvedToolSchema),
+  composioActions: z.array(composioActionInstructionSchema).default([]),
   connectorPlaybook: connectorPlaybookSchema,
   agent: agentConfigSchema.optional(),
   monitor: monitorConfigSchema.optional(),
@@ -279,6 +332,13 @@ export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopS
     trigger: { kind: "manual" },
     profile: "agentic",
     bindings: [],
+    composioActions: [],
+    intentDiscovery: {
+      status: "pending",
+      decisions: [],
+      assumptions: [],
+      askedQuestionIds: [],
+    },
     agent: {
       instructions: "Achieve the stated outcome using only the bound tools.",
       maxSteps: 12,
@@ -308,8 +368,40 @@ export function parseStoredLoopSpec(raw: unknown): LoopSpec {
       : {};
   return loopSpecSchema.parse({
     ...base,
+    taskBlueprint: hydrateStoredTaskBlueprint(base.taskBlueprint, base.bindings),
     trigger: hydrateStoredTrigger(base.trigger),
   });
+}
+
+function hydrateStoredTaskBlueprint(taskBlueprint: unknown, bindings: unknown): unknown {
+  if (!taskBlueprint || typeof taskBlueprint !== "object" || Array.isArray(taskBlueprint)) return taskBlueprint;
+  const row = taskBlueprint as Record<string, unknown>;
+  if (!Array.isArray(row.outcomes)) return taskBlueprint;
+
+  return {
+    ...row,
+    outcomes: row.outcomes.map((outcome) => {
+      if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) return outcome;
+      const normalized = { ...(outcome as Record<string, unknown>) };
+      if (typeof normalized.selectedConnector === "string" && normalized.selectedConnector.trim()) {
+        normalized.status = "chosen";
+      } else if (normalized.role !== "transform" && normalized.status === "chosen") {
+        const matchingConnectors = Array.isArray(bindings)
+          ? [...new Set(bindings.flatMap((binding) => {
+              if (!binding || typeof binding !== "object" || Array.isArray(binding)) return [];
+              const candidate = binding as Record<string, unknown>;
+              if (candidate.role !== normalized.role || typeof candidate.connector !== "string") return [];
+              return [candidate.connector.trim()].filter(Boolean);
+            }))]
+          : [];
+        if (matchingConnectors.length === 1) normalized.selectedConnector = matchingConnectors[0];
+        else normalized.status = "pending";
+      }
+      delete normalized.selectedCapability;
+      delete normalized.candidates;
+      return normalized;
+    }),
+  };
 }
 
 export function parseStoredCompiledPlan(raw: unknown): CompiledPlan {

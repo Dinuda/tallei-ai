@@ -4,7 +4,7 @@ import type { UIMessage } from "ai";
 import { History } from "lucide-react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import {
   InteractivePromptMenu,
@@ -16,51 +16,22 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
-import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { TranscriptThinkingIndicator } from "@/components/ai-elements/transcript-thinking";
 import { BuilderConnectorPrompt } from "@/components/conductor/builder-connector-prompt";
+import { BuilderOutcomeBriefPrompt } from "@/components/conductor/builder-outcome-brief-prompt";
 import { ConductorBuilderChat } from "@/components/conductor/conductor-builder-chat";
 import { ConductorSpecSheet, type LoopEventTriggerStatus } from "@/components/conductor/conductor-spec-sheet";
 import { LoopSuggestionCards } from "@/components/conductor/loop-suggestion-cards";
 import type {
   ChatStatus,
   PendingInteractivePrompt,
+  PendingOutcomeBrief,
 } from "@/components/conductor/conductor-shared";
 import {
   promptVariantForQuestion,
   shouldShowThinkingIndicator,
 } from "@/components/conductor/conductor-shared";
 import type { ConductorPromptSuggestion } from "@/lib/conductor-prompt-suggestions";
-
-function ConductorPromptSuggestionsBar({
-  suggestions,
-  disabled,
-  onSelect,
-}: {
-  suggestions: ConductorPromptSuggestion[];
-  disabled?: boolean;
-  onSelect: (suggestion: ConductorPromptSuggestion) => void;
-}) {
-  if (suggestions.length === 0) return null;
-
-  return (
-    <div className="border-b border-[var(--cb-border-light,#e5e7eb)] px-3 py-2">
-      <Suggestions className="flex-wrap gap-1.5 pb-0">
-        {suggestions.map((suggestion) => (
-          <Suggestion
-            key={suggestion.id}
-            className="border-[var(--cb-border-light,#e5e7eb)] bg-white text-[var(--cb-text,#111827)] hover:border-[#9ca3af] hover:bg-slate-50"
-            disabled={disabled}
-            onClick={() => onSelect(suggestion)}
-            suggestion={suggestion.message}
-          >
-            {suggestion.label}
-          </Suggestion>
-        ))}
-      </Suggestions>
-    </div>
-  );
-}
 
 export type ConductorBuilderLayoutProps = {
   loopId?: string;
@@ -72,10 +43,13 @@ export type ConductorBuilderLayoutProps = {
   onSubmit: (text: string) => void;
   onStop?: () => void;
   pendingQuestion: PendingInteractivePrompt | null;
+  pendingOutcomeBrief: PendingOutcomeBrief | null;
   promptSuggestions: ConductorPromptSuggestion[];
+  promptSuggestionsQuestion: string;
   onAskQuestionAnswer: (answer: InteractivePromptAnswer) => void;
   onAskQuestionDismiss: () => void;
-  onPromptSuggestionSelect: (suggestion: ConductorPromptSuggestion) => void;
+  onOutcomeBriefAnswer: (answer: InteractivePromptAnswer) => void;
+  onPromptSuggestionsSubmit: (answer: InteractivePromptAnswer) => void;
   spec: Record<string, unknown> | null;
   missingSlots: string[];
   status: string;
@@ -85,6 +59,7 @@ export type ConductorBuilderLayoutProps = {
   thinkingLabel?: string;
   forceThinking?: boolean;
   composerDisabled?: boolean;
+  sendBlocked?: boolean;
   pendingReplyOptionsCallId?: string | null;
 };
 
@@ -98,10 +73,13 @@ export function ConductorBuilderLayout({
   onSubmit,
   onStop,
   pendingQuestion,
+  pendingOutcomeBrief,
   promptSuggestions,
+  promptSuggestionsQuestion,
   onAskQuestionAnswer,
   onAskQuestionDismiss,
-  onPromptSuggestionSelect,
+  onOutcomeBriefAnswer,
+  onPromptSuggestionsSubmit,
   spec,
   missingSlots,
   status,
@@ -111,6 +89,7 @@ export function ConductorBuilderLayout({
   thinkingLabel = "Thinking…",
   forceThinking = false,
   composerDisabled = false,
+  sendBlocked = false,
   pendingReplyOptionsCallId = null,
 }: ConductorBuilderLayoutProps) {
   const pendingQuestionCallId = pendingQuestion?.toolCallId ?? null;
@@ -118,25 +97,40 @@ export function ConductorBuilderLayout({
   const showThinking = shouldShowThinkingIndicator(
     messages,
     chatStatus,
-    Boolean(pendingQuestion),
+    Boolean(pendingQuestion || pendingOutcomeBrief),
     forceThinking,
   );
   const chatBusy = composerDisabled || chatStatus === "streaming" || chatStatus === "submitted";
   const composerInteractiveReady = chatStatus === "ready" && !composerDisabled;
-  const showComposerBusy = chatBusy && !pendingQuestion;
+  const showComposerBusy = chatBusy && !pendingQuestion && !pendingOutcomeBrief;
   const showTranscriptThinking = showThinking && !showComposerBusy;
+  const suggestionsKey = promptSuggestions.map((suggestion) => suggestion.id).join("|");
+  const [dismissedSuggestionsKey, setDismissedSuggestionsKey] = useState<string | null>(null);
+  const showPromptSuggestions = promptSuggestions.length > 0 && dismissedSuggestionsKey !== suggestionsKey;
+  const suggestionOptions = useMemo(
+    () => promptSuggestions.map((suggestion) => ({
+      id: suggestion.id,
+      label: suggestion.label,
+      value: suggestion.message,
+    })),
+    [promptSuggestions],
+  );
+  const recommendedSuggestionIds = useMemo(
+    () => (promptSuggestions[0] ? [promptSuggestions[0].id] : []),
+    [promptSuggestions],
+  );
 
-  const isConnectorPick = pendingQuestion?.input.questionId === "connector-app";
+  const isConnectorPick = pendingQuestion?.input.questionId.startsWith("connector-app:") ?? false;
   const promptVariant = pendingQuestion
     ? promptVariantForQuestion(pendingQuestion.input.questionId)
     : "neutral";
 
   const submitComposerText = useCallback((text: string) => {
     const answerText = text.trim();
-    if (!answerText || pendingQuestion || chatBusy) return;
+    if (!answerText || sendBlocked || chatBusy) return;
     onSubmit(answerText);
     setInput("");
-  }, [chatBusy, onSubmit, pendingQuestion, setInput]);
+  }, [chatBusy, onSubmit, sendBlocked, setInput]);
 
   const emptyState = useMemo(
     () => (!loopId ? <LoopSuggestionCards className="max-w-3xl" onSelect={submitComposerText} /> : undefined),
@@ -163,7 +157,21 @@ export function ConductorBuilderLayout({
           <div className="conductor-builder-page__composer-inner">
             <motion.div className="conductor-builder-page__composer-surface">
               <AnimatePresence initial={false} mode="popLayout">
-                {composerInteractiveReady && pendingQuestion ? (
+                {pendingOutcomeBrief ? (
+                  <motion.div
+                    key={`outcome-brief-${pendingOutcomeBrief.toolCallId}`}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <BuilderOutcomeBriefPrompt
+                      brief={pendingOutcomeBrief.input.brief}
+                      confirmPrompt={pendingOutcomeBrief.confirmPrompt}
+                      onSubmit={onOutcomeBriefAnswer}
+                    />
+                  </motion.div>
+                ) : pendingQuestion ? (
                   <motion.div
                     key={isConnectorPick ? "connector-pick" : `prompt-${pendingQuestion.toolCallId}`}
                     animate={{ opacity: 1, y: 0 }}
@@ -175,7 +183,6 @@ export function ConductorBuilderLayout({
                       <BuilderConnectorPrompt
                         allowMultiple={pendingQuestion.input.allowMultiple}
                         allowOther={pendingQuestion.input.allowOther ?? true}
-                        disabled={chatBusy}
                         onDismiss={onAskQuestionDismiss}
                         onSubmit={onAskQuestionAnswer}
                         options={pendingQuestion.input.options}
@@ -188,7 +195,6 @@ export function ConductorBuilderLayout({
                       <InteractivePromptMenu
                         allowMultiple={pendingQuestion.input.allowMultiple}
                         allowOther={pendingQuestion.input.allowOther ?? true}
-                        disabled={chatBusy}
                         onDismiss={onAskQuestionDismiss}
                         onSubmit={onAskQuestionAnswer}
                         options={pendingQuestion.input.options}
@@ -199,6 +205,27 @@ export function ConductorBuilderLayout({
                         variant={promptVariant}
                       />
                     )}
+                  </motion.div>
+                ) : composerInteractiveReady && showPromptSuggestions ? (
+                  <motion.div
+                    key="prompt-suggestions"
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 20 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <InteractivePromptMenu
+                      allowOther
+                      disabled={chatBusy}
+                      onDismiss={() => setDismissedSuggestionsKey(suggestionsKey)}
+                      onSubmit={onPromptSuggestionsSubmit}
+                      options={suggestionOptions}
+                      placement="composer"
+                      question={promptSuggestionsQuestion}
+                      recommendedOptionIds={recommendedSuggestionIds}
+                      selectionHint="Pick an option, or describe your own approach below"
+                      variant="neutral"
+                    />
                   </motion.div>
                 ) : showComposerBusy ? (
                   <motion.div
@@ -224,14 +251,6 @@ export function ConductorBuilderLayout({
                     initial={{ opacity: 0, y: 10 }}
                     transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    {!pendingQuestion && promptSuggestions.length > 0 ? (
-                      <ConductorPromptSuggestionsBar
-                        disabled={chatBusy}
-                        onSelect={onPromptSuggestionSelect}
-                        suggestions={promptSuggestions}
-                      />
-                    ) : null}
-
                     <div className="relative" data-conductor-prompt-input>
                       <PromptInput
                         className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"

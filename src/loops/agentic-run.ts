@@ -1,6 +1,7 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { getApprovalRequest } from "./store.js";
 import { assertAgenticCompiledPlan } from "./plan-validators.js";
+import { resolveComposioActionArgs } from "./composio-action-instructions.js";
 import type { CompiledPlan, PlannerDecision } from "./spec.js";
 import type { AgentRunState, ApprovalDecision, LoopRunResult, LoopRunWorkflowInput } from "../temporal/types.js";
 
@@ -28,6 +29,68 @@ function parseApprovalDecision(row: NonNullable<Awaited<ReturnType<typeof getApp
       ? { editedArgs: payload.editedArgs as Record<string, unknown> }
       : {}),
     ...(typeof payload.comment === "string" ? { comment: payload.comment } : {}),
+  };
+}
+
+function missingInputSourceResult(tool: CompiledPlan["toolCatalog"][number], missing: Array<{
+  field: string;
+  actionSlug: string;
+  toolId: string;
+  expectedSources: unknown[];
+}>): unknown {
+  return {
+    successful: false,
+    error: "missing_input_source",
+    data: {
+      toolId: tool.id,
+      actionSlug: tool.actionSlug,
+      missing,
+      message: `Missing input source for ${missing.map((row) => row.field).join(", ")}`,
+    },
+  };
+}
+
+function valueAtPath(value: unknown, path: string): unknown {
+  const normalized = path.replace(/\[(\d+)\]/g, ".$1");
+  let current: unknown = value;
+  for (const segment of normalized.split(".").filter(Boolean)) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function hasSufficientPriorOutput(
+  tool: CompiledPlan["toolCatalog"][number],
+  toolResults: AgentRunState["toolResults"],
+): boolean {
+  const paths = tool.outputSufficiencyPaths ?? [];
+  if (paths.length === 0) return false;
+  return toolResults.some((entry) => {
+    if (entry.toolId !== tool.id) return false;
+    const row = entry.result && typeof entry.result === "object"
+      ? entry.result as Record<string, unknown>
+      : {};
+    if (row.successful === false || row.error) return false;
+    const data = row.data ?? entry.result;
+    return paths.some((path) => {
+      const value = valueAtPath(data, path) ?? valueAtPath(entry.result, path);
+      return value !== undefined && value !== null && value !== ""
+        && (!Array.isArray(value) || value.length > 0);
+    });
+  });
+}
+
+function outputAlreadyAvailableResult(tool: CompiledPlan["toolCatalog"][number]): unknown {
+  return {
+    successful: false,
+    error: "action_output_already_available",
+    data: {
+      toolId: tool.id,
+      actionSlug: tool.actionSlug,
+      outputSufficiencyPaths: tool.outputSufficiencyPaths ?? [],
+      message: "A prior successful result already satisfies this action's output contract.",
+    },
   };
 }
 
@@ -139,7 +202,29 @@ export async function runAgenticLoop(
       return { status: "failed", error };
     }
 
-    let finalArgs = decision.args;
+    const resolvedArgs = resolveComposioActionArgs({
+      plan,
+      tool,
+      args: decision.args,
+      ...(input.eventPayload !== undefined ? { eventPayload: input.eventPayload } : {}),
+      toolResults: state.toolResults,
+    });
+    if (resolvedArgs.missing.length > 0) {
+      state.toolResults.push({
+        toolId: tool.id,
+        result: missingInputSourceResult(tool, resolvedArgs.missing),
+      });
+      state.stepIndex += 1;
+      continue;
+    }
+
+    if (hasSufficientPriorOutput(tool, state.toolResults)) {
+      state.toolResults.push({ toolId: tool.id, result: outputAlreadyAvailableResult(tool) });
+      state.stepIndex += 1;
+      continue;
+    }
+
+    let finalArgs = resolvedArgs.args;
     const needsApproval = tool.sensitive || plan.approval.mode === "ask";
 
     if (needsApproval) {
@@ -150,7 +235,7 @@ export async function runAgenticLoop(
         workspaceId: input.workspaceId,
         stepIndex: state.stepIndex,
         toolId: tool.id,
-        proposedAction: { toolId: tool.id, args: decision.args },
+        proposedAction: { toolId: tool.id, args: finalArgs },
         temporalWorkflowId: workflowId,
         expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
       });
@@ -171,6 +256,23 @@ export async function runAgenticLoop(
       }
       if (approvalDecision.decision === "edit" && approvalDecision.editedArgs) {
         finalArgs = approvalDecision.editedArgs;
+        const approvedArgs = resolveComposioActionArgs({
+          plan,
+          tool,
+          args: finalArgs,
+          ...(input.eventPayload !== undefined ? { eventPayload: input.eventPayload } : {}),
+          toolResults: state.toolResults,
+        });
+        if (approvedArgs.missing.length > 0) {
+          state.toolResults.push({
+            toolId: tool.id,
+            result: missingInputSourceResult(tool, approvedArgs.missing),
+          });
+          state.stepIndex += 1;
+          state.status = "running";
+          continue;
+        }
+        finalArgs = approvedArgs.args;
       }
       state.status = "running";
     }
