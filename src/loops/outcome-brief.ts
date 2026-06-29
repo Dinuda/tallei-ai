@@ -60,7 +60,7 @@ export function buildOutcomeBrief(spec: LoopSpec): OutcomeBrief {
       `Retries per step: ${spec.guardrails.maxRetriesPerStep}`,
       ...(spec.guardrails.deniedTools.length ? [`Denied tools: ${spec.guardrails.deniedTools.join(", ")}`] : []),
     ],
-    assumptions: spec.intentDiscovery.assumptions,
+    assumptions: [],
   };
 }
 

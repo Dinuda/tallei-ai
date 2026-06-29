@@ -9,6 +9,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function isNonEmpty(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== "";
+}
+
 export function summarizeInputSchema(inputSchema: Record<string, unknown>): SchemaFieldSummary {
   const row = asRecord(inputSchema) ?? {};
   const properties = asRecord(row.properties) ?? row;
@@ -85,16 +89,72 @@ export function scoreSchemaFitForCapability(
   return 0;
 }
 
+/**
+ * Check whether args satisfy a JSON Schema `anyOf` clause.
+ * At least one branch must have all its `required` fields present and non-empty.
+ */
+function checkAnyOf(
+  args: Record<string, unknown>,
+  anyOf: unknown,
+): { ok: false; missing: string[]; required: string[] } | null {
+  if (!Array.isArray(anyOf) || anyOf.length === 0) return null;
+  const branches = anyOf.map((branch) => summarizeInputSchema(asRecord(branch) ?? {}));
+  const satisfiedBranch = branches.find((branch) =>
+    branch.required.length > 0 && branch.required.every((field) => isNonEmpty(args[field]))
+  );
+  // If any branch is satisfied, the constraint passes.
+  if (satisfiedBranch) return null;
+  // If all branches have required fields and none is satisfied, report the fields from all branches.
+  const allBranchesHaveRequired = branches.every((b) => b.required.length > 0);
+  if (!allBranchesHaveRequired) return null;
+  const allRequired = [...new Set(branches.flatMap((b) => b.required))];
+  const missing = allRequired.filter((field) => !isNonEmpty(args[field]));
+  return missing.length > 0 ? { ok: false, missing, required: allRequired } : null;
+}
+
+/**
+ * Check whether args satisfy a JSON Schema `oneOf` clause.
+ * Exactly one branch must have all its `required` fields present and non-empty.
+ */
+function checkOneOf(
+  args: Record<string, unknown>,
+  oneOf: unknown,
+): { ok: false; missing: string[]; required: string[] } | null {
+  if (!Array.isArray(oneOf) || oneOf.length === 0) return null;
+  const branches = oneOf.map((branch) => summarizeInputSchema(asRecord(branch) ?? {}));
+  const satisfiedCount = branches.filter((branch) =>
+    branch.required.length > 0 && branch.required.every((field) => isNonEmpty(args[field]))
+  ).length;
+  if (satisfiedCount === 1) return null;
+  const allBranchesHaveRequired = branches.every((b) => b.required.length > 0);
+  if (!allBranchesHaveRequired) return null;
+  if (satisfiedCount === 0) {
+    const allRequired = [...new Set(branches.flatMap((b) => b.required))];
+    const missing = allRequired.filter((field) => !isNonEmpty(args[field]));
+    return missing.length > 0 ? { ok: false, missing, required: allRequired } : null;
+  }
+  // satisfiedCount > 1: multiple branches satisfied — report all required fields as ambiguous.
+  const allRequired = [...new Set(branches.flatMap((b) => b.required))];
+  return { ok: false, missing: [], required: allRequired };
+}
+
 export function validateToolArgsAgainstSchema(
   args: Record<string, unknown>,
   inputSchema: Record<string, unknown>,
 ): { ok: true } | { ok: false; missing: string[]; required: string[] } {
+  // 1. Top-level required fields.
   const summary = summarizeInputSchema(inputSchema);
-  const missing = summary.required.filter((field) => {
-    const value = args[field];
-    return value === undefined || value === null || value === "";
-  });
-  if (missing.length === 0) return { ok: true };
-  return { ok: false, missing, required: summary.required };
-}
+  const missing = summary.required.filter((field) => !isNonEmpty(args[field]));
+  if (missing.length > 0) return { ok: false, missing, required: summary.required };
 
+  // 2. anyOf constraints (e.g. "at least one of add_label_ids or remove_label_ids").
+  const row = asRecord(inputSchema) ?? {};
+  const anyOfResult = checkAnyOf(args, row.anyOf);
+  if (anyOfResult) return anyOfResult;
+
+  // 3. oneOf constraints.
+  const oneOfResult = checkOneOf(args, row.oneOf);
+  if (oneOfResult) return oneOfResult;
+
+  return { ok: true };
+}

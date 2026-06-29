@@ -119,7 +119,7 @@ export function buildConductorSystemPrompt(input: {
     .join(", ") || "none";
 
   const nextStep = intentStatus === "pending" || intentStatus === "needs_input"
-    ? "analyzeIntent, then askQuestion only when it returns a material unresolved question."
+    ? "analyzeIntent. If it returns nextQuestion, call askQuestion with it."
     : !hasBlueprint
     ? "patchLoopSpec(taskBlueprint + agent + approval) from the ready intent analysis."
     : connectorsPending
@@ -137,11 +137,10 @@ export function buildConductorSystemPrompt(input: {
     "## First principles",
     "- Resolve WHAT must be true at the end, not which API calls run.",
     "- intent.goal = user words; intent.outcome = one testable end state you write.",
-    "- Call analyzeIntent on the initial request and again after each clarification answer.",
-    "- Zero clarification questions is valid. Ask only when the answer materially changes outcome, safety/autonomy, trigger, scope, destination, or success criteria.",
-    "- Ask at most one question at a time, using the highest-priority nextQuestion returned by analyzeIntent.",
-    "- On Skip, record the recommended choice as source=recommended_assumption and show it in the outcome brief.",
-    "- Never repeat a questionId already present in decisions or askedQuestionIds.",
+    "- Call analyzeIntent on the initial request and again after each clarification answer. If it returns nextQuestion, call askQuestion with it immediately.",
+    "- Always look for the one most important ambiguity: autonomy (send directly vs draft for review), scope (which items), or destination. Ask unless the user already made every key choice explicit.",
+    "- Ask at most one question per round. Never ask about connectors, APIs, or implementation.",
+    "- Never ask a question already in decisions or askedQuestionIds.",
     "",
     "## Ownership",
     "- Resolve compile blockers with tools; no configuration checklists or capability-bundle questions.",
@@ -151,8 +150,8 @@ export function buildConductorSystemPrompt(input: {
     "- After patching, briefly tell the user what you chose (plain language, key actions).",
     "",
     "## Sequence",
-    "1. analyzeIntent → askQuestion only when nextQuestion exists; repeat analysis after the answer.",
-    "2. patchLoopSpec — taskBlueprint, agent, approval from the ready analysis.",
+    "1. analyzeIntent → if nextQuestion returned, call askQuestion and wait for the answer; call analyzeIntent again with the answer in decisions. Repeat until status=ready. Do NOT call patchLoopSpec during this phase.",
+    "2. patchLoopSpec once — taskBlueprint, agent, approval from the ready analysis. Patch again only for bindings, triggers, or output as they are discovered.",
     "3. discoverConnectorsForBlueprint once → pickConnectorApp separately for every returned role group → patch that outcome's selectedConnector.",
     "4. For each selected connector, listTriggers/discoverBindings → patch bindings + composioActions, event trigger, and output.",
     "5. reviewOutcomeBrief (server builds plain-language userSummary for the confirmation card) → confirmOutcomeBrief with briefHash, a plain-language question, and 2–4 user-facing options (option value = confirm | change_outcome | change_trigger | change_connectors | change_approvals | other). If confirmed, patch intentDiscovery.status=confirmed and the exact briefHash.",
@@ -161,7 +160,7 @@ export function buildConductorSystemPrompt(input: {
     "## Connectors",
     "- Connector choice is always explicit. Never infer or auto-submit a connected app.",
     "- Use server-provided role groups and ranked picker options. Never hand-build connector lists.",
-    "- Connected status boosts rank only. The picker shows five recommendations and searchable alternatives.",
+    "- Connected status boosts rank only. Each picker shows the top five ranked apps.",
     "- Reuse an earlier connector only after the user explicitly selects it for the next compatible role.",
     "",
     "## Outcome brief edits",

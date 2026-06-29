@@ -2,11 +2,9 @@ import type { AuthContext } from "../domain/auth/index.js";
 import { listAllToolkitsWithStatus } from "../integrations/composio/accounts.js";
 import { normalizeToolkitSlug } from "../integrations/composio/auth.js";
 import { searchTools } from "../integrations/composio/tools.js";
-import {
-  combinedCapabilityScore,
-  suggestCapabilityLabel,
-} from "./binding-discovery.js";
+import { scoreOutcomeRelevance } from "./binding-discovery.js";
 import type { BindingAskOption } from "./binding-discovery.js";
+import { scoreSchemaFitForCapability, semanticCapabilityForAction } from "./tool-schema.js";
 import type { OutcomeRole, TaskBlueprint } from "./spec.js";
 
 export const CONNECTED_TOOLKIT_BOOST = 4;
@@ -29,7 +27,6 @@ export type ConnectorAskOption = BindingAskOption & {
 export type ConnectorDiscoveryResult = {
   outcomeDescription: string;
   role: string;
-  suggestedCapability: string;
   candidates: ConnectorCandidate[];
   askOptions: ConnectorAskOption[];
   recommendedOptionIds: string[];
@@ -193,7 +190,7 @@ export async function discoverConnectorsForBlueprint(
     pending.map(async (outcome) => discoverConnectorsForOutcome(auth, {
       outcomeDescription: outcome.description,
       role: outcome.role,
-      includeFullCatalog: true,
+      limit: TOP_CONNECTOR_RECOMMENDATIONS,
     })),
   );
 
@@ -235,12 +232,10 @@ export async function discoverConnectorsForOutcome(
     outcomeDescription: string;
     role: "trigger" | "source" | "transform" | "destination";
     limit?: number;
-    includeFullCatalog?: boolean;
   },
 ): Promise<ConnectorDiscoveryResult> {
-  const limit = Math.max(3, input.limit ?? 8);
+  const limit = Math.max(2, input.limit ?? TOP_CONNECTOR_RECOMMENDATIONS);
   const { toolkits } = await listAllToolkitsWithStatus(auth);
-  const suggestedCapability = suggestCapabilityLabel(input.outcomeDescription);
   const searchQuery = `${input.outcomeDescription} ${roleSearchHints(input.role)}`.trim();
 
   const searchResults = await searchTools(searchQuery, 32);
@@ -248,13 +243,10 @@ export async function discoverConnectorsForOutcome(
 
   for (const result of searchResults) {
     const slug = normalizeToolkitSlug(result.toolkit);
-    const actionScore = combinedCapabilityScore(
-      suggestedCapability,
-      result.actionSlug,
-      result.name,
-      result.description,
-      result.inputSchema ?? {},
-    );
+    const inputSchema = result.inputSchema ?? {};
+    const derivedCapability = semanticCapabilityForAction(result.actionSlug, inputSchema, slug.split("_")[0] ?? "tool");
+    const actionScore = scoreSchemaFitForCapability(derivedCapability, inputSchema, result.actionSlug)
+      + scoreOutcomeRelevance(input.outcomeDescription, result.actionSlug, result.name, result.description);
     if (actionScore <= 0) continue;
     const existing = scoresByToolkit.get(slug);
     const row = existing ?? { score: 0, actions: [] };
@@ -277,7 +269,7 @@ export async function discoverConnectorsForOutcome(
     const slug = normalizeToolkitSlug(toolkit.slug);
     const match = scoresByToolkit.get(slug);
     const baseScore = match?.score ?? 0;
-    if (!input.includeFullCatalog && baseScore <= 0 && input.role !== "trigger") continue;
+    if (baseScore <= 0 && input.role !== "trigger") continue;
 
     const finalScore = baseScore + (toolkit.connected ? CONNECTED_TOOLKIT_BOOST : 0);
     candidates.push({
@@ -306,14 +298,13 @@ export async function discoverConnectorsForOutcome(
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const ranked = input.includeFullCatalog ? candidates : candidates.slice(0, limit);
+  const ranked = candidates.slice(0, limit);
   const askOptions = buildConnectorAskOptions(ranked);
   const recommendedOptionIds = buildConnectorRecommendedIds(askOptions);
 
   return {
     outcomeDescription: input.outcomeDescription,
     role: input.role,
-    suggestedCapability,
     candidates: ranked,
     askOptions,
     recommendedOptionIds,

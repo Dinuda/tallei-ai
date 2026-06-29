@@ -12,7 +12,6 @@ import { listToolkitsForUser } from "../integrations/composio/session.js";
 import {
   resolveBindingAction,
   resolveExplicitBindingAction,
-  alignCapabilityWithAction,
   looksLikeComposioActionSlug,
 } from "./binding-discovery.js";
 import {
@@ -123,7 +122,7 @@ export type CompileError = {
   connectUrl?: string;
 };
 
-export { scoreToolForCapability } from "./binding-discovery.js";
+
 
 function validateCron(cron: string): boolean {
   const parts = cron.trim().split(/\s+/);
@@ -285,34 +284,24 @@ export async function compileLoopSpec(
       });
       continue;
     }
-    let catalogCapability = binding.capability;
-    const schemaFit = binding.actionSlug ? 0 : scoreSchemaFitForCapability(
-      catalogCapability,
-      resolved.inputSchema,
-      resolved.actionSlug,
-    );
-    if (schemaFit < 0) {
-      const domain = looksLikeComposioActionSlug(catalogCapability)
-        ? (catalogCapability.split("_")[0]?.toLowerCase() || "tool")
-        : (catalogCapability.split(".")[0] || "tool");
-      const aligned = alignCapabilityWithAction(
-        looksLikeComposioActionSlug(catalogCapability)
-          ? semanticCapabilityForAction(resolved.actionSlug, resolved.inputSchema, domain)
-          : catalogCapability,
-        resolved.actionSlug,
-        resolved.inputSchema,
-      );
-      const retryFit = scoreSchemaFitForCapability(aligned, resolved.inputSchema, resolved.actionSlug);
-      if (retryFit < 0) {
-        const required = summarizeInputSchema(resolved.inputSchema).required.join(", ") || "specific fields";
-        errors.push({
-          code: "SCHEMA_MISMATCH",
-          message: `${catalogCapability} does not match ${resolved.actionSlug} — use capability ${aligned} (action requires: ${required})`,
-          binding: catalogCapability,
-        });
-        continue;
-      }
-      catalogCapability = aligned;
+    // Always derive the canonical capability from the resolved action's actual schema.
+    // If the binding already has an explicit actionSlug, trust it and skip schema-fit scoring.
+    const domain = looksLikeComposioActionSlug(binding.capability)
+      ? (binding.capability.split("_")[0]?.toLowerCase() || "tool")
+      : (binding.capability.split(".")[0] || "tool");
+    const derivedCapability = semanticCapabilityForAction(resolved.actionSlug, resolved.inputSchema, domain);
+    const catalogCapability = binding.actionSlug
+      ? binding.capability  // explicit binding — preserve what the conductor set
+      : derivedCapability;  // implicit binding — always use schema-derived label
+    const schemaFit = scoreSchemaFitForCapability(catalogCapability, resolved.inputSchema, resolved.actionSlug);
+    if (!binding.actionSlug && schemaFit < 0) {
+      const required = summarizeInputSchema(resolved.inputSchema).required.join(", ") || "specific fields";
+      errors.push({
+        code: "SCHEMA_MISMATCH",
+        message: `${binding.capability} does not match ${resolved.actionSlug} (requires: ${required}). Use capability ${derivedCapability}.`,
+        binding: binding.capability,
+      });
+      continue;
     }
     const sensitive = parsed.approval.sensitiveCapabilities.includes(catalogCapability);
 

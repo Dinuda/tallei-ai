@@ -77,6 +77,63 @@ test("validateToolArgsAgainstSchema reports missing required fields", () => {
   }
 });
 
+test("validateToolArgsAgainstSchema fails when anyOf is not satisfied", () => {
+  const schema = {
+    type: "object",
+    required: ["message_id"],
+    properties: {
+      message_id: { type: "string" },
+      add_label_ids: { type: "array" },
+      remove_label_ids: { type: "array" },
+    },
+    anyOf: [
+      { required: ["add_label_ids"] },
+      { required: ["remove_label_ids"] },
+    ],
+  };
+  const result = validateToolArgsAgainstSchema({ message_id: "abc" }, schema);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.ok(
+      result.missing.includes("add_label_ids") || result.missing.includes("remove_label_ids"),
+    );
+  }
+});
+
+test("validateToolArgsAgainstSchema passes when one anyOf branch is satisfied", () => {
+  const schema = {
+    type: "object",
+    required: ["message_id"],
+    properties: {
+      message_id: { type: "string" },
+      add_label_ids: { type: "array" },
+      remove_label_ids: { type: "array" },
+    },
+    anyOf: [
+      { required: ["add_label_ids"] },
+      { required: ["remove_label_ids"] },
+    ],
+  };
+  const result = validateToolArgsAgainstSchema(
+    { message_id: "abc", add_label_ids: ["INBOX"] },
+    schema,
+  );
+  assert.equal(result.ok, true);
+});
+
+test("validateToolArgsAgainstSchema passes when oneOf branch is exactly satisfied", () => {
+  const schema = {
+    type: "object",
+    oneOf: [
+      { required: ["email"] },
+      { required: ["phone"] },
+    ],
+  };
+  assert.equal(validateToolArgsAgainstSchema({ email: "a@b.com" }, schema).ok, true);
+  assert.equal(validateToolArgsAgainstSchema({ phone: "555" }, schema).ok, true);
+  assert.equal(validateToolArgsAgainstSchema({}, schema).ok, false);
+});
+
 test("summarizeInputSchema extracts required and property names", () => {
   const summary = summarizeInputSchema({
     type: "object",

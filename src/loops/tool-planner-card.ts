@@ -19,10 +19,40 @@ function summarizeOutputFields(outputSchema: Record<string, unknown>): { fields:
   return { fields: fields.slice(0, 12), notes };
 }
 
+/**
+ * Extract anyOf/oneOf field groups from the schema and annotate arg descriptions
+ * so the planner knows which fields are conditionally required together.
+ */
+function conditionalRequirementNotes(inputSchema: Record<string, unknown>): Map<string, string> {
+  const notes = new Map<string, string>();
+  const row = asRecord(inputSchema) ?? {};
+
+  function processGroup(group: unknown, label: string): void {
+    if (!Array.isArray(group)) return;
+    const branchFields = group.map((branch) => {
+      const b = asRecord(branch) ?? {};
+      const req = Array.isArray(b.required) ? b.required.filter((f): f is string => typeof f === "string") : [];
+      return req;
+    }).filter((req) => req.length > 0);
+    if (branchFields.length < 2) return;
+    const allFields = [...new Set(branchFields.flat())];
+    const groupDescription = `${label}: ${branchFields.map((fields) => fields.join(" + ")).join(" OR ")}`;
+    for (const field of allFields) {
+      const existing = notes.get(field);
+      notes.set(field, existing ? `${existing}; ${groupDescription}` : groupDescription);
+    }
+  }
+
+  processGroup(row.anyOf, "At least one required");
+  processGroup(row.oneOf, "Exactly one required");
+  return notes;
+}
+
 function buildArgGuides(inputSchema: Record<string, unknown>): ToolPlannerCard["argGuides"] {
   const row = asRecord(inputSchema) ?? {};
   const properties = asRecord(row.properties) ?? row;
   const guides: ToolPlannerCard["argGuides"] = {};
+  const conditionalNotes = conditionalRequirementNotes(inputSchema);
 
   for (const [field, raw] of Object.entries(properties)) {
     if (field === "required" || field === "type") continue;
@@ -37,29 +67,18 @@ function buildArgGuides(inputSchema: Record<string, unknown>): ToolPlannerCard["
     const constraints = Array.isArray(prop.enum)
       ? `enum: ${prop.enum.map(String).join(", ")}`
       : undefined;
-    if (description || examples?.length || constraints) {
-      guides[field] = { ...(description ? { description } : {}), ...(examples?.length ? { examples } : {}), ...(constraints ? { constraints } : {}) };
+    const conditionalNote = conditionalNotes.get(field);
+
+    const fullDescription = [description, conditionalNote].filter(Boolean).join(" — ");
+    if (fullDescription || examples?.length || constraints) {
+      guides[field] = {
+        ...(fullDescription ? { description: fullDescription } : {}),
+        ...(examples?.length ? { examples } : {}),
+        ...(constraints ? { constraints } : {}),
+      };
     }
   }
   return guides;
-}
-
-function gmailAntiPatterns(actionSlug: string, capability: string): string[] {
-  const slug = actionSlug.toUpperCase();
-  const patterns: string[] = [];
-  if (capability === "email.read" || (slug.includes("FETCH") && !slug.includes("MESSAGE_ID") && !slug.includes("BY_ID"))) {
-    patterns.push("Never use id:<messageId> in query — Gmail search has no id: operator.");
-    patterns.push("Use from:, subject:, is:unread, in:inbox for search queries.");
-  }
-  if (capability === "email.get" || slug.includes("MESSAGE_ID") || slug.includes("BY_ID")) {
-    patterns.push("Pass message_id from prior step or trigger context — not in query.");
-    patterns.push("thread_id is not a substitute for message_id.");
-  }
-  if (capability === "email.labels" || slug.includes("LABEL")) {
-    patterns.push("Requires message_id — never pass thread_id.");
-    patterns.push("Not for reading email body; use email.get or email.read first.");
-  }
-  return patterns;
 }
 
 export function buildPlannerCardFromSchemas(input: {
@@ -71,53 +90,11 @@ export function buildPlannerCardFromSchemas(input: {
   relatedActionSlugs?: string[];
   pitfalls?: string[];
 }): ToolPlannerCard {
-  const slug = input.actionSlug.toUpperCase();
-  const isList = input.capability === "email.read"
-    || (slug.includes("GMAIL") && slug.includes("FETCH") && !slug.includes("MESSAGE_ID") && !slug.includes("BY_ID"));
-  const isGet = input.capability === "email.get"
-    || slug.includes("MESSAGE_ID") || slug.includes("BY_ID") || slug.includes("BY_THREAD");
-  const isLabel = input.capability === "email.labels" || slug.includes("LABEL");
-
-  const antiPatterns = [
-    ...gmailAntiPatterns(input.actionSlug, input.capability),
-    ...(input.pitfalls ?? []).slice(0, 4),
-  ];
-
-  const inputSummary = summarizeInputSchema(input.inputSchema);
   const argGuides = buildArgGuides(input.inputSchema);
-  if (isList && !argGuides.query) {
-    argGuides.query = {
-      description: "Gmail search query (from:, subject:, is:unread, in:inbox). Not for API message IDs.",
-      examples: ["in:inbox is:unread", "subject:site down"],
-    };
-  }
-  if (isGet && inputSummary.required.includes("message_id") && !argGuides.message_id) {
-    argGuides.message_id = {
-      description: "Gmail API message resource ID from a prior list result or trigger context.",
-    };
-  }
-  if (isLabel && inputSummary.required.includes("message_id") && !argGuides.message_id) {
-    argGuides.message_id = {
-      description: "Gmail API message_id from trigger context or a prior email.read/email.get step — not thread_id.",
-    };
-  }
+  const antiPatterns = (input.pitfalls ?? []).slice(0, 4);
 
   return {
     summary: input.description || input.actionSlug,
-    whenToUse: isList
-      ? "Search or list messages matching a Gmail query."
-      : isGet
-        ? "Fetch one message by API message_id."
-        : isLabel
-          ? "Apply or modify labels on one message (requires message_id)."
-          : undefined,
-    whenNotToUse: isList
-      ? "Not for fetch-by-id; use email.get with message_id instead."
-      : isGet
-        ? "Not for inbox search; use email.read with query instead."
-        : isLabel
-          ? "Not for fetching or reading message content; use email.get or email.read first."
-          : undefined,
     argGuides,
     ...(input.outputSchema ? { outputSummary: summarizeOutputFields(input.outputSchema) } : {}),
     ...(antiPatterns.length > 0 ? { antiPatterns: [...new Set(antiPatterns)] } : {}),

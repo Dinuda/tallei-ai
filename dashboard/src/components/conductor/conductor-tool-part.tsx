@@ -67,17 +67,17 @@ export function ConductorReasoningPart({
           isMessageStreaming={isMessageStreaming}
           isStreaming={isStreaming}
           textLength={text.length}
-        >
-          {isStreaming ? (
+          liveContent={
             <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
               {liveText}
             </p>
-          ) : (
+          }
+          settledContent={
             <div className="text-muted-foreground">
               <Streamdown plugins={reasoningStreamdownPlugins}>{text}</Streamdown>
             </div>
-          )}
-        </ConductorReasoningStream>
+          }
+        />
       </CollapsibleContent>
     </Reasoning>
   );

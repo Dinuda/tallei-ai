@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { scoreToolForCapability } from "../../../src/loops/binding-discovery.js";
+import { scoreOutcomeRelevance } from "../../../src/loops/binding-discovery.js";
 
-test("scoreToolForCapability ranks matching action slugs by capability tokens", () => {
-  const score = scoreToolForCapability(
-    "message.send",
+test("scoreOutcomeRelevance ranks matching action slugs by outcome word overlap", () => {
+  const score = scoreOutcomeRelevance(
+    "send message to slack channel",
     "SLACK_SEND_MESSAGE",
     "Send message",
     "Post a message to a Slack channel",
@@ -13,9 +13,9 @@ test("scoreToolForCapability ranks matching action slugs by capability tokens", 
   assert.ok(score >= 2);
 });
 
-test("scoreToolForCapability returns zero for unrelated capabilities", () => {
+test("scoreOutcomeRelevance returns zero for unrelated outcomes", () => {
   assert.equal(
-    scoreToolForCapability("payment.charge", "GMAIL_FETCH_EMAILS", "Fetch emails", "List messages"),
+    scoreOutcomeRelevance("payment charge", "GMAIL_FETCH_EMAILS", "Fetch emails", "List messages"),
     0,
   );
 });

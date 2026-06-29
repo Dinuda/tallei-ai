@@ -22,7 +22,7 @@ import {
   presentReplyOptionsInputSchema,
   testRunLoopInputSchema,
 } from "../../../loops/conductor-tools.js";
-import { unresolvedIntentQuestions } from "../../../loops/intent-discovery.js";
+import { unresolvedIntentQuestion } from "../../../loops/intent-discovery.js";
 import { buildOutcomeBrief, computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
 import { summarizeOutcomeBriefForUser } from "../../../loops/outcome-brief-summary.js";
 import { discoverOutcomeBindings } from "../../../loops/binding-discovery.js";
@@ -326,25 +326,22 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       tools: {
         analyzeIntent: tool({
           description:
-            "Analyze the user's current intent before connector discovery and again after each clarification. Return zero questions when the request is clear. Include only material business questions; never ask implementation or API questions.",
+            "Parse what the user wants to achieve (outcome) and when it runs (trigger). Always check for the single most important ambiguity before proceeding — default to asking unless the user's request is completely explicit. Key things to probe: autonomy (send directly vs save as draft for review), scope (which items / filter), and destination (where results go). Example: 'draft personalized replies and send the email' is ambiguous — ask 'Should the agent send immediately or save as draft for your review?' with 2–4 options. Never ask about connectors, APIs, or implementation.",
           inputSchema: analyzeIntentInputSchema,
           execute: async (analysis) => {
-            const unresolved = unresolvedIntentQuestions(analysis, currentSpec!.intentDiscovery);
-            const nextQuestion = unresolved[0];
+            const nextQuestion = unresolvedIntentQuestion(analysis, currentSpec!.intentDiscovery);
             const askedQuestionIds = [...new Set([
               ...currentSpec!.intentDiscovery.askedQuestionIds,
               ...(nextQuestion ? [nextQuestion.id] : []),
             ])];
             currentSpec = applySpecPatch(currentSpec!, {
               intent: {
-                outcome: analysis.normalizedOutcome,
-                successCriteria: analysis.successCriteria,
+                outcome: analysis.outcome,
               },
               intentDiscovery: {
                 status: nextQuestion ? "needs_input" : "ready",
                 analysis,
                 decisions: analysis.decisions,
-                assumptions: analysis.assumptions,
                 askedQuestionIds,
                 confirmedBriefHash: undefined,
               },
@@ -362,7 +359,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                   questionId: nextQuestion.id,
                   question: nextQuestion.question,
                   options: nextQuestion.options,
-                  recommendedOptionIds: [nextQuestion.recommendedOptionId],
                   allowMultiple: false,
                   allowOther: true,
                 },
@@ -372,9 +368,17 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         patchLoopSpec: tool({
           description:
-            "Apply a partial update to the loop spec after analyzeIntent. Store each explicit connector on its matching taskBlueprint outcome. When discoverBindings returns suggestedBindings and suggestedComposioActions, patch both together. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome has an explicit connector.",
+            "Update the loop spec only after intent status is ready. Call once for taskBlueprint + agent + approval, then patch bindings/triggers/output as they are discovered. Do NOT call during intent clarification. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome has an explicit connector.",
           inputSchema: specPatchSchema,
           execute: async (patch) => {
+            const intentStatus = currentSpec!.intentDiscovery.status;
+            if (intentStatus === "pending" || intentStatus === "needs_input") {
+              return {
+                ok: false,
+                error: "Intent is not resolved yet. Finish analyzeIntent / askQuestion until status is ready before patching the loop spec.",
+                intentStatus,
+              };
+            }
             const gate = validateConnectorChoicesBeforeSpecPatch(currentSpec!, patch);
             if (!gate.ok) {
               return {
@@ -475,7 +479,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         }),
         discoverConnectorsForBlueprint: tool({
           description:
-            "Run after intent is ready. Returns one role-scoped connector group per pending blueprint outcome, with five ranked recommendations and the searchable app catalogue. Always call pickConnectorApp for each group; never auto-select a connected app.",
+            "Run after intent is ready and taskBlueprint is patched. Returns one role-scoped connector group per pending blueprint outcome with the top 5 ranked apps. Always call pickConnectorApp for each group; never auto-select a connected app.",
           inputSchema: discoverConnectorsForBlueprintInputSchema,
           execute: async (input) => discoverConnectorsForBlueprint(auth, {
             ...input,

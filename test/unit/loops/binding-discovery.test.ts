@@ -3,14 +3,13 @@ import test from "node:test";
 
 import {
   BINDING_AMBIGUITY_SCORE_GAP,
-  alignCapabilityWithAction,
   buildAmbiguityAskOptions,
   isAmbiguousBindingChoice,
   MIN_CAPABILITY_SCORE,
   outcomeFramedOptionLabel,
   pickRecommendedBinding,
+  scoreOutcomeRelevance,
   selectExplicitBindingAction,
-  suggestCapabilityLabel,
   type BindingCandidate,
 } from "../../../src/loops/binding-discovery.js";
 
@@ -65,11 +64,24 @@ function candidate(overrides: Partial<BindingCandidate> & Pick<BindingCandidate,
   };
 }
 
-test("suggestCapabilityLabel maps natural language outcomes to domain verbs", () => {
-  assert.equal(suggestCapabilityLabel("read incoming support emails", "gmail"), "email.read");
-  assert.equal(suggestCapabilityLabel("send replies to customers", "gmail"), "email.send");
-  assert.equal(suggestCapabilityLabel("apply priority labels to tickets", "gmail"), "email.labels");
-  assert.equal(suggestCapabilityLabel("create a draft for review", "gmail"), "email.draft");
+test("scoreOutcomeRelevance counts word overlap between outcome and action text", () => {
+  const score = scoreOutcomeRelevance(
+    "send reply to customer email",
+    "GMAIL_SEND_EMAIL",
+    "Send Email",
+    "Sends an email message",
+  );
+  assert.ok(score > 0, "expected at least one word overlap");
+});
+
+test("scoreOutcomeRelevance returns 0 when no words match", () => {
+  const score = scoreOutcomeRelevance(
+    "publish blog post",
+    "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
+    "Get Message",
+    "Fetch a Gmail message by its ID",
+  );
+  assert.equal(score, 0);
 });
 
 test("isAmbiguousBindingChoice is true when top scores are within the gap", () => {
@@ -120,23 +132,6 @@ test("outcomeFramedOptionLabel prefers business wording over raw slugs", () => {
   assert.match(
     outcomeFramedOptionLabel(candidate({ actionSlug: "GMAIL_SEND_EMAIL", score: 3 })),
     /send/i,
-  );
-});
-
-test("alignCapabilityWithAction maps email.read to email.get for fetch-by-id", () => {
-  const schema = {
-    type: "object",
-    required: ["message_id"],
-    properties: { message_id: { type: "string" } },
-  };
-  assert.equal(
-    alignCapabilityWithAction(
-      "email.read",
-      "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
-      schema,
-      "read incoming support emails",
-    ),
-    "email.get",
   );
 });
 

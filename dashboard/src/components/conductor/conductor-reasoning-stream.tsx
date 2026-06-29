@@ -12,13 +12,15 @@ export const CONDUCTOR_REASONING_STREAM_MAX_HEIGHT = 240;
 export const CONDUCTOR_REASONING_COLLAPSE_MS = 520;
 
 export function ConductorReasoningStream({
-  children,
+  liveContent,
+  settledContent,
   isStreaming,
   isMessageStreaming = false,
   textLength,
   maxHeight = CONDUCTOR_REASONING_STREAM_MAX_HEIGHT,
 }: {
-  children: ReactNode;
+  liveContent: ReactNode;
+  settledContent: ReactNode;
   isStreaming: boolean;
   /** When true, defer the collapse animation until the assistant turn finishes. */
   isMessageStreaming?: boolean;
@@ -28,6 +30,7 @@ export function ConductorReasoningStream({
   const [expanded, setExpanded] = useState(false);
   const [collapseOut, setCollapseOut] = useState(false);
   const [panelHidden, setPanelHidden] = useState(false);
+  const [collapseHeight, setCollapseHeight] = useState(maxHeight);
   const scrollRef = useRef<HTMLDivElement>(null);
   const hadLiveStreamRef = useRef(isStreaming);
 
@@ -37,13 +40,33 @@ export function ConductorReasoningStream({
       setCollapseOut(false);
       setPanelHidden(false);
       setExpanded(false);
+      setCollapseHeight(maxHeight);
       return;
     }
 
     if (hadLiveStreamRef.current && !isMessageStreaming) {
       setCollapseOut(true);
     }
-  }, [isMessageStreaming, isStreaming]);
+  }, [isMessageStreaming, isStreaming, maxHeight]);
+
+  useEffect(() => {
+    if (!collapseOut) {
+      setCollapseHeight(maxHeight);
+      return;
+    }
+
+    setCollapseHeight(maxHeight);
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => {
+        setCollapseHeight(0);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [collapseOut, maxHeight]);
 
   useLayoutEffect(() => {
     if (!isStreaming || expanded || collapseOut) return;
@@ -53,31 +76,31 @@ export function ConductorReasoningStream({
   }, [collapseOut, expanded, isStreaming, textLength]);
 
   const handleTransitionEnd = (event: React.TransitionEvent<HTMLDivElement>) => {
-    if (event.propertyName !== "max-height" || !collapseOut) return;
+    if (event.propertyName !== "max-height" || !collapseOut || collapseHeight !== 0) return;
     hadLiveStreamRef.current = false;
     setPanelHidden(true);
     setCollapseOut(false);
+    setCollapseHeight(maxHeight);
   };
 
   if (panelHidden && !isStreaming) {
     return (
       <div className="conductor-reasoning-stream__settled">
-        {children}
+        {settledContent}
       </div>
     );
   }
 
   const showLivePanel = isStreaming || collapseOut;
   const clamped = showLivePanel && !expanded;
-  const liveScrollStyle =
-    clamped && !collapseOut
-      ? {
-          maxHeight,
-          // Keep the live viewport tall while streaming so text-window trims
-          // (or brief segment gaps) never snap the panel down to a single line.
-          ...(isStreaming ? { minHeight: maxHeight } : {}),
-        }
-      : undefined;
+  const scrollContent = isStreaming || collapseOut || expanded ? liveContent : settledContent;
+  const liveScrollStyle = clamped
+    ? {
+        maxHeight: collapseOut ? collapseHeight : maxHeight,
+        minHeight: collapseOut ? 0 : maxHeight,
+        opacity: collapseOut && collapseHeight === 0 ? 0 : 1,
+      }
+    : undefined;
 
   return (
     <div
@@ -96,7 +119,7 @@ export function ConductorReasoningStream({
         onTransitionEnd={handleTransitionEnd}
         style={liveScrollStyle}
       >
-        {children}
+        {scrollContent}
       </div>
 
       {isStreaming ? (

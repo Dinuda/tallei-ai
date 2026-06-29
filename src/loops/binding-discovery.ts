@@ -69,25 +69,6 @@ export function isMaterialBusinessFork(candidates: BindingCandidate[]): boolean 
   return meaningfulInTop.length >= 2;
 }
 
-export function alignCapabilityWithAction(
-  capability: string,
-  actionSlug: string,
-  inputSchema: Record<string, unknown>,
-  outcomeDescription?: string,
-): string {
-  const domain = inferCapabilityDomain(outcomeDescription?.toLowerCase() ?? "", undefined)
-    || capability.split(".")[0]
-    || "tool";
-  const aligned = semanticCapabilityForAction(actionSlug, inputSchema, domain);
-  if (scoreSchemaFitForCapability(capability, inputSchema, actionSlug) >= 0) {
-    return capability;
-  }
-  if (scoreSchemaFitForCapability(aligned, inputSchema, actionSlug) >= 0) {
-    return aligned;
-  }
-  return aligned;
-}
-
 export function pickRecommendedBinding(
   candidates: BindingCandidate[],
   outcomeDescription: string,
@@ -141,6 +122,7 @@ export type BindingAskOption = {
 export type OutcomeDiscovery = {
   outcomeId: string;
   outcome: string;
+  /** Capability derived from the resolved action schema — not from keyword heuristics. */
   suggestedCapability: string;
   recommended: BindingCandidate | null;
   alternatives: BindingCandidate[];
@@ -148,72 +130,14 @@ export type OutcomeDiscovery = {
   askOptions: BindingAskOption[];
 };
 
-export function scoreToolForCapability(
-  capability: string,
-  actionSlug: string,
-  name: string,
-  description: string,
-): number {
-  const capTokens = capability.split(/[._]/).filter(Boolean).map((token) => token.toLowerCase());
-  const slugParts = actionSlug.toLowerCase().split(/[._]+/).filter(Boolean);
-  const haystack = `${actionSlug} ${name} ${description}`.toLowerCase();
-  return capTokens.reduce((score, token) => {
-    if (!token) return score;
-    if (haystack.includes(token)) return score + 1;
-    if (slugParts.some((part) => part.includes(token) || token.includes(part))) return score + 1;
-    return score;
-  }, 0);
-}
-
-export function looksLikeComposioActionSlug(value: string): boolean {
-  return /^[A-Z][A-Z0-9_]+$/.test(value.trim());
-}
-
-export function combinedCapabilityScore(
-  capability: string,
-  actionSlug: string,
-  name: string,
-  description: string,
-  inputSchema: Record<string, unknown>,
-): number {
-  return scoreToolForCapability(capability, actionSlug, name, description)
-    + scoreSchemaFitForCapability(capability, inputSchema);
-}
-
-/** Derive an outcome-based capability label for spec bindings from natural language. */
-export function suggestCapabilityLabel(outcomeDescription: string, toolkit?: string): string {
-  const lower = outcomeDescription.toLowerCase();
-  const domain = inferCapabilityDomain(lower, toolkit);
-
-  if (/(draft)/.test(lower)) return `${domain}.draft`;
-  if (/(label|tag|categor|priorit)/.test(lower)) return `${domain}.labels`;
-  if (/(send|reply|post|notify)/.test(lower)) return `${domain}.send`;
-  if (/(read|fetch|list|incoming|inbox|search|find|pull)/.test(lower)) return `${domain}.read`;
-  if (/(create|write|update|sync)/.test(lower)) return `${domain}.write`;
-  if (/(delete|remove)/.test(lower)) return `${domain}.delete`;
-
-  const slug = lower
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((word) => word.length > 2 && !STOP_WORDS.has(word))
-    .slice(0, 3)
-    .join(".");
-  return slug ? `${domain}.${slug}` : `${domain}.action`;
-}
-
-function inferCapabilityDomain(outcomeLower: string, toolkit?: string): string {
-  if (toolkit) {
-    const normalized = normalizeToolkitSlug(toolkit);
-    if (normalized.includes("gmail") || normalized.includes("outlook") || normalized.includes("mail")) return "email";
-    if (normalized.includes("slack")) return "chat";
-    if (normalized.includes("hubspot") || normalized.includes("salesforce")) return "crm";
-    if (normalized.includes("zendesk")) return "support";
-  }
-  if (/(email|mail|inbox|message\.received)/.test(outcomeLower)) return "email";
-  if (/(slack|channel|chat)/.test(outcomeLower)) return "chat";
-  if (/(ticket|support|zendesk)/.test(outcomeLower)) return "support";
-  if (/(crm|contact|deal|lead|hubspot|salesforce)/.test(outcomeLower)) return "crm";
-  if (/(calendar|meeting|event)/.test(outcomeLower)) return "calendar";
+/** Map a connector slug to its domain prefix for capability naming only. Not used for routing. */
+function inferDomainFromConnector(connectorSlug: string): string {
+  const slug = connectorSlug.toLowerCase();
+  if (slug.includes("gmail") || slug.includes("outlook") || slug.includes("mail")) return "email";
+  if (slug.includes("slack")) return "chat";
+  if (slug.includes("hubspot") || slug.includes("salesforce")) return "crm";
+  if (slug.includes("zendesk")) return "support";
+  if (slug.includes("google") && slug.includes("calendar")) return "calendar";
   return "tool";
 }
 
@@ -221,28 +145,23 @@ const STOP_WORDS = new Set([
   "the", "and", "for", "from", "with", "that", "this", "into", "when", "each", "agent", "loop",
 ]);
 
-function toCandidate(
-  capability: string,
-  action: { actionSlug: string; name: string; description: string; inputSchema?: Record<string, unknown> },
-  score: number,
-): BindingCandidate {
-  const inputSchema = action.inputSchema ?? {};
-  return {
-    capability,
-    actionSlug: action.actionSlug,
-    name: action.name,
-    description: action.description,
-    score,
-    schemaSummary: summarizeInputSchema(inputSchema),
-  };
-}
-
-function mergeCandidates(existing: Map<string, BindingCandidate>, candidate: BindingCandidate): void {
-  const key = candidate.actionSlug.toUpperCase();
-  const prior = existing.get(key);
-  if (!prior || candidate.score > prior.score) {
-    existing.set(key, candidate);
-  }
+/**
+ * Count how many non-trivial words from the outcome appear in the action's
+ * slug, name, and description. No predefined categories — pure text overlap.
+ */
+export function scoreOutcomeRelevance(
+  outcomeDescription: string,
+  actionSlug: string,
+  name: string,
+  description: string,
+): number {
+  const words = outcomeDescription
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
+  const haystack = `${actionSlug} ${name} ${description}`.toLowerCase();
+  return words.reduce((score, word) => (haystack.includes(word) ? score + 1 : score), 0);
 }
 
 export function isAmbiguousBindingChoice(candidates: BindingCandidate[]): boolean {
@@ -292,7 +211,7 @@ export function buildAmbiguityAskOptions(candidates: BindingCandidate[]): Bindin
     .filter((candidate) => candidate.score >= MIN_CAPABILITY_SCORE)
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
-  return ranked.map((candidate, index) => ({
+  return ranked.map((candidate) => ({
     id: `binding-${candidate.actionSlug.toLowerCase()}`,
     label: outcomeFramedOptionLabel(candidate),
     value: candidate.capability,
@@ -300,47 +219,75 @@ export function buildAmbiguityAskOptions(candidates: BindingCandidate[]): Bindin
   }));
 }
 
+export function looksLikeComposioActionSlug(value: string): boolean {
+  return /^[A-Z][A-Z0-9_]+$/.test(value.trim());
+}
+
+function mergeCandidates(existing: Map<string, BindingCandidate>, candidate: BindingCandidate): void {
+  const key = candidate.actionSlug.toUpperCase();
+  const prior = existing.get(key);
+  if (!prior || candidate.score > prior.score) {
+    existing.set(key, candidate);
+  }
+}
+
+function toCandidate(
+  capability: string,
+  action: { actionSlug: string; name: string; description: string; inputSchema?: Record<string, unknown> },
+  score: number,
+): BindingCandidate {
+  const inputSchema = action.inputSchema ?? {};
+  return {
+    capability,
+    actionSlug: action.actionSlug,
+    name: action.name,
+    description: action.description,
+    score,
+    schemaSummary: summarizeInputSchema(inputSchema),
+  };
+}
+
+/**
+ * Rank Composio actions for a connector against an outcome description.
+ * Scoring is purely schema-fit + word overlap between outcome text and action
+ * slug/name/description. No hardcoded capability labels or keyword routing.
+ */
 export async function rankBindingCandidates(
   connector: string,
   outcomeDescription: string,
-  capabilityLabel?: string,
 ): Promise<BindingCandidate[]> {
   const normalizedConnector = await resolveToolkitSlug(connector);
-  const capability = (capabilityLabel ?? suggestCapabilityLabel(outcomeDescription, normalizedConnector)).trim();
+  const domain = inferDomainFromConnector(normalizedConnector);
   const byAction = new Map<string, BindingCandidate>();
 
-  if (looksLikeComposioActionSlug(capability)) {
+  // If caller passed an exact Composio slug, treat it as a direct lookup.
+  if (looksLikeComposioActionSlug(outcomeDescription)) {
     const tools = await getAllTools(normalizedConnector);
-    const direct = tools.find((tool) => tool.actionSlug.toUpperCase() === capability.toUpperCase());
+    const direct = tools.find((tool) => tool.actionSlug.toUpperCase() === outcomeDescription.toUpperCase());
     if (direct) {
+      const inputSchema = direct.inputSchema ?? {};
+      const capability = semanticCapabilityForAction(direct.actionSlug, inputSchema, domain);
       mergeCandidates(byAction, toCandidate(capability, direct, MIN_CAPABILITY_SCORE + 4));
     }
   }
 
-  const searchQuery = `${normalizedConnector} ${outcomeDescription} ${capability.replace(/\./g, " ")}`.trim();
-  const searchResults = await searchTools(searchQuery, 24);
+  const searchResults = await searchTools(`${normalizedConnector} ${outcomeDescription}`, 24);
   for (const result of searchResults) {
     if (normalizeToolkitSlug(result.toolkit) !== normalizeToolkitSlug(normalizedConnector)) continue;
-    const score = combinedCapabilityScore(
-      capability,
-      result.actionSlug,
-      result.name,
-      result.description,
-      result.inputSchema ?? {},
-    );
+    const inputSchema = result.inputSchema ?? {};
+    const capability = semanticCapabilityForAction(result.actionSlug, inputSchema, domain);
+    const score = scoreSchemaFitForCapability(capability, inputSchema, result.actionSlug)
+      + scoreOutcomeRelevance(outcomeDescription, result.actionSlug, result.name, result.description);
     if (score <= 0) continue;
     mergeCandidates(byAction, toCandidate(capability, result, score));
   }
 
   const toolkitTools = await getAllTools(normalizedConnector);
   for (const tool of toolkitTools) {
-    const score = combinedCapabilityScore(
-      capability,
-      tool.actionSlug,
-      tool.name,
-      tool.description,
-      tool.inputSchema ?? {},
-    );
+    const inputSchema = tool.inputSchema ?? {};
+    const capability = semanticCapabilityForAction(tool.actionSlug, inputSchema, domain);
+    const score = scoreSchemaFitForCapability(capability, inputSchema, tool.actionSlug)
+      + scoreOutcomeRelevance(outcomeDescription, tool.actionSlug, tool.name, tool.description);
     if (score <= 0) continue;
     mergeCandidates(byAction, toCandidate(capability, tool, score));
   }
@@ -348,38 +295,6 @@ export async function rankBindingCandidates(
   return [...byAction.values()]
     .filter((candidate) => candidate.score >= MIN_CAPABILITY_SCORE)
     .sort((a, b) => b.score - a.score);
-}
-
-export async function resolveBindingAction(
-  connector: string,
-  capability: string,
-): Promise<{ actionSlug: string; inputSchema: Record<string, unknown>; toolkitVersion?: string } | null> {
-  const normalizedConnector = await resolveToolkitSlug(connector);
-  const capabilityTrimmed = capability.trim();
-
-  if (looksLikeComposioActionSlug(capabilityTrimmed)) {
-    const tools = await getAllTools(normalizedConnector);
-    const direct = tools.find((tool) => tool.actionSlug.toUpperCase() === capabilityTrimmed.toUpperCase());
-    if (direct) {
-      return {
-        actionSlug: direct.actionSlug,
-        inputSchema: direct.inputSchema ?? {},
-        ...(direct.toolkitVersion ? { toolkitVersion: direct.toolkitVersion } : {}),
-      };
-    }
-  }
-
-  const candidates = await rankBindingCandidates(connector, capabilityTrimmed, capabilityTrimmed);
-  const best = candidates[0];
-  if (!best) return null;
-
-  const toolkitTools = await getAllTools(normalizedConnector);
-  const matched = toolkitTools.find((tool) => tool.actionSlug.toUpperCase() === best.actionSlug.toUpperCase());
-  return {
-    actionSlug: best.actionSlug,
-    inputSchema: matched?.inputSchema ?? {},
-    ...(matched?.toolkitVersion ? { toolkitVersion: matched.toolkitVersion } : {}),
-  };
 }
 
 export type ExplicitActionResolution =
@@ -448,6 +363,39 @@ export async function resolveExplicitBindingAction(
   });
 }
 
+export async function resolveBindingAction(
+  connector: string,
+  capability: string,
+): Promise<{ actionSlug: string; inputSchema: Record<string, unknown>; toolkitVersion?: string } | null> {
+  const normalizedConnector = await resolveToolkitSlug(connector);
+  const capabilityTrimmed = capability.trim();
+
+  if (looksLikeComposioActionSlug(capabilityTrimmed)) {
+    const tools = await getAllTools(normalizedConnector);
+    const direct = tools.find((tool) => tool.actionSlug.toUpperCase() === capabilityTrimmed.toUpperCase());
+    if (direct) {
+      return {
+        actionSlug: direct.actionSlug,
+        inputSchema: direct.inputSchema ?? {},
+        ...(direct.toolkitVersion ? { toolkitVersion: direct.toolkitVersion } : {}),
+      };
+    }
+  }
+
+  // Search by capability as if it were a natural language description.
+  const candidates = await rankBindingCandidates(connector, capabilityTrimmed);
+  const best = candidates[0];
+  if (!best) return null;
+
+  const toolkitTools = await getAllTools(normalizedConnector);
+  const matched = toolkitTools.find((tool) => tool.actionSlug.toUpperCase() === best.actionSlug.toUpperCase());
+  return {
+    actionSlug: best.actionSlug,
+    inputSchema: matched?.inputSchema ?? {},
+    ...(matched?.toolkitVersion ? { toolkitVersion: matched.toolkitVersion } : {}),
+  };
+}
+
 export async function discoverOutcomeBindings(
   toolkit: string,
   outcomes: Array<{ id: string; description: string; role?: "trigger" | "source" | "transform" | "destination" }>,
@@ -459,14 +407,14 @@ export async function discoverOutcomeBindings(
   needsUserChoice: boolean;
 }> {
   const resolvedToolkit = await resolveToolkitSlug(toolkit);
+  const domain = inferDomainFromConnector(resolvedToolkit);
   const discoveries: OutcomeDiscovery[] = [];
   const suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string; role?: "trigger" | "source" | "transform" | "destination" }> = [];
   const suggestedComposioActions: ComposioActionInstruction[] = [];
   let needsUserChoice = false;
 
   for (const outcome of outcomes) {
-    const suggestedCapability = suggestCapabilityLabel(outcome.description, resolvedToolkit);
-    const candidates = await rankBindingCandidates(resolvedToolkit, outcome.description, suggestedCapability);
+    const candidates = await rankBindingCandidates(resolvedToolkit, outcome.description);
     const ambiguous = isMaterialBusinessFork(candidates);
     const recommended = ambiguous
       ? null
@@ -479,26 +427,30 @@ export async function discoverOutcomeBindings(
       const toolkitTools = await getAllTools(resolvedToolkit);
       const matched = toolkitTools.find((tool) => tool.actionSlug.toUpperCase() === recommended.actionSlug.toUpperCase());
       const inputSchema = matched?.inputSchema ?? {};
+      // Derive capability from the resolved action's actual schema — no keyword guessing.
+      const capability = semanticCapabilityForAction(recommended.actionSlug, inputSchema, domain);
       suggestedBindings.push({
         outcomeId: outcome.id,
         connector: resolvedToolkit,
-        capability: alignCapabilityWithAction(
-          recommended.capability,
-          recommended.actionSlug,
-          inputSchema,
-          outcome.description,
-        ),
+        capability,
         actionSlug: recommended.actionSlug,
         ...(outcome.role ? { role: outcome.role } : {}),
       });
       suggestedComposioActions.push(buildComposioActionInstruction({
         toolkit: resolvedToolkit,
         actionSlug: recommended.actionSlug,
-        label: recommended.capability,
+        label: capability,
         inputSchema,
         outputSchema: matched?.outputSchema,
       }));
     }
+
+    // suggestedCapability reflects what was resolved from the schema, not a keyword guess.
+    const suggestedCapability = recommended
+      ? semanticCapabilityForAction(recommended.actionSlug, recommended.schemaSummary.required.length > 0
+        ? { required: recommended.schemaSummary.required, properties: Object.fromEntries(recommended.schemaSummary.properties.map((p) => [p, {}])) }
+        : {}, domain)
+      : `${domain}.action`;
 
     discoveries.push({
       outcomeId: outcome.id,
