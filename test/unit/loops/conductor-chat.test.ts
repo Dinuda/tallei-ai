@@ -35,3 +35,55 @@ test("sanitizeConductorChatMessages strips OpenAI item ids from replayed history
   const reasoning = sanitized[0]?.parts[0] as { providerOptions?: { openai?: { itemId?: string } } };
   assert.equal(reasoning.providerOptions?.openai?.itemId, undefined);
 });
+
+test("sanitizeConductorChatMessages promotes interrupted UI prompts to input-available when input is complete", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-askQuestion",
+      toolCallId: "tool-1",
+      state: "input-streaming",
+      input: {
+        questionId: "trigger",
+        question: "How should this start?",
+        options: [
+          { id: "manual", label: "Manual", value: "manual" },
+          { id: "email", label: "Email", value: "email" },
+        ],
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  const sanitized = sanitizeConductorChatMessages(messages);
+  const toolPart = sanitized[0]?.parts[0] as { state?: string; output?: unknown };
+  assert.equal(toolPart.state, "input-available");
+  assert.equal(toolPart.output, undefined);
+});
+
+test("sanitizeConductorChatMessages turns interrupted background tools into output-error", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-discoverBindings",
+      toolCallId: "tool-1",
+      state: "input-streaming",
+      input: {
+        toolkit: "gmail",
+        outcomes: [{ id: "out-1", description: "Send email" }],
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  const sanitized = sanitizeConductorChatMessages(messages);
+  const toolPart = sanitized[0]?.parts[0] as {
+    state?: string;
+    output?: { error?: string; interrupted?: boolean };
+    errorText?: string;
+  };
+  assert.equal(toolPart.state, "output-error");
+  assert.equal(toolPart.output?.interrupted, true);
+  assert.match(toolPart.output?.error ?? "", /interrupted/i);
+  assert.match(toolPart.errorText ?? "", /interrupted/i);
+});

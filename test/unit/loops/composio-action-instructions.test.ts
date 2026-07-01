@@ -68,7 +68,7 @@ function basePlan(partial: Partial<CompiledPlan> = {}): CompiledPlan {
       useCase: "Items labeled",
     },
     output: { kind: "none" },
-    approval: { mode: "mixed", sensitiveCapabilities: [], defaultTimeoutHours: 24, onTimeout: "reject" },
+    approval: { mode: "mixed", sensitiveRoles: [], sensitiveCapabilities: [], defaultTimeoutHours: 24, onTimeout: "reject" },
     guardrails: { allowedTools: [], deniedTools: [], maxRetriesPerStep: 3, maxRunDurationMinutes: 60 },
     compiledAt: new Date().toISOString(),
     status: "draft",
@@ -234,4 +234,59 @@ test("resolveComposioActionArgs drops planner fields hidden by the modified sche
   assert.deepEqual(resolved.args, { query: "status:open", label_id: "label-urgent" });
   assert.equal("verbose" in resolved.args, false);
   assert.equal("limit" in resolved.args, false);
+});
+
+test("resolveComposioActionArgs carries any optional schema field from the trigger", () => {
+  const currentPlan = basePlan();
+  const tool = {
+    ...currentPlan.toolCatalog[0]!,
+    originalInputSchema: {
+      type: "object",
+      required: ["item_id", "label_id"],
+      properties: {
+        item_id: { type: "string" },
+        label_id: { type: "string" },
+        thread_id: { type: "string" },
+        priority: { type: "string" },
+      },
+    },
+  };
+  const resolved = resolveComposioActionArgs({
+    plan: currentPlan,
+    tool,
+    args: {},
+    eventPayload: { item_id: "item-123", thread_id: "thread-123", priority: "high", ignored: "value" },
+    toolResults: [],
+  });
+
+  assert.equal(resolved.args.thread_id, "thread-123");
+  assert.equal(resolved.args.priority, "high");
+  assert.equal(resolved.args.ignored, undefined);
+});
+
+test("resolveComposioActionArgs gives explicit optional planner args precedence over trigger values", () => {
+  const currentPlan = basePlan();
+  const schema = {
+    type: "object",
+    required: ["item_id", "label_id"],
+    properties: {
+      item_id: { type: "string" },
+      label_id: { type: "string" },
+      priority: { type: "string" },
+    },
+  };
+  const tool = {
+    ...currentPlan.toolCatalog[0]!,
+    inputSchema: schema,
+    originalInputSchema: schema,
+  };
+  const resolved = resolveComposioActionArgs({
+    plan: currentPlan,
+    tool,
+    args: { priority: "planner" },
+    eventPayload: { item_id: "item-123", priority: "trigger" },
+    toolResults: [],
+  });
+
+  assert.equal(resolved.args.priority, "planner");
 });

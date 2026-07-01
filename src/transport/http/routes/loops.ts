@@ -8,21 +8,25 @@ import {
   type UIMessage,
 } from "ai";
 
-import { repairStaleOutcomeBriefConfirms } from "../../../loops/conductor-chat.js";
+import { sanitizeConductorChatMessages } from "../../../loops/conductor-chat.js";
 import { applySpecPatch } from "../../../loops/patch.js";
 import {
   activateLoopInputSchema,
   analyzeIntentInputSchema,
   askQuestionInputSchema,
   compileLoopInputSchema,
+  connectToolkitInputSchema,
   confirmOutcomeBriefInputSchema,
   discoverBindingsInputSchema,
   discoverConnectorsForBlueprintInputSchema,
+  listActionsInputSchema,
+  listTriggersInputSchema,
+  listWorkspaceConnectorsInputSchema,
   pickConnectorAppInputSchema,
   presentReplyOptionsInputSchema,
+  reviewOutcomeBriefInputSchema,
   testRunLoopInputSchema,
 } from "../../../loops/conductor-tools.js";
-import { unresolvedIntentQuestion } from "../../../loops/intent-discovery.js";
 import { buildOutcomeBrief, computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
 import { summarizeOutcomeBriefForUser } from "../../../loops/outcome-brief-summary.js";
 import { discoverOutcomeBindings } from "../../../loops/binding-discovery.js";
@@ -46,11 +50,15 @@ import {
 } from "../../../loops/service.js";
 import { specPatchSchema } from "../../../loops/spec.js";
 import { saveSpecDraft, getLoopRun, getPendingApprovalForRun, listLoopRunSteps, getConductorChatMessages, saveConductorChatMessages, getBuildChatThreadMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus } from "../../../loops/store.js";
+import { buildIntentAnalysisSpecPatch } from "../../../loops/intent-analysis.js";
 import { composioWebhookDeliveryUrl, isLocalWebhookUrl } from "../../../integrations/composio/webhook-subscription.js";
 import { deriveLoopNameFromPrompt } from "../../../loops/loop-name.js";
+import {
+  CONDUCTOR_TOOL_DESCRIPTIONS,
+} from "../../../loops/conductor-chat-prompts.js";
 import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
 import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
-import { listAllToolkitsWithStatus, listWorkspaceConnectors, startToolkitAuthorization, getToolkitCatalogEntry } from "../../../integrations/composio/accounts.js";
+import { listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
 import { resolveEventTriggerPatch, eventTriggerResolutionHint } from "../../../loops/event-trigger.js";
 import { listComposioTriggerTypes } from "../../../integrations/composio/triggers.js";
 import { resolveToolkitSlug } from "../../../integrations/composio/auth.js";
@@ -290,7 +298,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       return;
     }
 
-    const chatMessages = repairStaleOutcomeBriefConfirms(body.messages);
+    const chatMessages = sanitizeConductorChatMessages(body.messages);
 
     let currentSpec = await getLatestSpec(auth, loopId);
     if (!currentSpec) {
@@ -298,9 +306,11 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       return;
     }
 
-    const workspace = await getWorkspace(auth, loop.workspaceId);
-    const initialConnectors = await listWorkspaceConnectors(auth);
-    const buildMeta = await getBuildChatThreadMeta(auth, loopId);
+    const [workspace, initialConnectors, buildMeta] = await Promise.all([
+      getWorkspace(auth, loop.workspaceId),
+      listWorkspaceConnectors(auth),
+      getBuildChatThreadMeta(auth, loopId),
+    ]);
     let latestCompiledPlanId = buildMeta?.compiledPlanId ?? null;
     let latestTestRunPass: { planId: string; runId: string } | null = null;
     if (latestCompiledPlanId) {
@@ -325,27 +335,11 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       messages: await convertToModelMessages(chatMessages),
       tools: {
         analyzeIntent: tool({
-          description:
-            "Parse what the user wants to achieve (outcome) and when it runs (trigger). Always check for the single most important ambiguity before proceeding — default to asking unless the user's request is completely explicit. Key things to probe: autonomy (send directly vs save as draft for review), scope (which items / filter), and destination (where results go). Example: 'draft personalized replies and send the email' is ambiguous — ask 'Should the agent send immediately or save as draft for your review?' with 2–4 options. Never ask about connectors, APIs, or implementation.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.analyzeIntent,
           inputSchema: analyzeIntentInputSchema,
           execute: async (analysis) => {
-            const nextQuestion = unresolvedIntentQuestion(analysis, currentSpec!.intentDiscovery);
-            const askedQuestionIds = [...new Set([
-              ...currentSpec!.intentDiscovery.askedQuestionIds,
-              ...(nextQuestion ? [nextQuestion.id] : []),
-            ])];
-            currentSpec = applySpecPatch(currentSpec!, {
-              intent: {
-                outcome: analysis.outcome,
-              },
-              intentDiscovery: {
-                status: nextQuestion ? "needs_input" : "ready",
-                analysis,
-                decisions: analysis.decisions,
-                askedQuestionIds,
-                confirmedBriefHash: undefined,
-              },
-            });
+            const { patch, nextQuestion } = buildIntentAnalysisSpecPatch(currentSpec!, analysis);
+            currentSpec = applySpecPatch(currentSpec!, patch);
             await saveSpecDraft(auth, loopId, currentSpec, "intent-analysis");
             latestCompiledPlanId = null;
             latestTestRunPass = null;
@@ -367,8 +361,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           },
         }),
         patchLoopSpec: tool({
-          description:
-            "Update the loop spec only after intent status is ready. Call once for taskBlueprint + agent + approval, then patch bindings/triggers/output as they are discovered. Do NOT call during intent clarification. Do NOT patch bindings, event triggers, or output.connector until every blueprint outcome has an explicit connector.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.patchLoopSpec,
           inputSchema: specPatchSchema,
           execute: async (patch) => {
             const intentStatus = currentSpec!.intentDiscovery.status;
@@ -427,59 +420,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
             };
           },
         }),
-        listConnectors: tool({
-          description:
-            "Read-only: workspace connector status snapshot. Do NOT use this to pick connectors — use discoverConnectorsForBlueprint + pickConnectorApp instead.",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const connectors = await listWorkspaceConnectors(auth);
-            return {
-              note: "Do not select connectors from this list. Run discoverConnectorsForBlueprint once, then pickConnectorApp.",
-              connectors: connectors.map((t) => ({
-                slug: t.slug,
-                name: t.name,
-                connected: t.connected,
-                connectedAccountId: t.connectedAccountId ?? null,
-              })),
-            };
-          },
-        }),
-        listConnectorCatalog: tool({
-          description:
-            "Composio toolkit metadata + workspace connection status. Pass toolkit to fetch ONE connector (preferred). Omit toolkit only when browsing the full catalogue. For event triggers use includeTriggers: true or listTriggers.",
-          inputSchema: z.object({
-            toolkit: z.string().min(1).optional(),
-            includeTriggers: z.boolean().optional(),
-          }),
-          execute: async ({ toolkit, includeTriggers }) => {
-            if (toolkit?.trim()) {
-              const entry = await getToolkitCatalogEntry(auth, toolkit, {
-                includeTriggers: includeTriggers ?? false,
-              });
-              return {
-                scoped: true,
-                toolkit: entry.toolkit,
-                ...(entry.triggers ? { triggers: entry.triggers } : {}),
-              };
-            }
-            const { toolkits, total } = await listAllToolkitsWithStatus(auth);
-            return {
-              scoped: false,
-              total,
-              toolkits: toolkits.map((row) => ({
-                slug: row.slug,
-                name: row.name,
-                description: row.description,
-                category: row.category ?? null,
-                connected: row.connected,
-                connectedAccountId: row.connectedAccountId ?? null,
-              })),
-            };
-          },
-        }),
         discoverConnectorsForBlueprint: tool({
-          description:
-            "Run after intent is ready and taskBlueprint is patched. Returns one role-scoped connector group per pending blueprint outcome with the top 5 ranked apps. Always call pickConnectorApp for each group; never auto-select a connected app.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.discoverConnectorsForBlueprint,
           inputSchema: discoverConnectorsForBlueprintInputSchema,
           execute: async (input) => discoverConnectorsForBlueprint(auth, {
             ...input,
@@ -489,18 +431,16 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           }),
         }),
         pickConnectorApp: tool({
-          description:
-            "Present the server-ranked app picker for one outcomeId and role after discoverConnectorsForBlueprint. This choice is always user-visible, even when one connected app ranks first.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.pickConnectorApp,
           inputSchema: pickConnectorAppInputSchema,
         }),
         presentReplyOptions: tool({
-          description:
-            "Show clickable quick-reply chips when asking the user to confirm a next step (compile, test, activate) or any yes/no choice. Call alongside your message with 2–4 short labels and the full user message each chip sends.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.presentReplyOptions,
           inputSchema: presentReplyOptionsInputSchema,
         }),
         listTriggers: tool({
-          description: "List available Composio event triggers for a toolkit",
-          inputSchema: z.object({ toolkit: z.string().min(1) }),
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.listTriggers,
+          inputSchema: listTriggersInputSchema,
           execute: async ({ toolkit }) => {
             const resolved = await resolveToolkitSlug(toolkit);
             const triggers = await listComposioTriggerTypes(resolved);
@@ -508,8 +448,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           },
         }),
         listActions: tool({
-          description: "List available Composio actions for a toolkit (for binding resolution)",
-          inputSchema: z.object({ toolkit: z.string().min(1) }),
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.listActions,
+          inputSchema: listActionsInputSchema,
           execute: async ({ toolkit }) => {
             const resolved = await resolveToolkitSlug(toolkit);
             const actions = await getAllTools(resolved);
@@ -524,17 +464,13 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           },
         }),
         discoverBindings: tool({
-          description:
-            "Search Composio and rank exact action bindings for inferred outcomes. Returns suggestedBindings and suggestedComposioActions — auto-apply both in patchLoopSpec. needsUserChoice is rare (send vs draft forks only); never ask about fetch/list API details.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.discoverBindings,
           inputSchema: discoverBindingsInputSchema,
           execute: async (input) => discoverOutcomeBindings(input.toolkit, input.outcomes),
         }),
         connectToolkit: tool({
-          description: "Start OAuth for a toolkit that is not connected yet",
-          inputSchema: z.object({
-            toolkit: z.string().min(1),
-            callbackUrl: z.string().url().optional(),
-          }),
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.connectToolkit,
+          inputSchema: connectToolkitInputSchema,
           execute: async ({ toolkit, callbackUrl }) => {
             const authorization = await startToolkitAuthorization(auth, toolkit, { callbackUrl });
             return {
@@ -545,15 +481,27 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
             };
           },
         }),
+        listWorkspaceConnectors: tool({
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.listWorkspaceConnectors,
+          inputSchema: listWorkspaceConnectorsInputSchema,
+          execute: async () => {
+            const connectors = await listWorkspaceConnectors(auth);
+            return {
+              connectors: connectors.map((connector) => ({
+                slug: connector.slug,
+                name: connector.name,
+                connected: Boolean(connector.connected),
+              })),
+            };
+          },
+        }),
         askQuestion: tool({
-          description:
-            "Ask the ONE highest-priority unresolved intent question returned by analyzeIntent. Also valid for later genuine business forks. Forbidden: connector choices, Composio slugs, fetch strategies, or API implementation details.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.askQuestion,
           inputSchema: askQuestionInputSchema,
         }),
         reviewOutcomeBrief: tool({
-          description:
-            "Build the authoritative outcome brief after intent, connectors, bindings, trigger, output, approvals, and guardrails are resolved. Returns technical brief + userSummary for the confirmation UI. Then call confirmOutcomeBrief with this exact output.",
-          inputSchema: z.object({}),
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.reviewOutcomeBrief,
+          inputSchema: reviewOutcomeBriefInputSchema,
           execute: async () => {
             const brief = buildOutcomeBrief(currentSpec!);
             const userSummary = await summarizeOutcomeBriefForUser({
@@ -568,13 +516,11 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           },
         }),
         confirmOutcomeBrief: tool({
-          description:
-            "Show the outcome brief for explicit confirmation or editing. Pass briefHash from reviewOutcomeBrief plus a plain-language question and 2–4 options. Each option value must be one of: confirm, change_outcome, change_trigger, change_connectors, change_approvals, other. On confirm, patch intentDiscovery.status=confirmed and confirmedBriefHash to this hash before compiling.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.confirmOutcomeBrief,
           inputSchema: confirmOutcomeBriefInputSchema,
         }),
         compileLoop: tool({
-          description:
-            "Freeze the current spec and compile it into a runnable plan. Call when the user confirms they are ready — resolve compile blockers first.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.compileLoop,
           inputSchema: compileLoopInputSchema,
           execute: async () => {
             const compiled = await compileLoop(auth, loopId);
@@ -595,8 +541,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           },
         }),
         testRunLoop: tool({
-          description:
-            "Run a fast simulated smoke test against the compiled plan before activation. Pass compiledPlanId (optional) and scenario only — do NOT pass maxSteps or timeoutMs.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.testRunLoop,
           inputSchema: testRunLoopInputSchema,
           execute: async ({ compiledPlanId, scenario }) => {
             const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;
@@ -615,8 +560,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           },
         }),
         activateLoop: tool({
-          description:
-            "Activate a compiled plan. Compile freezes the plan; activate provisions Composio webhooks and schedules. Requires a prior passing testRunLoop on the same plan.",
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.activateLoop,
           inputSchema: activateLoopInputSchema,
           execute: async ({ compiledPlanId }) => {
             const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;

@@ -141,7 +141,11 @@ export function findPendingPresentReplyOptions(
         input?: PresentReplyOptionsInput;
         output?: unknown;
       };
-      if (toolPart.state === "input-available" && toolPart.output == null && toolPart.input?.options?.length) {
+      const resumable =
+        toolPart.output == null
+        && (toolPart.state === "input-available" || toolPart.state === "input-streaming")
+        && (toolPart.input?.options?.length ?? 0) >= 2;
+      if (resumable) {
         return { toolCallId: toolPart.toolCallId, input: toolPart.input };
       }
     }

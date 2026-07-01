@@ -23,7 +23,7 @@ export function isToolkitSlugMasqueradingAsTrigger(source: string, composioSlug:
 }
 
 export function eventTriggerResolutionHint(source: string): string {
-  return `Call listTriggers({ toolkit: "${source}" }) or listConnectorCatalog({ toolkit: "${source}", includeTriggers: true }) and set composioSlug to the exact slug (e.g. GMAIL_NEW_GMAIL_MESSAGE). source is the connector; composioSlug is the Composio trigger type.`;
+  return `Call listTriggers({ toolkit: "${source}" }) and set composioSlug to the exact slug (e.g. GMAIL_NEW_GMAIL_MESSAGE). source is the connector; composioSlug is the Composio trigger type.`;
 }
 
 export function validateEventTriggerShape(source: string, composioSlug: string): string | null {

@@ -1,10 +1,11 @@
 "use client";
 
 import { ExternalLink, LoaderCircle, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { Button } from "@/components/ui/button";
+import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "@/lib/utils";
 
 type ConnectToolkitOutput = {
@@ -25,26 +26,61 @@ export function BuilderConnectToolkitCard({
 }) {
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
+  const verifyingRef = useRef(false);
 
   const redirectUrl = output?.redirectUrl;
+  const connectionRequestId = output?.connectionRequestId;
   const displayName = toolkit.charAt(0).toUpperCase() + toolkit.slice(1);
 
   const markConnected = useCallback(() => {
     setConnected(true);
     setBusy(false);
+    setVerifyError(null);
     setFallbackUrl(null);
+    verifyingRef.current = false;
   }, []);
+
+  const verifyConnection = useCallback(async () => {
+    if (verifyingRef.current) return;
+    if (!connectionRequestId) {
+      markConnected();
+      return;
+    }
+    verifyingRef.current = true;
+    setBusy(true);
+    setVerifyError(null);
+    try {
+      const res = await apiFetch(
+        `/api/connectors/authorize/${encodeURIComponent(connectionRequestId)}/verify`,
+        {
+          method: "POST",
+          body: JSON.stringify({ toolkit }),
+        },
+      );
+      const data = await res.json().catch(() => ({})) as { connected?: boolean; error?: string };
+      if (res.ok && data.connected) {
+        markConnected();
+        return;
+      }
+      setVerifyError(data.error ?? "Connection not confirmed yet. Complete authorization and try again.");
+    } catch {
+      setVerifyError("Could not verify the connection. Try again.");
+    } finally {
+      verifyingRef.current = false;
+    }
+  }, [connectionRequestId, markConnected, toolkit]);
 
   useEffect(() => {
     const onReturn = (event: MessageEvent) => {
       if (event.origin !== window.location.origin || event.data?.type !== "tallei-connector-complete") {
         return;
       }
-      markConnected();
+      void verifyConnection();
     };
     const onFocus = () => {
-      if (busy) markConnected();
+      if (busy) void verifyConnection();
     };
     window.addEventListener("message", onReturn);
     window.addEventListener("focus", onFocus);
@@ -52,7 +88,7 @@ export function BuilderConnectToolkitCard({
       window.removeEventListener("message", onReturn);
       window.removeEventListener("focus", onFocus);
     };
-  }, [busy, markConnected]);
+  }, [busy, verifyConnection]);
 
   if (connected) {
     return (
@@ -71,6 +107,7 @@ export function BuilderConnectToolkitCard({
   function openAuth() {
     if (!redirectUrl) return;
     setBusy(true);
+    setVerifyError(null);
     setFallbackUrl(null);
     const popup = window.open(redirectUrl, `connector-${toolkit}`, "popup=yes,width=560,height=760");
     if (!popup) setFallbackUrl(redirectUrl);
@@ -121,6 +158,9 @@ export function BuilderConnectToolkitCard({
           <span className={cn("text-xs text-[var(--builder-indigo-text-muted)]")}>
             Complete authorization in the popup window…
           </span>
+        ) : null}
+        {verifyError ? (
+          <span className={cn("text-xs text-red-600")}>{verifyError}</span>
         ) : null}
       </div>
     </div>

@@ -7,6 +7,7 @@ import { normalizeToolkitSlug } from "./auth.js";
 
 let composioClient: Composio<VercelProvider> | null = null;
 const toolkitVersionOverrides: Record<string, string> = {};
+const COMPOSIO_REQUEST_TIMEOUT_MS = 10_000;
 
 function readComposioToolkitVersionsFromEnv(): Record<string, string> {
   const versions: Record<string, string> = {};
@@ -33,6 +34,11 @@ export function rememberToolkitVersion(toolkit: string, version: string): void {
   if (toolkitVersionOverrides[slug] === normalizedVersion) return;
   toolkitVersionOverrides[slug] = normalizedVersion;
   composioClient = null;
+}
+
+export function getComposioToolkitVersion(toolkit: string): string {
+  const slug = normalizeToolkitSlug(toolkit);
+  return slug ? buildToolkitVersions()[slug] ?? "latest" : "latest";
 }
 
 export function getComposioEntityId(auth: AuthContext): string {
@@ -71,20 +77,53 @@ export function getComposioRawToolsClient(): ComposioRawToolsClient | null {
   return composio.client?.tools ?? null;
 }
 
+export async function withComposioTimeout<T>(
+  operation: Promise<T>,
+  label: string,
+  timeoutMs = COMPOSIO_REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function composioRequest<T>(input: {
   path: string;
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: Record<string, unknown>;
 }): Promise<T> {
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
-  const response = await fetch(`${config.composioBaseUrl}${input.path}`, {
-    method: input.method ?? "GET",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": config.composioApiKey,
-    },
-    body: input.body ? JSON.stringify(input.body) : undefined,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMPOSIO_REQUEST_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${config.composioBaseUrl}${input.path}`, {
+      method: input.method ?? "GET",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": config.composioApiKey,
+      },
+      body: input.body ? JSON.stringify(input.body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Composio request timed out after ${COMPOSIO_REQUEST_TIMEOUT_MS}ms: ${input.path}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await response.text();
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) {

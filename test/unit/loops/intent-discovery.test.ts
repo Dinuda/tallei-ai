@@ -3,60 +3,48 @@ import test from "node:test";
 
 import {
   intentAnalysisSchema,
-  unresolvedIntentQuestions,
+  unresolvedIntentQuestion,
 } from "../../../src/loops/intent-discovery.js";
 
-function analysis() {
-  return intentAnalysisSchema.parse({
-    normalizedOutcome: "Draft replies for urgent support email",
-    triggerOrCadence: "When a support email arrives",
-    requiredActions: ["Read email", "Classify urgency", "Draft reply"],
-    destinations: ["Support inbox"],
-    successCriteria: ["Urgent messages are identified"],
-    approvalAndSafety: ["Do not send without approval"],
-    assumptions: [],
-    decisions: [],
-    questions: [
-      {
-        id: "success-threshold",
-        question: "What counts as urgent?",
-        reason: "Changes classification behavior",
-        priority: "success",
-        options: [
-          { id: "strict", label: "Strict", value: "strict" },
-          { id: "broad", label: "Broad", value: "broad" },
-        ],
-        recommendedOptionId: "strict",
-      },
-      {
-        id: "send-policy",
-        question: "Should replies be drafted or sent?",
-        reason: "Changes external-write safety",
-        priority: "safety",
-        options: [
-          { id: "draft", label: "Draft", value: "draft" },
-          { id: "send", label: "Send", value: "send" },
-        ],
-        recommendedOptionId: "draft",
-      },
-    ],
+test("intent analysis schema accepts canonical approval payloads", () => {
+  const analysis = intentAnalysisSchema.parse({
+    outcome: "Send personalized replies to incoming support emails",
+    trigger: "When a new support email arrives",
+    approval: {
+      mode: "mixed",
+      sensitiveRoles: ["destination"],
+      sensitiveCapabilities: [],
+    },
+    decisions: [{
+      questionId: "approval-mode",
+      question: "Should replies send automatically or wait for your review?",
+      answer: "Review first",
+    }],
   });
-}
 
-test("intent discovery permits zero questions for complete intent", () => {
-  const complete = analysis();
-  complete.questions = [];
-  assert.deepEqual(unresolvedIntentQuestions(complete), []);
+  assert.equal(analysis.approval?.mode, "mixed");
+  assert.deepEqual(analysis.approval?.sensitiveRoles, ["destination"]);
 });
 
-test("intent discovery prioritizes safety and suppresses asked questions", () => {
-  const value = analysis();
-  assert.equal(unresolvedIntentQuestions(value)[0]?.id, "send-policy");
-  const remaining = unresolvedIntentQuestions(value, {
+test("unresolvedIntentQuestion suppresses already asked or answered questions", () => {
+  const analysis = intentAnalysisSchema.parse({
+    outcome: "Send personalized replies to incoming support emails",
+    trigger: "When a new support email arrives",
+    question: {
+      id: "approval-mode",
+      question: "Should replies send automatically or wait for your review?",
+      options: [
+        { id: "review", label: "Review first", value: "review_first" },
+        { id: "auto", label: "Send automatically", value: "auto" },
+      ],
+    },
+    decisions: [],
+  });
+
+  assert.equal(unresolvedIntentQuestion(analysis)?.id, "approval-mode");
+  assert.equal(unresolvedIntentQuestion(analysis, {
     status: "needs_input",
     decisions: [],
-    assumptions: [],
-    askedQuestionIds: ["send-policy"],
-  });
-  assert.deepEqual(remaining.map((question) => question.id), ["success-threshold"]);
+    askedQuestionIds: ["approval-mode"],
+  }), undefined);
 });

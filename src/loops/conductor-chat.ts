@@ -9,6 +9,101 @@ function resolveToolPartName(part: { type: string; toolName?: string }): string 
   return part.type.replace(/^tool-/, "");
 }
 
+const CONDUCTOR_UI_ONLY_TOOLS = new Set([
+  "askQuestion",
+  "pickConnectorApp",
+  "presentReplyOptions",
+  "confirmOutcomeBrief",
+]);
+
+const INTERRUPTED_TOOL_ERROR = "Interrupted before this step finished. Retry or continue from here.";
+
+function isToolPart(part: { type: string }): boolean {
+  return part.type.startsWith("tool-") || part.type === "dynamic-tool";
+}
+
+function hasQuestionOptionsInput(input: unknown): boolean {
+  if (!isRecord(input)) return false;
+  return typeof input.question === "string"
+    && input.question.trim().length > 0
+    && Array.isArray(input.options)
+    && input.options.length >= 2;
+}
+
+function hasPresentReplyOptionsInput(input: unknown): boolean {
+  return isRecord(input) && Array.isArray(input.options) && input.options.length >= 2;
+}
+
+function hasConfirmOutcomeBriefInput(input: unknown): boolean {
+  if (!isRecord(input)) return false;
+  return typeof input.briefHash === "string"
+    && input.briefHash.trim().length > 0
+    && hasQuestionOptionsInput(input);
+}
+
+function hasPickConnectorAppInput(input: unknown): boolean {
+  return isRecord(input)
+    && typeof input.outcomeId === "string"
+    && input.outcomeId.trim().length > 0;
+}
+
+function canResumeUiToolPart(toolName: string, input: unknown): boolean {
+  switch (toolName) {
+    case "askQuestion":
+      return hasQuestionOptionsInput(input);
+    case "pickConnectorApp":
+      return hasPickConnectorAppInput(input);
+    case "presentReplyOptions":
+      return hasPresentReplyOptionsInput(input);
+    case "confirmOutcomeBrief":
+      return hasConfirmOutcomeBriefInput(input);
+    default:
+      return false;
+  }
+}
+
+function repairInterruptedToolParts(messages: UIMessage[]): UIMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    const parts = message.parts ?? [];
+    let changed = false;
+    const nextParts = parts.map((part) => {
+      if (!isToolPart(part as { type: string })) return part;
+      const toolPart = part as {
+        type: string;
+        toolName?: string;
+        state?: string;
+        input?: unknown;
+        output?: unknown;
+        errorText?: string;
+      };
+      if (toolPart.state !== "input-streaming") return part;
+
+      const toolName = resolveToolPartName(toolPart);
+      changed = true;
+
+      if (CONDUCTOR_UI_ONLY_TOOLS.has(toolName) && canResumeUiToolPart(toolName, toolPart.input)) {
+        return {
+          ...part,
+          state: "input-available",
+        } as UIMessage["parts"][number];
+      }
+
+      return {
+        ...part,
+        state: "output-error",
+        output: {
+          error: INTERRUPTED_TOOL_ERROR,
+          interrupted: true,
+        },
+        errorText: INTERRUPTED_TOOL_ERROR,
+      } as UIMessage["parts"][number];
+    });
+
+    return changed ? { ...message, parts: nextParts } : message;
+  });
+}
+
 function findStaleConfirmOutcomeBriefCalls(messages: UIMessage[]): Array<{ toolCallId: string; briefHash: string }> {
   const stale: Array<{ toolCallId: string; briefHash: string }> = [];
 
@@ -138,11 +233,13 @@ function stripOpenAiItemIds(value: unknown): unknown {
 /** Remove provider item ids that break replay while keeping reasoning payloads. */
 export function sanitizeConductorChatMessages(messages: UIMessage[]): UIMessage[] {
   return repairStaleOutcomeBriefConfirms(
-    normalizeConductorChatMessages(
-      messages.map((message) => ({
-        ...message,
-        parts: (message.parts ?? []).map((part) => stripOpenAiItemIds(part) as UIMessage["parts"][number]),
-      })),
+    repairInterruptedToolParts(
+      normalizeConductorChatMessages(
+        messages.map((message) => ({
+          ...message,
+          parts: (message.parts ?? []).map((part) => stripOpenAiItemIds(part) as UIMessage["parts"][number]),
+        })),
+      ),
     ),
   );
 }

@@ -5,14 +5,12 @@ import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/compos
 import {
   buildPlannerCardForTool,
   fetchConnectorPlaybook,
-  isEmailGetActionSlug,
   PlaybookFetchError,
 } from "../integrations/composio/playbook.js";
 import { listToolkitsForUser } from "../integrations/composio/session.js";
 import {
-  resolveBindingAction,
+  rankBindingCandidates,
   resolveExplicitBindingAction,
-  looksLikeComposioActionSlug,
 } from "./binding-discovery.js";
 import {
   compiledPlanSchema,
@@ -30,7 +28,7 @@ import {
 } from "./store.js";
 import { validateAgenticCompileArtifacts } from "./plan-validators.js";
 import { validateEventTriggerForCompile } from "./event-trigger.js";
-import { scoreSchemaFitForCapability, semanticCapabilityForAction, summarizeInputSchema } from "./tool-schema.js";
+import { capabilityForAction, summarizeInputSchema, toolIdForAction } from "./tool-schema.js";
 import {
   attachComposioActionInstructionsToTools,
   validateComposioActionInstructions,
@@ -38,6 +36,7 @@ import {
 import { buildComposioToolContract } from "./composio-schema-contract.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
 import { getPendingConnectorOutcomes } from "./task-decomposition.js";
+import { approvalTargetsRole } from "./approval-policy.js";
 
 const MAX_AUTO_EXPAND_TOOLS = 2;
 
@@ -47,6 +46,21 @@ type ToolCatalogDraft = Omit<ResolvedTool, "plannerCard" | "behaviorInstructions
   outputSufficiencyPaths?: string[];
   bindingRole?: LoopSpec["bindings"][number]["role"];
 };
+
+export function isToolApprovalSensitive(
+  approval: Pick<LoopSpec["approval"], "sensitiveCapabilities" | "sensitiveRoles">,
+  input: {
+    capability?: string;
+    actionSlug?: string;
+    role?: LoopSpec["bindings"][number]["role"];
+  },
+): boolean {
+  return (
+    (input.capability ? approval.sensitiveCapabilities.includes(input.capability) : false)
+    || (input.actionSlug ? approval.sensitiveCapabilities.includes(input.actionSlug) : false)
+    || approvalTargetsRole(approval, input.role)
+  );
+}
 
 function attachPlaybookToCatalog(
   toolCatalog: ToolCatalogDraft[],
@@ -69,46 +83,46 @@ async function autoExpandRelatedTools(
   connectedBySlug: Map<string, { connectedAccountId?: string }>,
   playbookResult: Awaited<ReturnType<typeof fetchConnectorPlaybook>>,
 ): Promise<void> {
-  const hasEmailRead = toolCatalog.some((t) => t.capability === "email.read");
-  if (!hasEmailRead) return;
+  if (toolCatalog.length === 0) return;
 
   let autoAdded = 0;
   for (const relatedSlug of playbookResult.relatedSlugs) {
     if (autoAdded >= MAX_AUTO_EXPAND_TOOLS) break;
-    if (!isEmailGetActionSlug(relatedSlug)) continue;
-    if (toolCatalog.some((t) => t.actionSlug.toUpperCase() === relatedSlug.toUpperCase())) continue;
+    const normalized = relatedSlug.toUpperCase();
+    if (toolCatalog.some((t) => t.actionSlug.toUpperCase() === normalized)) continue;
 
-    const parent = toolCatalog.find((t) => t.capability === "email.read");
-    if (!parent) continue;
+    const entry = playbookResult.toolsBySlug.get(normalized);
+    if (!entry || Object.keys(entry.inputSchema).length === 0) continue;
 
+    const parent = toolCatalog.find((t) =>
+      normalizeToolkitSlug(t.connector) === normalizeToolkitSlug(entry.toolkit),
+    ) ?? toolCatalog[0]!;
     const toolkit = connectedBySlug.get(normalizeToolkitSlug(parent.connector));
     if (!toolkit?.connectedAccountId) continue;
 
-    const entry = playbookResult.toolsBySlug.get(relatedSlug.toUpperCase());
-    const resolved = await resolveBindingAction(parent.connector, "email.get");
-    const actionSlug = resolved?.actionSlug ?? relatedSlug;
-    if (toolCatalog.some((t) => t.actionSlug.toUpperCase() === actionSlug.toUpperCase())) continue;
-
-    const inputSchema = entry?.inputSchema ?? resolved?.inputSchema ?? {};
-    const capability = semanticCapabilityForAction(actionSlug, inputSchema, "email");
-    const sensitive = parsed.approval.sensitiveCapabilities.includes(capability);
+    const actionSlug = entry.actionSlug;
+    const capability = capabilityForAction(actionSlug);
+    const sensitive = isToolApprovalSensitive(parsed.approval, {
+      capability,
+      actionSlug,
+      role: "source",
+    });
 
     toolCatalog.push({
-      id: `tool_${capability.replace(/\./g, "_")}`,
+      id: toolIdForAction(actionSlug),
       capability,
       connector: parent.connector,
       actionSlug,
-      inputSchema,
-      ...(entry?.outputSchema ? { outputSchema: entry.outputSchema } : {}),
+      inputSchema: entry.inputSchema,
+      ...(entry.outputSchema ? { outputSchema: entry.outputSchema } : {}),
       plannerCard: buildPlannerCardForTool(
-        { actionSlug, capability, inputSchema, outputSchema: entry?.outputSchema },
+        { actionSlug, capability, inputSchema: entry.inputSchema, outputSchema: entry.outputSchema },
         entry,
         playbookResult.playbook,
       ),
       sensitive,
       credentialRef: toolkit.connectedAccountId,
       bindingRole: "source",
-      ...(resolved?.toolkitVersion ? { toolkitVersion: resolved.toolkitVersion } : {}),
     });
     autoAdded++;
   }
@@ -254,6 +268,12 @@ export async function compileLoopSpec(
       });
       continue;
     }
+    const outcomeDescription = parsed.taskBlueprint?.outcomes.find((outcome) =>
+      outcome.role === binding.role && outcome.selectedConnector
+        ? normalizeToolkitSlug(outcome.selectedConnector) === normalizeToolkitSlug(binding.connector)
+        : outcome.role === binding.role,
+    )?.description ?? binding.capability;
+
     const explicitResolution = binding.actionSlug
       ? await resolveExplicitBindingAction(binding.connector, binding.actionSlug)
       : null;
@@ -268,48 +288,54 @@ export async function compileLoopSpec(
       });
       continue;
     }
-    const resolved: {
+
+    let resolved: {
       actionSlug: string;
       inputSchema: Record<string, unknown>;
       outputSchema?: Record<string, unknown>;
       toolkitVersion?: string;
-    } | null = explicitResolution?.ok
-      ? explicitResolution.action
-      : await resolveBindingAction(binding.connector, binding.capability);
+    } | null = explicitResolution?.ok ? explicitResolution.action : null;
+
     if (!resolved) {
+      const candidates = await rankBindingCandidates(binding.connector, outcomeDescription);
+      const best = candidates[0];
+      if (!best) {
+        errors.push({
+          code: "UNSUPPORTED_CAPABILITY",
+          message: `No Composio action found for "${outcomeDescription}" on ${binding.connector}`,
+          binding: binding.capability,
+        });
+        continue;
+      }
+      resolved = {
+        actionSlug: best.actionSlug,
+        inputSchema: best.inputSchema,
+      };
+    }
+
+    const actionSlug = resolved.actionSlug;
+    const catalogCapability = capabilityForAction(actionSlug);
+    const sensitive = isToolApprovalSensitive(parsed.approval, {
+      capability: catalogCapability,
+      actionSlug: binding.capability,
+      role: binding.role,
+    });
+
+    if (Object.keys(resolved.inputSchema).length === 0) {
+      const required = summarizeInputSchema(resolved.inputSchema).required.join(", ") || "see Composio schema";
       errors.push({
-        code: "UNSUPPORTED_CAPABILITY",
-        message: `${binding.capability} not supported for ${binding.connector}`,
-        binding: binding.capability,
+        code: "SCHEMA_MISSING",
+        message: `${actionSlug} has no input schema — recompile after Composio schema fetch`,
+        binding: actionSlug,
       });
       continue;
     }
-    // Always derive the canonical capability from the resolved action's actual schema.
-    // If the binding already has an explicit actionSlug, trust it and skip schema-fit scoring.
-    const domain = looksLikeComposioActionSlug(binding.capability)
-      ? (binding.capability.split("_")[0]?.toLowerCase() || "tool")
-      : (binding.capability.split(".")[0] || "tool");
-    const derivedCapability = semanticCapabilityForAction(resolved.actionSlug, resolved.inputSchema, domain);
-    const catalogCapability = binding.actionSlug
-      ? binding.capability  // explicit binding — preserve what the conductor set
-      : derivedCapability;  // implicit binding — always use schema-derived label
-    const schemaFit = scoreSchemaFitForCapability(catalogCapability, resolved.inputSchema, resolved.actionSlug);
-    if (!binding.actionSlug && schemaFit < 0) {
-      const required = summarizeInputSchema(resolved.inputSchema).required.join(", ") || "specific fields";
-      errors.push({
-        code: "SCHEMA_MISMATCH",
-        message: `${binding.capability} does not match ${resolved.actionSlug} (requires: ${required}). Use capability ${derivedCapability}.`,
-        binding: binding.capability,
-      });
-      continue;
-    }
-    const sensitive = parsed.approval.sensitiveCapabilities.includes(catalogCapability);
 
     toolCatalog.push({
-      id: `tool_${catalogCapability.replace(/\./g, "_")}`,
+      id: toolIdForAction(actionSlug),
       capability: catalogCapability,
       connector: binding.connector,
-      actionSlug: resolved.actionSlug,
+      actionSlug,
       inputSchema: resolved.inputSchema,
       ...(resolved.outputSchema ? { outputSchema: resolved.outputSchema } : {}),
       sensitive,

@@ -1,9 +1,27 @@
 import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../../domain/auth/index.js";
+import {
+  deleteTtlCacheEntry,
+  getTtlCacheEntry,
+  setTtlCacheEntry,
+  type TtlCacheStore,
+} from "../../infrastructure/cache/ttl-cache.js";
 import { pool } from "../../infrastructure/db/index.js";
 import { requireLoopAdmin } from "./access.js";
 import type { WorkspaceKind, WorkspaceView } from "./types.js";
+
+const WORKSPACE_CACHE_TTL_MS = 5 * 60_000;
+const WORKSPACE_CACHE_MAX_SIZE = 200;
+const workspaceCache: TtlCacheStore<WorkspaceView> = new Map();
+
+function workspaceCacheKey(auth: AuthContext, workspaceId: string): string {
+  return `workspace:${auth.tenantId}:${auth.userId}:${workspaceId}`;
+}
+
+function invalidateWorkspaceCache(auth: AuthContext, workspaceId: string): void {
+  deleteTtlCacheEntry(workspaceCache, workspaceCacheKey(auth, workspaceId));
+}
 
 function slugifyName(name: string): string {
   const base = name
@@ -151,7 +169,12 @@ export async function listWorkspaces(auth: AuthContext): Promise<WorkspaceView[]
 
 export async function getWorkspace(auth: AuthContext, workspaceId: string): Promise<WorkspaceView> {
   await requireLoopAdmin(auth);
-  return assertWorkspaceAccess(auth, workspaceId);
+  const key = workspaceCacheKey(auth, workspaceId);
+  const cached = getTtlCacheEntry(workspaceCache, key);
+  if (cached) return cached;
+  const workspace = await assertWorkspaceAccess(auth, workspaceId);
+  setTtlCacheEntry(workspaceCache, key, workspace, WORKSPACE_CACHE_TTL_MS, WORKSPACE_CACHE_MAX_SIZE);
+  return workspace;
 }
 
 export async function createWorkspace(auth: AuthContext, input: {
@@ -255,7 +278,9 @@ export async function updateWorkspace(auth: AuthContext, workspaceId: string, in
       input.settings ? JSON.stringify(input.settings) : null,
     ]
   );
-  return mapWorkspace(result.rows[0]);
+  const updated = mapWorkspace(result.rows[0]);
+  invalidateWorkspaceCache(auth, workspaceId);
+  return updated;
 }
 
 export async function activateWorkspace(auth: AuthContext, workspaceId: string): Promise<{ workspaceId: string }> {
@@ -276,6 +301,7 @@ export async function deleteWorkspace(auth: AuthContext, workspaceId: string): P
   await requireLoopAdmin(auth);
   const workspace = await assertWorkspaceAccess(auth, workspaceId);
   if (workspace.kind === "personal") throw new Error("The Personal workspace cannot be deleted");
+  invalidateWorkspaceCache(auth, workspaceId);
   await pool.query(
     `DELETE FROM loop_workspaces
      WHERE id = $1

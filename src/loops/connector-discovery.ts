@@ -1,10 +1,12 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { listAllToolkitsWithStatus } from "../integrations/composio/accounts.js";
+import type { CatalogToolkitView } from "../integrations/composio/accounts.js";
 import { normalizeToolkitSlug } from "../integrations/composio/auth.js";
 import { searchTools } from "../integrations/composio/tools.js";
+import type { ComposioToolSearchResult } from "../integrations/composio/types.js";
 import { scoreOutcomeRelevance } from "./binding-discovery.js";
 import type { BindingAskOption } from "./binding-discovery.js";
-import { scoreSchemaFitForCapability, semanticCapabilityForAction } from "./tool-schema.js";
+import { scoreSchemaFieldRelevance } from "./tool-schema.js";
 import type { OutcomeRole, TaskBlueprint } from "./spec.js";
 
 export const CONNECTED_TOOLKIT_BOOST = 4;
@@ -46,6 +48,35 @@ export type BlueprintConnectorDiscoveryResult = {
   }>;
   pickerKind: "app";
 };
+
+type ConnectorDiscoveryDependencies = {
+  loadToolkits: typeof listAllToolkitsWithStatus;
+  searchTools: typeof searchTools;
+  now: () => number;
+  logTiming: (timing: ConnectorDiscoveryTiming) => void;
+};
+
+type ConnectorDiscoveryTiming = {
+  catalogueMs: number;
+  actionSearchMs: number;
+  searchCount: number;
+  outcomeCount: number;
+};
+
+const defaultDiscoveryDependencies: ConnectorDiscoveryDependencies = {
+  loadToolkits: listAllToolkitsWithStatus,
+  searchTools,
+  now: Date.now,
+  logTiming: (timing) => {
+    console.info("[loops/connector-discovery] timing", timing);
+  },
+};
+
+function resolveDiscoveryDependencies(
+  overrides?: Partial<ConnectorDiscoveryDependencies>,
+): ConnectorDiscoveryDependencies {
+  return { ...defaultDiscoveryDependencies, ...overrides };
+}
 
 export function inferCatalogToolkitHints(
   outcomeDescription: string,
@@ -111,6 +142,14 @@ function roleSearchHints(role: string): string {
     default:
       return "";
   }
+}
+
+function connectorSearchQuery(outcomeDescription: string, role: string): string {
+  return `${outcomeDescription} ${roleSearchHints(role)}`.trim().replace(/\s+/g, " ");
+}
+
+function connectorSearchKey(query: string): string {
+  return query.toLowerCase();
 }
 
 function buildRationale(
@@ -183,16 +222,43 @@ export async function discoverConnectorsForBlueprint(
     outcomes: Array<{ id: string; role: OutcomeRole; description: string }>;
     previousConnectors?: string[];
   },
+  dependencyOverrides?: Partial<ConnectorDiscoveryDependencies>,
 ): Promise<BlueprintConnectorDiscoveryResult> {
   const pending = input.outcomes.filter((outcome) => outcome.role !== "transform");
+  if (pending.length === 0) return { groups: [], pickerKind: "app" };
+
+  const dependencies = resolveDiscoveryDependencies(dependencyOverrides);
+  const catalogueStartedAt = dependencies.now();
+  const { toolkits } = await dependencies.loadToolkits(auth);
+  const catalogueMs = dependencies.now() - catalogueStartedAt;
+
+  const searches = new Map<string, Promise<ComposioToolSearchResult[]>>();
+  const actionSearchStartedAt = dependencies.now();
+  const searchForOutcome = (outcome: (typeof pending)[number]): Promise<ComposioToolSearchResult[]> => {
+    const query = connectorSearchQuery(outcome.description, outcome.role);
+    const key = connectorSearchKey(query);
+    const existing = searches.get(key);
+    if (existing) return existing;
+    const search = dependencies.searchTools(query, 32);
+    searches.set(key, search);
+    return search;
+  };
 
   const discoveries = await Promise.all(
-    pending.map(async (outcome) => discoverConnectorsForOutcome(auth, {
+    pending.map(async (outcome) => rankConnectorsForOutcome({
       outcomeDescription: outcome.description,
       role: outcome.role,
       limit: TOP_CONNECTOR_RECOMMENDATIONS,
+      toolkits,
+      searchResults: await searchForOutcome(outcome),
     })),
   );
+  dependencies.logTiming({
+    catalogueMs,
+    actionSearchMs: dependencies.now() - actionSearchStartedAt,
+    searchCount: searches.size,
+    outcomeCount: pending.length,
+  });
 
   return {
     groups: discoveries.map((discovery, index) => {
@@ -233,20 +299,35 @@ export async function discoverConnectorsForOutcome(
     role: "trigger" | "source" | "transform" | "destination";
     limit?: number;
   },
+  dependencyOverrides?: Partial<ConnectorDiscoveryDependencies>,
 ): Promise<ConnectorDiscoveryResult> {
-  const limit = Math.max(2, input.limit ?? TOP_CONNECTOR_RECOMMENDATIONS);
-  const { toolkits } = await listAllToolkitsWithStatus(auth);
-  const searchQuery = `${input.outcomeDescription} ${roleSearchHints(input.role)}`.trim();
+  const dependencies = resolveDiscoveryDependencies(dependencyOverrides);
+  const { toolkits } = await dependencies.loadToolkits(auth);
+  const searchQuery = connectorSearchQuery(input.outcomeDescription, input.role);
+  const searchResults = await dependencies.searchTools(searchQuery, 32);
+  return rankConnectorsForOutcome({ ...input, toolkits, searchResults });
+}
 
-  const searchResults = await searchTools(searchQuery, 32);
+function rankConnectorsForOutcome(input: {
+  outcomeDescription: string;
+  role: "trigger" | "source" | "transform" | "destination";
+  limit?: number;
+  toolkits: CatalogToolkitView[];
+  searchResults: ComposioToolSearchResult[];
+}): ConnectorDiscoveryResult {
+  const limit = Math.max(2, input.limit ?? TOP_CONNECTOR_RECOMMENDATIONS);
   const scoresByToolkit = new Map<string, { score: number; actions: Array<{ actionSlug: string; name: string }> }>();
 
-  for (const result of searchResults) {
+  for (const result of input.searchResults) {
     const slug = normalizeToolkitSlug(result.toolkit);
     const inputSchema = result.inputSchema ?? {};
-    const derivedCapability = semanticCapabilityForAction(result.actionSlug, inputSchema, slug.split("_")[0] ?? "tool");
-    const actionScore = scoreSchemaFitForCapability(derivedCapability, inputSchema, result.actionSlug)
-      + scoreOutcomeRelevance(input.outcomeDescription, result.actionSlug, result.name, result.description);
+    const actionScore = scoreOutcomeRelevance(
+      input.outcomeDescription,
+      result.actionSlug,
+      result.name,
+      result.description,
+      inputSchema,
+    ) + scoreSchemaFieldRelevance(input.outcomeDescription, inputSchema);
     if (actionScore <= 0) continue;
     const existing = scoresByToolkit.get(slug);
     const row = existing ?? { score: 0, actions: [] };
@@ -258,14 +339,14 @@ export async function discoverConnectorsForOutcome(
   }
 
   ensureHintCandidates(
-    toolkits,
+    input.toolkits,
     inferCatalogToolkitHints(input.outcomeDescription, input.role),
     scoresByToolkit,
     input.role,
   );
 
   const candidates: ConnectorCandidate[] = [];
-  for (const toolkit of toolkits) {
+  for (const toolkit of input.toolkits) {
     const slug = normalizeToolkitSlug(toolkit.slug);
     const match = scoresByToolkit.get(slug);
     const baseScore = match?.score ?? 0;
@@ -284,7 +365,7 @@ export async function discoverConnectorsForOutcome(
   }
 
   if (candidates.length === 0 && input.role === "trigger") {
-    for (const toolkit of toolkits.filter((row) => row.connected).slice(0, 6)) {
+    for (const toolkit of input.toolkits.filter((row) => row.connected).slice(0, 6)) {
       candidates.push({
         connector: toolkit.slug,
         name: toolkit.name,

@@ -62,12 +62,14 @@ function valueAtPath(value: unknown, path: string): unknown {
 
 function hasSufficientPriorOutput(
   tool: CompiledPlan["toolCatalog"][number],
+  args: Record<string, unknown>,
   toolResults: AgentRunState["toolResults"],
 ): boolean {
   const paths = tool.outputSufficiencyPaths ?? [];
   if (paths.length === 0) return false;
   return toolResults.some((entry) => {
     if (entry.toolId !== tool.id) return false;
+    if (!entry.args || canonicalJson(entry.args) !== canonicalJson(args)) return false;
     const row = entry.result && typeof entry.result === "object"
       ? entry.result as Record<string, unknown>
       : {};
@@ -81,6 +83,17 @@ function hasSufficientPriorOutput(
   });
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 function outputAlreadyAvailableResult(tool: CompiledPlan["toolCatalog"][number]): unknown {
   return {
     successful: false,
@@ -92,6 +105,25 @@ function outputAlreadyAvailableResult(tool: CompiledPlan["toolCatalog"][number])
       message: "A prior successful result already satisfies this action's output contract.",
     },
   };
+}
+
+function toolResultFailed(result: unknown): boolean {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+  const row = result as Record<string, unknown>;
+  return row.successful === false || Boolean(row.error);
+}
+
+function recordToolResult(
+  state: AgentRunState,
+  toolId: string,
+  result: unknown,
+  args?: Record<string, unknown>,
+  countFailure = true,
+): void {
+  state.toolResults.push({ toolId, result, ...(args ? { args } : {}) });
+  if (countFailure && toolResultFailed(result)) {
+    state.failuresByToolId[toolId] = (state.failuresByToolId[toolId] ?? 0) + 1;
+  }
 }
 
 export async function pollApprovalDecision(
@@ -120,6 +152,7 @@ export type AgenticRunDeps = {
     state: AgentRunState;
     eventPayload?: unknown;
     triggerSlug?: string;
+    exhaustedToolIds?: string[];
   }) => Promise<PlannerDecision>;
   executeTool: (input: {
     auth: AuthContext;
@@ -165,6 +198,7 @@ export async function runAgenticLoop(
     stepIndex: 0,
     messages: [],
     toolResults: [],
+    failuresByToolId: {},
     totalCostUsd: 0,
     status: "running",
   };
@@ -172,11 +206,15 @@ export async function runAgenticLoop(
   const workflowId = options?.temporalWorkflowId ?? "";
 
   while (state.stepIndex < maxSteps) {
+    const exhaustedToolIds = Object.entries(state.failuresByToolId)
+      .filter(([, failures]) => failures >= Math.max(1, plan.guardrails.maxRetriesPerStep))
+      .map(([toolId]) => toolId);
     const decision = await deps.planner({
       auth,
       plan,
       runId: input.runId,
       state,
+      exhaustedToolIds,
       ...(input.eventPayload !== undefined ? { eventPayload: input.eventPayload } : {}),
       ...(input.triggerKind === "event" && plan.trigger.kind === "event"
         ? { triggerSlug: plan.trigger.composioSlug }
@@ -210,16 +248,13 @@ export async function runAgenticLoop(
       toolResults: state.toolResults,
     });
     if (resolvedArgs.missing.length > 0) {
-      state.toolResults.push({
-        toolId: tool.id,
-        result: missingInputSourceResult(tool, resolvedArgs.missing),
-      });
+      recordToolResult(state, tool.id, missingInputSourceResult(tool, resolvedArgs.missing), resolvedArgs.args);
       state.stepIndex += 1;
       continue;
     }
 
-    if (hasSufficientPriorOutput(tool, state.toolResults)) {
-      state.toolResults.push({ toolId: tool.id, result: outputAlreadyAvailableResult(tool) });
+    if (hasSufficientPriorOutput(tool, resolvedArgs.args, state.toolResults)) {
+      recordToolResult(state, tool.id, outputAlreadyAvailableResult(tool), resolvedArgs.args, false);
       state.stepIndex += 1;
       continue;
     }
@@ -264,10 +299,7 @@ export async function runAgenticLoop(
           toolResults: state.toolResults,
         });
         if (approvedArgs.missing.length > 0) {
-          state.toolResults.push({
-            toolId: tool.id,
-            result: missingInputSourceResult(tool, approvedArgs.missing),
-          });
+          recordToolResult(state, tool.id, missingInputSourceResult(tool, approvedArgs.missing), approvedArgs.args);
           state.stepIndex += 1;
           state.status = "running";
           continue;
@@ -275,6 +307,12 @@ export async function runAgenticLoop(
         finalArgs = approvedArgs.args;
       }
       state.status = "running";
+    }
+
+    if (hasSufficientPriorOutput(tool, finalArgs, state.toolResults)) {
+      recordToolResult(state, tool.id, outputAlreadyAvailableResult(tool), finalArgs, false);
+      state.stepIndex += 1;
+      continue;
     }
 
     const result = await deps.executeTool({
@@ -285,8 +323,21 @@ export async function runAgenticLoop(
       args: finalArgs,
     });
 
-    state.toolResults.push({ toolId: tool.id, result });
+    recordToolResult(state, tool.id, result, finalArgs);
     state.stepIndex += 1;
+
+    if (!toolResultFailed(result) && decision.finishOnSuccess) {
+      const summary = decision.completionSummary ?? `Completed: ${tool.actionSlug}`;
+      await deps.deliverOutput({
+        auth,
+        plan,
+        runId: input.runId,
+        loopId: input.loopId,
+        state,
+        summary,
+      });
+      return { status: "completed", summary };
+    }
   }
 
   await deps.failRun({ runId: input.runId, error: "max_steps_exceeded" });

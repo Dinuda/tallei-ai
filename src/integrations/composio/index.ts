@@ -44,6 +44,7 @@ export {
   startToolkitAuthorization,
   verifyToolkitConnection,
   disconnectToolkit,
+  invalidateWorkspaceConnectorsCache,
   resolveConnectedAccountId,
   listConnectedToolkitsForAuth,
 } from "./accounts.js";
@@ -64,7 +65,6 @@ export { executeComposioAction, resolveToolkitVersion } from "./execute.js";
 export {
   fetchConnectorPlaybook,
   buildPlannerCardForTool,
-  isEmailGetActionSlug,
   parseSearchResponse,
 } from "./playbook.js";
 export type { FetchConnectorPlaybookResult, PlaybookToolEntry } from "./playbook.js";

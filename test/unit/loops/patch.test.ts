@@ -10,6 +10,13 @@ test("seedSpecFromTemplate research_digest fills intent", () => {
   assert.ok(spec.intent.goal.includes("digest"));
 });
 
+test("seedSpecFromTemplate uses mixed destination approval for review-first loops", () => {
+  const workspaceId = "00000000-0000-4000-8000-000000000001";
+  const spec = seedSpecFromTemplate(workspaceId, "support_auto_reply");
+  assert.equal(spec.approval.mode, "mixed");
+  assert.deepEqual(spec.approval.sensitiveRoles, ["destination"]);
+});
+
 test("applySpecPatch updates bindings", () => {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   const base = seedSpecFromTemplate(workspaceId, "research_digest");

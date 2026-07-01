@@ -20,6 +20,7 @@ export async function plannerActivity(input: {
   state: AgentRunState;
   eventPayload?: unknown;
   triggerSlug?: string;
+  exhaustedToolIds?: string[];
 }): Promise<Awaited<ReturnType<typeof runPlannerDecision>>> {
   assertAgenticCompiledPlan(input.plan);
 
@@ -50,6 +51,7 @@ export async function plannerActivity(input: {
     stepHistory: input.state.toolResults,
     workspaceMemory: memoryHits.map((m) => m.text),
     connectorPlaybook: input.plan.connectorPlaybook,
+    exhaustedToolIds: input.exhaustedToolIds,
     ...(triggerContext ? { triggerContext } : {}),
   });
 

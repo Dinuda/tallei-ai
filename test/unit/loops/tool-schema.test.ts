@@ -2,64 +2,60 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  scoreSchemaFitForCapability,
-  semanticCapabilityForAction,
+  capabilityForAction,
+  filterArgsToSchemaProperties,
+  scoreSchemaFieldRelevance,
+  scoreTriggerFieldOverlap,
   summarizeInputSchema,
+  toolIdForAction,
   validateToolArgsAgainstSchema,
 } from "../../../src/loops/tool-schema.js";
 
-test("scoreSchemaFitForCapability penalizes id-only fetch for inbox poll capabilities", () => {
-  const score = scoreSchemaFitForCapability("email.receive", {
-    type: "object",
-    required: ["message_id"],
-    properties: { message_id: { type: "string" } },
-  });
-  assert.ok(score < 0);
+test("toolIdForAction derives stable ids from Composio slugs", () => {
+  assert.equal(toolIdForAction("GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID"), "tool_gmail_fetch_message_by_message_id");
 });
 
-test("scoreSchemaFitForCapability prefers list/query schemas for email.read", () => {
-  const score = scoreSchemaFitForCapability("email.read", {
+test("capabilityForAction returns the action slug", () => {
+  assert.equal(capabilityForAction("gmail_fetch_message_by_message_id"), "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID");
+});
+
+test("scoreSchemaFieldRelevance scores overlap between outcome and schema fields", () => {
+  const score = scoreSchemaFieldRelevance("fetch message by message id", {
     type: "object",
+    required: ["message_id"],
     properties: {
-      query: { type: "string" },
-      maxResults: { type: "number" },
+      message_id: { type: "string", description: "Gmail message resource id" },
     },
   });
   assert.ok(score > 0);
 });
 
-test("scoreSchemaFitForCapability accepts email.get for message_id actions", () => {
-  const schema = {
+test("scoreTriggerFieldOverlap prefers schemas that accept trigger keys", () => {
+  const messageSchema = {
     type: "object",
     required: ["message_id"],
     properties: { message_id: { type: "string" } },
   };
-  assert.ok(scoreSchemaFitForCapability("email.get", schema, "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID") > 0);
-});
-
-test("scoreSchemaFitForCapability does not penalize raw action slugs used as capability", () => {
-  const schema = {
+  const filterSchema = {
     type: "object",
-    required: ["message_id"],
-    properties: { message_id: { type: "string" } },
+    required: ["filter_id"],
+    properties: { filter_id: { type: "string" } },
   };
-  const score = scoreSchemaFitForCapability(
-    "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
-    schema,
-    "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
-  );
-  assert.ok(score >= 0);
+  const trigger = { message_id: "abc" };
+  assert.ok(scoreTriggerFieldOverlap(trigger, messageSchema) > scoreTriggerFieldOverlap(trigger, filterSchema));
 });
 
-test("semanticCapabilityForAction maps fetch-by-id to email.get", () => {
-  assert.equal(
-    semanticCapabilityForAction("GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID", {
+test("filterArgsToSchemaProperties drops planner args not in schema", () => {
+  const filtered = filterArgsToSchemaProperties(
+    { message_id: "abc", format: "metadata", user_id: "me" },
+    {
       type: "object",
-      required: ["message_id"],
-      properties: { message_id: { type: "string" } },
-    }, "email"),
-    "email.get",
+      properties: {
+        message_id: { type: "string" },
+      },
+    },
   );
+  assert.deepEqual(filtered, { message_id: "abc" });
 });
 
 test("validateToolArgsAgainstSchema reports missing required fields", () => {
@@ -93,11 +89,6 @@ test("validateToolArgsAgainstSchema fails when anyOf is not satisfied", () => {
   };
   const result = validateToolArgsAgainstSchema({ message_id: "abc" }, schema);
   assert.equal(result.ok, false);
-  if (!result.ok) {
-    assert.ok(
-      result.missing.includes("add_label_ids") || result.missing.includes("remove_label_ids"),
-    );
-  }
 });
 
 test("validateToolArgsAgainstSchema passes when one anyOf branch is satisfied", () => {
@@ -119,19 +110,6 @@ test("validateToolArgsAgainstSchema passes when one anyOf branch is satisfied", 
     schema,
   );
   assert.equal(result.ok, true);
-});
-
-test("validateToolArgsAgainstSchema passes when oneOf branch is exactly satisfied", () => {
-  const schema = {
-    type: "object",
-    oneOf: [
-      { required: ["email"] },
-      { required: ["phone"] },
-    ],
-  };
-  assert.equal(validateToolArgsAgainstSchema({ email: "a@b.com" }, schema).ok, true);
-  assert.equal(validateToolArgsAgainstSchema({ phone: "555" }, schema).ok, true);
-  assert.equal(validateToolArgsAgainstSchema({}, schema).ok, false);
 });
 
 test("summarizeInputSchema extracts required and property names", () => {

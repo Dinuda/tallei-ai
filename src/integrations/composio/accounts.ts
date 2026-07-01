@@ -1,4 +1,10 @@
 import type { AuthContext } from "../../domain/auth/index.js";
+import {
+  deleteTtlCacheEntry,
+  getTtlCacheEntry,
+  setTtlCacheEntry,
+  type TtlCacheStore,
+} from "../../infrastructure/cache/ttl-cache.js";
 import { authorizeToolkitForUser, normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
 import { composioRequest, isComposioConfigured } from "./client.js";
 import { listComposioTriggerTypes, type ComposioTriggerTypeRow } from "./triggers.js";
@@ -43,6 +49,23 @@ type PendingAuthorization = {
 const PENDING_TTL_MS = 15 * 60 * 1000;
 const pendingAuthorizations = new Map<string, PendingAuthorization>();
 
+const CONNECTORS_CACHE_TTL_MS = 60_000;
+const CONNECTORS_CACHE_MAX_SIZE = 200;
+const connectorsCache: TtlCacheStore<WorkspaceConnectorView[]> = new Map();
+
+function connectorsCacheKey(auth: AuthContext): string {
+  return `connectors:${auth.tenantId}:${auth.userId}:${auth.workspaceId ?? ""}`;
+}
+
+export function invalidateWorkspaceConnectorsCache(auth: AuthContext): void {
+  deleteTtlCacheEntry(connectorsCache, connectorsCacheKey(auth));
+}
+
+/** Clears the in-process connector list cache (tests only). */
+export function resetWorkspaceConnectorsCacheForTests(): void {
+  connectorsCache.clear();
+}
+
 function prunePendingAuthorizations(): void {
   const now = Date.now();
   for (const [key, value] of pendingAuthorizations) {
@@ -61,10 +84,24 @@ function mapToolkitView(toolkit: ComposioToolkitView): WorkspaceConnectorView {
   };
 }
 
+export async function withWorkspaceConnectorsCache(
+  auth: AuthContext,
+  loader: () => Promise<WorkspaceConnectorView[]>,
+): Promise<WorkspaceConnectorView[]> {
+  const key = connectorsCacheKey(auth);
+  const cached = getTtlCacheEntry(connectorsCache, key);
+  if (cached) return cached;
+  const result = await loader();
+  setTtlCacheEntry(connectorsCache, key, result, CONNECTORS_CACHE_TTL_MS, CONNECTORS_CACHE_MAX_SIZE);
+  return result;
+}
+
 export async function listWorkspaceConnectors(auth: AuthContext): Promise<WorkspaceConnectorView[]> {
   if (!isComposioConfigured()) return [];
-  const { toolkits } = await listToolkitsForUser(auth, { limit: 50 });
-  return toolkits.map(mapToolkitView);
+  return withWorkspaceConnectorsCache(auth, async () => {
+    const { toolkits } = await listToolkitsForUser(auth, { limit: 50 });
+    return toolkits.map(mapToolkitView);
+  });
 }
 
 /** Full Composio catalogue merged with workspace connection status (connected-first planning). */
@@ -251,6 +288,7 @@ export async function verifyToolkitConnection(
     }
     pendingAuthorizations.delete(input.connectionRequestId!);
     clearSessionCache();
+    invalidateWorkspaceConnectorsCache(auth);
   }
 
   const status = await getToolkitConnectionStatus(auth, toolkit);
@@ -276,6 +314,7 @@ export async function disconnectToolkit(auth: AuthContext, toolkit: string): Pro
     try {
       await composioRequest({ path, method: "DELETE" });
       clearSessionCache();
+      invalidateWorkspaceConnectorsCache(auth);
       return { ok: true };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));

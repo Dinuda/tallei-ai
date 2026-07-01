@@ -179,11 +179,6 @@ function toolkitFromSlug(actionSlug: string): string {
   return normalizeToolkitSlug(part);
 }
 
-export function isEmailGetActionSlug(actionSlug: string): boolean {
-  const slug = actionSlug.toUpperCase();
-  return slug.includes("MESSAGE_ID") || slug.includes("BY_ID") || slug.includes("BY_THREAD");
-}
-
 export async function fetchConnectorPlaybook(
   auth: AuthContext,
   input: {

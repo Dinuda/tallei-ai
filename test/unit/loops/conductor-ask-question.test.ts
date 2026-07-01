@@ -98,6 +98,7 @@ test("buildConductorSystemPrompt requires askQuestion only as last resort", () =
   assert.match(prompt, /askQuestion/);
   assert.match(prompt, /Compile blockers/i);
   assert.match(prompt, /discoverBindings/);
+  assert.match(prompt, /Available tools:/);
 });
 
 test("conductor builder renders interactive prompts without auto-selecting connectors", async () => {

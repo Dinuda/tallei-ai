@@ -131,7 +131,38 @@ test("buildRuntimePlannerPrompt includes connector playbook and trigger context"
   assert.match(prompt, /Use existing messages output when available/);
   assert.match(prompt, /Planner args are suggestions only/);
   assert.match(prompt, /message_id: abc123/);
-  assert.match(prompt, /run history already satisfies a tool's output instructions/i);
+  assert.match(prompt, /same tool with the same resolved arguments/i);
+});
+
+test("buildRuntimePlannerPrompt excludes exhausted tools and uses provider-neutral completion rules", () => {
+  const prompt = buildRuntimePlannerPrompt({
+    planOutcome: "A record is updated",
+    planGoal: "Update the selected record",
+    toolCatalog: [
+      {
+        id: "tool_exhausted",
+        capability: "records.lookup",
+        connector: "example",
+        actionSlug: "LOOKUP_RECORD",
+        plannerCard: { summary: "Look up a record", argGuides: {} },
+      },
+      {
+        id: "tool_available",
+        capability: "records.update",
+        connector: "example",
+        actionSlug: "UPDATE_RECORD",
+        plannerCard: { summary: "Update a record", argGuides: {} },
+      },
+    ],
+    exhaustedToolIds: ["tool_exhausted"],
+    stepHistory: [],
+    connectorPlaybook: { compiledAt: new Date().toISOString(), useCase: "Update records" },
+  });
+
+  assert.doesNotMatch(prompt, /tool_exhausted/);
+  assert.match(prompt, /tool_available/);
+  assert.match(prompt, /finishOnSuccess/);
+  assert.doesNotMatch(prompt, /Gmail|snippet|email read|send, post, reply/i);
 });
 
 test("compactStepHistoryForPlanner keeps latest 2 messages and shrinks payloads", () => {
@@ -159,17 +190,17 @@ test("compactStepHistoryForPlanner keeps latest 2 messages and shrinks payloads"
   assert.equal(row.result.data.messages[1]?.snippet?.length, 600);
 });
 
-test("buildConductorSystemPrompt includes first principles ownership and tool playbook", () => {
+test("buildConductorSystemPrompt includes the requested prompt sections", () => {
   const spec = createEmptyLoopSpec(workspaceId);
   const prompt = buildConductorSystemPrompt({ spec, connectedToolkits: [] });
-  assert.match(prompt, /## First principles/);
-  assert.match(prompt, /## Ownership/);
-  assert.match(prompt, /## Tool playbook/);
-  assert.doesNotMatch(prompt, /autoApplyConnector/);
+  assert.match(prompt, /— Core rules —/);
+  assert.match(prompt, /— Blueprint & patch flow —/);
+  assert.match(prompt, /— Hard stops —/);
+  assert.match(prompt, /— Safety —/);
+  assert.match(prompt, /Available tools:/);
   assert.match(prompt, /pickConnectorApp/);
   assert.match(prompt, /analyzeIntent/);
   assert.match(prompt, /confirmOutcomeBrief/);
-  assert.match(prompt, /plain-language question/);
   assert.match(prompt, /presentReplyOptions/);
 });
 

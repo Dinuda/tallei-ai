@@ -5,6 +5,7 @@ import { getStreamingLanguageModel } from "../providers/ai/streaming/language-mo
 import type { OutcomeBrief } from "./outcome-brief.js";
 import type { LoopSpec } from "./spec.js";
 import { extractJsonObject } from "./planning-agent.js";
+import { approvalNeedsReviewForRole } from "./approval-policy.js";
 
 export const outcomeBriefUserSummarySchema = z.object({
   whenItRuns: z.string().min(1),
@@ -36,16 +37,17 @@ export function fallbackOutcomeBriefUserSummary(
     .filter(Boolean);
 
   const approvalAsk = spec.approval.mode === "ask";
-  const sendsEmail = spec.approval.sensitiveCapabilities.some((cap) => cap.includes("send"));
+  const reviewsDestination = approvalNeedsReviewForRole(spec.approval, "destination")
+    || spec.approval.sensitiveCapabilities.length > 0;
 
   return {
     whenItRuns: triggerOutcome?.description.trim() || brief.outcome,
     appsInvolved: appsInvolved.length > 0 ? appsInvolved : [spec.intent.outcome],
     steps: steps.length > 0 ? steps : [brief.outcome],
-    beforeSending: approvalAsk && sendsEmail
-      ? "You'll review and approve before any emails are sent."
-      : approvalAsk
-        ? "You'll review and approve before sensitive actions run."
+    beforeSending: approvalAsk
+      ? "You'll review and approve every step before it runs."
+      : reviewsDestination
+        ? "You'll review and approve before outbound or sensitive actions run."
         : "It runs automatically without an extra approval step.",
     howYouKnowItWorked: brief.successCriteria.length > 0
       ? brief.successCriteria.join("; ")

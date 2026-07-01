@@ -17,7 +17,8 @@ import { summarizeToolForPlanner } from "./tool-planner-card.js";
 import { compactStepHistoryForPlanner } from "./tool-result-compact.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
 
-const DEFAULT_AGENT_INSTRUCTIONS = "Achieve the stated outcome using only the bound tools.";
+const DEFAULT_AGENT_INSTRUCTIONS =
+  "Achieve the stated outcome using only the bound tools.";
 
 const RUNTIME_PLANNER_RULES = [
   "Only call tools listed in Available tools (by toolId).",
@@ -25,18 +26,23 @@ const RUNTIME_PLANNER_RULES = [
   "Do not invent required args. If a required arg source is unavailable, call the prerequisite action or finish with a clear blocker.",
   "Only provide a required arg yourself when that field's composioAction source explicitly includes type=planner.",
   "Follow each tool's behaviorInstructions and modifiedInputSchema; fields omitted from that schema are runner-controlled.",
-  "If run history already satisfies a tool's output instructions, consume that result instead of calling the tool again.",
+  "If run history already contains sufficient output for the same tool with the same resolved arguments, consume that result instead of repeating the call.",
   "If a prior tool call failed with missing fields, retry with corrected args or pick a different catalog tool.",
   "Do not finish after a single failed tool call unless no catalog tool can satisfy the goal.",
+  "Set finishOnSuccess=true and provide completionSummary when this tool call will satisfy the remaining outcome; otherwise omit both fields.",
 ].join("\n");
 
 function formatConnectorPlaybookSection(playbook: ConnectorPlaybook): string {
   const parts: string[] = ["Connector playbook (from compile):"];
   if (playbook.workflowSteps?.length) {
-    parts.push(`Workflow steps:\n${playbook.workflowSteps.map((s) => `- ${s}`).join("\n")}`);
+    parts.push(
+      `Workflow steps:\n${playbook.workflowSteps.map((s) => `- ${s}`).join("\n")}`,
+    );
   }
   if (playbook.pitfalls?.length) {
-    parts.push(`Pitfalls:\n${playbook.pitfalls.map((p) => `- ${p}`).join("\n")}`);
+    parts.push(
+      `Pitfalls:\n${playbook.pitfalls.map((p) => `- ${p}`).join("\n")}`,
+    );
   }
   return parts.join("\n\n");
 }
@@ -64,19 +70,29 @@ function buildRuntimePlannerBody(input: {
   triggerContext?: string;
   testRunPrefix?: string;
   testRunScenario?: TestRunScenario;
+  exhaustedToolIds?: string[];
 }): string {
-  const tools = input.toolCatalog.map((tool) => summarizeToolForPlanner(tool));
-  const playbookSection = formatConnectorPlaybookSection(input.connectorPlaybook);
+  const exhausted = new Set(input.exhaustedToolIds ?? []);
+  const tools = input.toolCatalog
+    .filter((tool) => !exhausted.has(tool.id))
+    .map((tool) => summarizeToolForPlanner(tool));
+  const playbookSection = formatConnectorPlaybookSection(
+    input.connectorPlaybook,
+  );
   return [
     input.testRunPrefix,
     input.testRunScenario
       ? [
           `Scenario: ${input.testRunScenario.label}`,
-          input.testRunScenario.context ? `Context: ${input.testRunScenario.context}` : "",
+          input.testRunScenario.context
+            ? `Context: ${input.testRunScenario.context}`
+            : "",
           input.testRunScenario.triggerPayload
             ? `Simulated trigger payload:\n${JSON.stringify(input.testRunScenario.triggerPayload, null, 2)}`
             : "",
-        ].filter(Boolean).join("\n")
+        ]
+          .filter(Boolean)
+          .join("\n")
       : "",
     `Outcome: ${input.planOutcome}`,
     `Operational brief: ${input.agentInstructions ?? DEFAULT_AGENT_INSTRUCTIONS}`,
@@ -95,13 +111,16 @@ function buildRuntimePlannerBody(input: {
     `Run history:\n${JSON.stringify(compactStepHistoryForPlanner(input.stepHistory))}`,
     "Respond with JSON only (no markdown). Use exactly one shape:",
     '{"kind":"tool_call","toolId":"<tool id from catalog>","args":{},"reasoning":"..."}',
+    '{"kind":"tool_call","toolId":"<tool id from catalog>","args":{},"reasoning":"...","finishOnSuccess":true,"completionSummary":"..."}',
     '{"kind":"finish","summary":"..."}',
     "The kind field is required.",
     RUNTIME_PLANNER_RULES,
     input.testRunPrefix
       ? "Complete in one step: call exactly one tool with args from the scenario/trigger payload, OR finish if no tool is needed."
       : "",
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export function buildConductorSystemPrompt(input: {
@@ -111,79 +130,84 @@ export function buildConductorSystemPrompt(input: {
 }): string {
   const missing = getMissingSlots(input.spec);
   const hasBlueprint = Boolean(input.spec.taskBlueprint?.outcomes.length);
-  const connectorsPending = getPendingConnectorOutcomes(input.spec.taskBlueprint).length;
+  const connectorsPending = getPendingConnectorOutcomes(
+    input.spec.taskBlueprint,
+  ).length;
   const intentStatus = input.spec.intentDiscovery.status;
   const briefConfirmed = isOutcomeBriefConfirmed(input.spec);
-  const connected = input.connectedToolkits
-    .map((t) => `${t.slug}${t.connected ? "*" : ""}`)
-    .join(", ") || "none";
+  const connected =
+    input.connectedToolkits
+      .map((t) => `${t.slug}${t.connected ? "*" : ""}`)
+      .join(", ") || "none";
 
-  const nextStep = intentStatus === "pending" || intentStatus === "needs_input"
-    ? "analyzeIntent. If it returns nextQuestion, call askQuestion with it."
-    : !hasBlueprint
-    ? "patchLoopSpec(taskBlueprint + agent + approval) from the ready intent analysis."
-    : connectorsPending
-      ? "discoverConnectorsForBlueprint → pickConnectorApp once per pending role → patch selectedConnector."
-      : missing.length
-        ? `discoverBindings/listTriggers + patchLoopSpec (${missing.join(", ")}).`
-        : !briefConfirmed
-          ? "reviewOutcomeBrief → confirmOutcomeBrief → patch confirmation when accepted."
-          : "compileLoop → testRunLoop → presentReplyOptions → activateLoop when user confirms.";
+  const nextStep =
+    intentStatus === "pending" || intentStatus === "needs_input"
+      ? "analyzeIntent. If it returns nextQuestion, call askQuestion with it."
+      : !hasBlueprint
+        ? "patchLoopSpec(taskBlueprint + agent + approval) from the ready intent analysis."
+        : connectorsPending
+          ? "discoverConnectorsForBlueprint → pickConnectorApp once per pending role → patch selectedConnector."
+          : missing.length
+            ? `discoverBindings/listTriggers + patchLoopSpec (${missing.join(", ")}).`
+              : !briefConfirmed
+                ? "reviewOutcomeBrief → confirmOutcomeBrief → patch confirmation when accepted."
+                : "compileLoop → testRunLoop → presentReplyOptions → activateLoop when user confirms.";
 
   return [
-    "You are Tallei's Conductor. Own loop configuration via patchLoopSpec and UI tools.",
-    "Use pickConnectorApp, askQuestion, confirmOutcomeBrief, and presentReplyOptions as tool calls — never replace interactive choices with plain text.",
+    "You are Tallei’s Conductor. Guide a non-technical user from intent to an activated automation.",
+    "Think in plain-language outcomes, not implementation details.",
+    "Use interactive tools for choices: askQuestion, pickConnectorApp, confirmOutcomeBrief, presentReplyOptions. Never replace these with plain text.",
     "",
-    "## First principles",
-    "- Resolve WHAT must be true at the end, not which API calls run.",
-    "- intent.goal = user words; intent.outcome = one testable end state you write.",
-    "- Call analyzeIntent on the initial request and again after each clarification answer. If it returns nextQuestion, call askQuestion with it immediately.",
-    "- Always look for the one most important ambiguity: autonomy (send directly vs draft for review), scope (which items), or destination. Ask unless the user already made every key choice explicit.",
-    "- Ask at most one question per round. Never ask about connectors, APIs, or implementation.",
-    "- Never ask a question already in decisions or askedQuestionIds.",
+    "— Core rules —",
+    "• Backend spec is the source of truth. Patch only when you have a new, confirmed value for the current phase—never rewrite unchanged data or re-patch the same value twice.  ",
+    "• Ask at most one clarification question at a time and keep wording non-technical.  ",
+    "• Never expose internal IDs, JSON, connector names, API slugs, or trigger slugs to the user.",
     "",
-    "## Ownership",
-    "- Resolve compile blockers with tools; no configuration checklists or capability-bundle questions.",
-    `- Write agent.instructions from outcome + successCriteria; fallback only if needed: "${DEFAULT_AGENT_INSTRUCTIONS}"`,
-    "- Auto-apply discoverBindings.suggestedBindings unless needsUserChoice (use discovery askOptions).",
-    "- Customer-facing sends → approval.mode ask with email.send / support.reply.send in sensitiveCapabilities.",
-    "- After patching, briefly tell the user what you chose (plain language, key actions).",
+    "— Tool ownership (do not omit) —",
+    "• **analyzeIntent** – clarifies outcome, trigger, scope, destination, autonomy.  ",
+    "• **askQuestion** – single follow-up question when analyzeIntent asks for it.  ",
+    "• **patchLoopSpec** – writes spec; use only for new/changed values.  ",
+    "• **discoverConnectorsForBlueprint** – reads the patched taskBlueprint, returns required app roles.  ",
+    "• **pickConnectorApp** – user picks an app per role (never auto-select).  ",
+    "• **listWorkspaceConnectors** – refreshes which workspace apps are connected; connection is never app-selection consent.  ",
+    "• **discoverBindings / listTriggers** – provide concrete bindings, action & trigger slugs.  ",
+    "• **reviewOutcomeBrief / confirmOutcomeBrief** – plain-language confirmation or edits.  ",
+    "• **presentReplyOptions** – quick-reply chips for yes/no/test/activate prompts.  ",
+    "• **compileLoop / testRunLoop / activateLoop** – build, test, and turn on the automation.",
     "",
-    "## Sequence",
-    "1. analyzeIntent → if nextQuestion returned, call askQuestion and wait for the answer; call analyzeIntent again with the answer in decisions. Repeat until status=ready. Do NOT call patchLoopSpec during this phase.",
-    "2. patchLoopSpec once — taskBlueprint, agent, approval from the ready analysis. Patch again only for bindings, triggers, or output as they are discovered.",
-    "3. discoverConnectorsForBlueprint once → pickConnectorApp separately for every returned role group → patch that outcome's selectedConnector.",
-    "4. For each selected connector, listTriggers/discoverBindings → patch bindings + composioActions, event trigger, and output.",
-    "5. reviewOutcomeBrief (server builds plain-language userSummary for the confirmation card) → confirmOutcomeBrief with briefHash, a plain-language question, and 2–4 user-facing options (option value = confirm | change_outcome | change_trigger | change_connectors | change_approvals | other). If confirmed, patch intentDiscovery.status=confirmed and the exact briefHash.",
-    "6. compileLoop → testRunLoop → presentReplyOptions → activateLoop.",
+    "— Blueprint & patch flow —",
+    "1. **Intent phase**  ",
+    "   • analyzeIntent → (askQuestion loops) → READY.  ",
+    "2. **Blueprint** (one-time)  ",
+    "   • patchLoopSpec: taskBlueprint + agent + approval.  ",
+    "3. **Connectors**  ",
+    "   • discoverConnectorsForBlueprint → pickConnectorApp → patch selectedConnector.  ",
+    "4. **Bindings & triggers**  ",
+    "   • discoverBindings / listTriggers → patch bindings + trigger + output.  ",
+    "5. **User confirmation**  ",
+    "   • reviewOutcomeBrief → confirmOutcomeBrief → (on confirm) patch status=confirmed.  ",
+    "6. **Build & launch**  ",
+    "   • compileLoop → testRunLoop → presentReplyOptions → activateLoop (after user agrees).",
     "",
-    "## Connectors",
-    "- Connector choice is always explicit. Never infer or auto-submit a connected app.",
-    "- Use server-provided role groups and ranked picker options. Never hand-build connector lists.",
-    "- Connected status boosts rank only. Each picker shows the top five ranked apps.",
-    "- Reuse an earlier connector only after the user explicitly selects it for the next compatible role.",
+    "— Safety —",
+    "Treat sending, deleting, approving, paying, posting, or contacting people as sensitive. Use review-first approval unless the ready intent explicitly chooses auto-send.",
     "",
-    "## Outcome brief edits",
-    "- confirmOutcomeBrief options must be plain English for non-technical users — never expose API slugs, action names, or connector IDs in labels.",
-    "- confirm → patch intentDiscovery.status=confirmed with the exact current briefHash, then compile.",
-    "- change_outcome/change_trigger/change_approvals → ask one focused follow-up, patch the answer, then rediscover affected configuration.",
-    "- change_connectors → patch the relevant blueprint outcome back to pending without selectedConnector, then reopen its picker.",
-    "- other → treat otherText as the requested edit. Never mark the brief confirmed for an edit action.",
+    "— Hard stops —",
+    "No patching during intent clarification.  ",
+    "Never call analyzeIntent twice in the same turn without new user input.  ",
+    "Don’t proceed to connector selection before the blueprint exists.  ",
+    "Don’t patch connector/binding/trigger/output fields in the initial blueprint patch.",
     "",
-    "## Tool playbook",
-    "analyzeIntent | askQuestion | patchLoopSpec | discoverConnectorsForBlueprint | pickConnectorApp | discoverBindings | listTriggers | reviewOutcomeBrief | confirmOutcomeBrief | presentReplyOptions | connectToolkit | compileLoop | testRunLoop | activateLoop | listConnectorCatalog({ toolkit }) | listConnectors/listActions.",
-    "Composio action execution: discoverBindings returns exact action slugs plus suggestedComposioActions. Always patch both bindings and composioActions together; bindings choose the tool, composioActions tell the runner how to fill inputs and extract outputs.",
-    "Event triggers: source = connector toolkit (gmail). composioSlug = exact slug from listTriggers (GMAIL_NEW_GMAIL_MESSAGE). patchLoopSpec rejects toolkit names in composioSlug; compile verifies against Composio catalogue.",
-    "",
-    "## Technical defaults",
-    "New mail → event trigger (not email.receive binding). Fetch/list → email.read.",
+    "Available tools: analyzeIntent · askQuestion · patchLoopSpec · discoverConnectorsForBlueprint · pickConnectorApp · listWorkspaceConnectors · discoverBindings · listTriggers · reviewOutcomeBrief · confirmOutcomeBrief · presentReplyOptions · compileLoop · testRunLoop · activateLoop",
     "",
     input.workspaceName ? `Workspace: ${input.workspaceName}` : "",
     `Connected (*=connected): ${connected}`,
-    missing.length ? `Compile blockers: ${missing.join(", ")}` : "Compile blockers: none",
+    missing.length
+      ? `Compile blockers: ${missing.join(", ")}`
+      : "Compile blockers: none",
     `Next: ${nextStep}`,
     `Spec JSON:\n${JSON.stringify(input.spec)}`,
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 /** @deprecated Use buildConductorSystemPrompt */
@@ -201,7 +225,8 @@ export async function runPlannerDecision(
   try {
     const { text } = await generateText({
       model: getStreamingLanguageModel("planner", { userId: options?.userId }),
-      system: "You are Tallei's loop runtime planner. Reply with a single JSON object only.",
+      system:
+        "You are Tallei's loop runtime planner. Reply with a single JSON object only.",
       prompt,
       ...(abortController ? { abortSignal: abortController.signal } : {}),
     });
@@ -244,6 +269,7 @@ export function buildRuntimePlannerPrompt(input: {
   workspaceMemory?: string[];
   connectorPlaybook: ConnectorPlaybook;
   triggerContext?: string;
+  exhaustedToolIds?: string[];
 }): string {
   return buildRuntimePlannerBody({
     planOutcome: input.planOutcome,
@@ -255,6 +281,7 @@ export function buildRuntimePlannerPrompt(input: {
     workspaceMemory: input.workspaceMemory,
     connectorPlaybook: input.connectorPlaybook,
     triggerContext: input.triggerContext,
+    exhaustedToolIds: input.exhaustedToolIds,
   });
 }
 
@@ -272,7 +299,7 @@ export function extractJsonObject(text: string): string {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -292,7 +319,9 @@ export function normalizePlannerDecision(raw: unknown): unknown {
       kind: "tool_call",
       toolId: row.toolId.trim(),
       args,
-      ...(typeof row.reasoning === "string" ? { reasoning: row.reasoning } : {}),
+      ...(typeof row.reasoning === "string"
+        ? { reasoning: row.reasoning }
+        : {}),
     };
   }
 

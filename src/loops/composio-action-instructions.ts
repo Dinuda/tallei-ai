@@ -296,6 +296,17 @@ export function resolveComposioActionArgs(input: {
       args[key] = value;
     }
   }
+  const inputProperties = new Set(
+    summarizeInputSchema(input.tool.originalInputSchema ?? input.tool.inputSchema).properties,
+  );
+  for (const field of inputProperties) {
+    if (required.includes(field) || field in args) continue;
+    const triggerValue = firstDefined(
+      valueAtPath(input.eventPayload, field),
+      valueAtPath(asRecord(input.eventPayload)?.payload, field),
+    );
+    if (triggerValue !== undefined) args[field] = triggerValue;
+  }
   const missing: Array<{
     field: string;
     actionSlug: string;

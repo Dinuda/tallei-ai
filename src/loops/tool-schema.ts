@@ -26,67 +26,74 @@ export function summarizeInputSchema(inputSchema: Record<string, unknown>): Sche
   };
 }
 
-const LIST_ARG_HINTS = ["query", "q", "search", "filter", "maxresults", "max_results", "limit", "page_size", "pagesize"];
-
-function fieldLooksLikeId(field: string): boolean {
-  const normalized = field.toLowerCase();
-  return normalized === "id" || normalized.endsWith("_id") || normalized.endsWith("id");
+/** Stable catalog tool id from the exact Composio action slug. */
+export function toolIdForAction(actionSlug: string): string {
+  return `tool_${actionSlug.trim().toLowerCase()}`;
 }
 
-function schemaSupportsCollectionFetch(summary: SchemaFieldSummary): boolean {
-  const fields = [...summary.required, ...summary.properties].map((field) => field.toLowerCase());
-  return fields.some((field) => LIST_ARG_HINTS.some((hint) => field.includes(hint.replace("_", ""))));
+/** Capability label on a bound tool is the Composio action slug — no semantic aliases. */
+export function capabilityForAction(actionSlug: string): string {
+  return actionSlug.trim().toUpperCase();
 }
 
-function schemaRequiresOnlyIds(summary: SchemaFieldSummary): boolean {
-  if (summary.required.length === 0) return false;
-  return summary.required.every((field) => fieldLooksLikeId(field)) && !schemaSupportsCollectionFetch(summary);
+const STOP_WORDS = new Set([
+  "the", "and", "for", "from", "with", "that", "this", "into", "when", "each", "agent", "loop",
+]);
+
+function outcomeWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !STOP_WORDS.has(word));
 }
 
-/** Map a resolved Composio action to a semantic capability that passes compile-time schema fit. */
-export function semanticCapabilityForAction(
-  actionSlug: string,
-  inputSchema: Record<string, unknown>,
-  domain = "tool",
-): string {
-  const slug = actionSlug.toUpperCase();
+/** Lowercase text built from schema field names and their descriptions. */
+export function schemaFieldText(inputSchema: Record<string, unknown>): string {
   const summary = summarizeInputSchema(inputSchema);
-
-  if (slug.includes("DRAFT")) return `${domain}.draft`;
-  if (slug.includes("SEND") || slug.includes("REPLY")) return `${domain}.send`;
-  if (slug.includes("LABEL") || slug.includes("TAG") || slug.includes("CATEGOR")) return `${domain}.labels`;
-  if (schemaRequiresOnlyIds(summary) || slug.includes("MESSAGE_ID") || slug.includes("BY_ID")) {
-    return `${domain}.get`;
+  const row = asRecord(inputSchema) ?? {};
+  const properties = asRecord(row.properties) ?? {};
+  const parts = [...summary.required, ...summary.properties];
+  for (const field of summary.properties) {
+    const prop = asRecord(properties[field]);
+    if (typeof prop?.description === "string") parts.push(prop.description);
   }
-  if (slug.includes("LIST") || slug.includes("SEARCH") || slug.includes("QUERY") || slug.includes("FILTER")) {
-    return `${domain}.read`;
-  }
-  if (slug.includes("FETCH") || slug.includes("READ") || slug.includes("GET")) return `${domain}.read`;
-  return `${domain}.action`;
+  return parts.join(" ").toLowerCase();
 }
 
-/** Score how well a Composio input schema matches an outcome capability label (no provider tables). */
-export function scoreSchemaFitForCapability(
-  capability: string,
+/** Score overlap between an outcome description and a tool's schema field names/descriptions. */
+export function scoreSchemaFieldRelevance(
+  outcomeDescription: string,
   inputSchema: Record<string, unknown>,
-  actionSlug?: string,
 ): number {
-  const summary = summarizeInputSchema(inputSchema);
-  let cap = capability.toLowerCase();
+  const haystack = schemaFieldText(inputSchema);
+  return outcomeWords(outcomeDescription).reduce(
+    (score, word) => (haystack.includes(word) ? score + 1 : score),
+    0,
+  );
+}
 
-  // Raw Composio slugs are not semantic capabilities — infer fit from the action instead.
-  if (/^[a-z][a-z0-9_]+$/.test(cap) && cap.includes("_") && actionSlug) {
-    const domain = cap.split("_")[0] ?? "tool";
-    cap = semanticCapabilityForAction(actionSlug, inputSchema, domain).toLowerCase();
-  }
+/** Score how many trigger payload keys appear in the tool input schema. */
+export function scoreTriggerFieldOverlap(
+  triggerFields: Record<string, unknown>,
+  inputSchema: Record<string, unknown>,
+): number {
+  const schemaFields = new Set(
+    [...summarizeInputSchema(inputSchema).required, ...summarizeInputSchema(inputSchema).properties]
+      .map((field) => field.toLowerCase()),
+  );
+  return Object.entries(triggerFields).filter(([key, value]) =>
+    isNonEmpty(value) && schemaFields.has(key.toLowerCase()),
+  ).length;
+}
 
-  const pollIntent = /(?:^|[._])(?:read|list|fetch|search|query|find|receive|incoming)(?:[._]|$)/.test(cap);
-  const singleItemIntent = /(?:^|[._])(?:get|by_id|byid)(?:[._]|$)/.test(cap);
-
-  if (pollIntent && schemaRequiresOnlyIds(summary)) return -8;
-  if (pollIntent && schemaSupportsCollectionFetch(summary)) return 6;
-  if (singleItemIntent && summary.required.some((field) => fieldLooksLikeId(field))) return 4;
-  return 0;
+/** Keep only args that appear in the schema properties (runner may add required fields separately). */
+export function filterArgsToSchemaProperties(
+  args: Record<string, unknown>,
+  inputSchema: Record<string, unknown>,
+): Record<string, unknown> {
+  const allowed = new Set(summarizeInputSchema(inputSchema).properties);
+  return Object.fromEntries(Object.entries(args).filter(([key]) => allowed.has(key)));
 }
 
 /**
@@ -100,11 +107,9 @@ function checkAnyOf(
   if (!Array.isArray(anyOf) || anyOf.length === 0) return null;
   const branches = anyOf.map((branch) => summarizeInputSchema(asRecord(branch) ?? {}));
   const satisfiedBranch = branches.find((branch) =>
-    branch.required.length > 0 && branch.required.every((field) => isNonEmpty(args[field]))
+    branch.required.length > 0 && branch.required.every((field) => isNonEmpty(args[field])),
   );
-  // If any branch is satisfied, the constraint passes.
   if (satisfiedBranch) return null;
-  // If all branches have required fields and none is satisfied, report the fields from all branches.
   const allBranchesHaveRequired = branches.every((b) => b.required.length > 0);
   if (!allBranchesHaveRequired) return null;
   const allRequired = [...new Set(branches.flatMap((b) => b.required))];
@@ -123,7 +128,7 @@ function checkOneOf(
   if (!Array.isArray(oneOf) || oneOf.length === 0) return null;
   const branches = oneOf.map((branch) => summarizeInputSchema(asRecord(branch) ?? {}));
   const satisfiedCount = branches.filter((branch) =>
-    branch.required.length > 0 && branch.required.every((field) => isNonEmpty(args[field]))
+    branch.required.length > 0 && branch.required.every((field) => isNonEmpty(args[field])),
   ).length;
   if (satisfiedCount === 1) return null;
   const allBranchesHaveRequired = branches.every((b) => b.required.length > 0);
@@ -133,7 +138,6 @@ function checkOneOf(
     const missing = allRequired.filter((field) => !isNonEmpty(args[field]));
     return missing.length > 0 ? { ok: false, missing, required: allRequired } : null;
   }
-  // satisfiedCount > 1: multiple branches satisfied — report all required fields as ambiguous.
   const allRequired = [...new Set(branches.flatMap((b) => b.required))];
   return { ok: false, missing: [], required: allRequired };
 }
@@ -142,17 +146,14 @@ export function validateToolArgsAgainstSchema(
   args: Record<string, unknown>,
   inputSchema: Record<string, unknown>,
 ): { ok: true } | { ok: false; missing: string[]; required: string[] } {
-  // 1. Top-level required fields.
   const summary = summarizeInputSchema(inputSchema);
   const missing = summary.required.filter((field) => !isNonEmpty(args[field]));
   if (missing.length > 0) return { ok: false, missing, required: summary.required };
 
-  // 2. anyOf constraints (e.g. "at least one of add_label_ids or remove_label_ids").
   const row = asRecord(inputSchema) ?? {};
   const anyOfResult = checkAnyOf(args, row.anyOf);
   if (anyOfResult) return anyOfResult;
 
-  // 3. oneOf constraints.
   const oneOfResult = checkOneOf(args, row.oneOf);
   if (oneOfResult) return oneOfResult;
 

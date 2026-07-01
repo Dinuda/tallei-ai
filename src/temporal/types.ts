@@ -19,7 +19,8 @@ export type ApprovalDecision = {
 export type AgentRunState = {
   stepIndex: number;
   messages: Array<{ role: string; content: string }>;
-  toolResults: Array<{ toolId: string; result: unknown }>;
+  toolResults: Array<{ toolId: string; result: unknown; args?: Record<string, unknown> }>;
+  failuresByToolId: Record<string, number>;
   totalCostUsd: number;
   status: "running" | "waiting_approval" | "completed" | "failed";
 };

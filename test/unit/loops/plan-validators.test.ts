@@ -30,7 +30,7 @@ const basePlan = (): CompiledPlan => ({
   }],
   composioActions: [],
   output: { kind: "none" },
-  approval: { mode: "mixed", sensitiveCapabilities: [], defaultTimeoutHours: 24, onTimeout: "reject" },
+  approval: { mode: "mixed", sensitiveRoles: [], sensitiveCapabilities: [], defaultTimeoutHours: 24, onTimeout: "reject" },
   guardrails: { allowedTools: [], deniedTools: [], maxRetriesPerStep: 3, maxRunDurationMinutes: 60 },
   compiledAt: new Date().toISOString(),
   status: "draft",

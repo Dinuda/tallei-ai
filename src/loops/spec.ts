@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { intentDiscoveryStateSchema } from "./intent-discovery.js";
+import { approvalSensitiveRoleSchema, intentDiscoveryStateSchema } from "./intent-discovery.js";
 
 export const executionProfileSchema = z.enum(["agentic", "monitor", "sync"]);
 export type ExecutionProfile = z.infer<typeof executionProfileSchema>;
@@ -128,6 +128,7 @@ export type OutputConfig = z.infer<typeof outputConfigSchema>;
 
 export const approvalPolicySchema = z.object({
   mode: z.enum(["auto", "ask", "mixed"]).default("mixed"),
+  sensitiveRoles: z.array(approvalSensitiveRoleSchema).default([]),
   sensitiveCapabilities: z.array(z.string()).default([]),
   defaultTimeoutHours: z.number().min(1).max(168).default(24),
   onTimeout: z.enum(["reject", "escalate"]).default("reject"),
@@ -224,6 +225,8 @@ export const plannerDecisionSchema = z.discriminatedUnion("kind", [
     toolId: z.string().min(1),
     args: z.record(z.unknown()).optional().default({}),
     reasoning: z.string().optional(),
+    finishOnSuccess: z.boolean().optional(),
+    completionSummary: z.string().min(1).optional(),
   }),
   z.object({
     kind: z.literal("finish"),
@@ -347,6 +350,7 @@ export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopS
     output: { kind: "none" },
     approval: {
       mode: "mixed",
+      sensitiveRoles: [],
       sensitiveCapabilities: [],
       defaultTimeoutHours: 24,
       onTimeout: "reject",

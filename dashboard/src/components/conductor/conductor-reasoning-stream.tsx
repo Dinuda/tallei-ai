@@ -30,32 +30,41 @@ export function ConductorReasoningStream({
   const [expanded, setExpanded] = useState(false);
   const [collapseOut, setCollapseOut] = useState(false);
   const [panelHidden, setPanelHidden] = useState(false);
+  const [peakHeight, setPeakHeight] = useState(0);
   const [collapseHeight, setCollapseHeight] = useState(maxHeight);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const peakHeightRef = useRef(0);
   const hadLiveStreamRef = useRef(isStreaming);
+  const wasStreamingRef = useRef(isStreaming);
 
   useEffect(() => {
+    if (isStreaming && !wasStreamingRef.current) {
+      peakHeightRef.current = 0;
+      setPeakHeight(0);
+    }
+    wasStreamingRef.current = isStreaming;
+
     if (isStreaming) {
       hadLiveStreamRef.current = true;
       setCollapseOut(false);
       setPanelHidden(false);
       setExpanded(false);
-      setCollapseHeight(maxHeight);
       return;
     }
 
     if (hadLiveStreamRef.current && !isMessageStreaming) {
       setCollapseOut(true);
     }
-  }, [isMessageStreaming, isStreaming, maxHeight]);
+  }, [isMessageStreaming, isStreaming]);
 
   useEffect(() => {
     if (!collapseOut) {
-      setCollapseHeight(maxHeight);
+      setCollapseHeight(peakHeightRef.current || maxHeight);
       return;
     }
 
-    setCollapseHeight(maxHeight);
+    const fromHeight = peakHeightRef.current || scrollRef.current?.clientHeight || maxHeight;
+    setCollapseHeight(fromHeight);
     let inner = 0;
     const outer = requestAnimationFrame(() => {
       inner = requestAnimationFrame(() => {
@@ -72,12 +81,22 @@ export function ConductorReasoningStream({
     if (!isStreaming || expanded || collapseOut) return;
     const el = scrollRef.current;
     if (!el) return;
+
+    const contentHeight = Math.min(maxHeight, el.scrollHeight);
+    if (contentHeight > peakHeightRef.current) {
+      peakHeightRef.current = contentHeight;
+      setPeakHeight(contentHeight);
+    }
+
     el.scrollTop = el.scrollHeight;
-  }, [collapseOut, expanded, isStreaming, textLength]);
+  }, [collapseOut, expanded, isStreaming, maxHeight, textLength]);
 
   const handleTransitionEnd = (event: React.TransitionEvent<HTMLDivElement>) => {
-    if (event.propertyName !== "max-height" || !collapseOut || collapseHeight !== 0) return;
+    if (!collapseOut || collapseHeight !== 0) return;
+    if (event.propertyName !== "height") return;
     hadLiveStreamRef.current = false;
+    peakHeightRef.current = 0;
+    setPeakHeight(0);
     setPanelHidden(true);
     setCollapseOut(false);
     setCollapseHeight(maxHeight);
@@ -94,10 +113,12 @@ export function ConductorReasoningStream({
   const showLivePanel = isStreaming || collapseOut;
   const clamped = showLivePanel && !expanded;
   const scrollContent = isStreaming || collapseOut || expanded ? liveContent : settledContent;
+  const useFadeMask = clamped && !collapseOut && peakHeight > 56;
+
   const liveScrollStyle = clamped
     ? {
-        maxHeight: collapseOut ? collapseHeight : maxHeight,
-        minHeight: collapseOut ? 0 : maxHeight,
+        maxHeight,
+        height: collapseOut ? collapseHeight : peakHeight || undefined,
         opacity: collapseOut && collapseHeight === 0 ? 0 : 1,
       }
     : undefined;
@@ -114,6 +135,7 @@ export function ConductorReasoningStream({
         className={cn(
           "conductor-reasoning-stream__scroll",
           clamped && "conductor-reasoning-stream__scroll--live",
+          useFadeMask && "conductor-reasoning-stream__scroll--masked",
           collapseOut && "conductor-reasoning-stream__scroll--collapse-out",
         )}
         onTransitionEnd={handleTransitionEnd}

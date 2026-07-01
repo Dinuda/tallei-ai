@@ -14,7 +14,6 @@ import { BuilderConnectToolkitCard } from "@/components/conductor/builder-connec
 import {
   formatActivateSummary,
   formatCompileSummary,
-  formatConnectorSummary,
   formatDiscoverConnectorsSummary,
   formatPatchSummary,
   formatTestRunSummary,
@@ -203,37 +202,31 @@ export function ConductorToolPart({
   const title =
     toolName === "patchLoopSpec"
       ? "Update loop configuration"
-      : toolName === "listConnectors"
-        ? "Workspace connectors"
-        : toolName === "listConnectorCatalog"
-          ? "Connector catalogue"
-          : toolName === "discoverConnectorsForBlueprint"
-              ? "Discover connectors"
-              : toolName === "pickConnectorApp"
-                ? "Pick connector app"
-                : toolName === "presentReplyOptions"
-                  ? "Reply options"
-                  : toolName === "discoverBindings"
-                    ? "Discover bindings"
-                    : toolName === "connectToolkit"
-                      ? "Start connector OAuth"
-                      : toolName === "compileLoop"
-                        ? "Compile loop"
-                        : toolName === "testRunLoop"
-                          ? "Test run"
-                          : toolName === "activateLoop"
-                            ? "Activate loop"
-                            : toolName;
+      : toolName === "discoverConnectorsForBlueprint"
+        ? "Discover connectors"
+        : toolName === "pickConnectorApp"
+          ? "Pick connector app"
+          : toolName === "presentReplyOptions"
+            ? "Reply options"
+            : toolName === "discoverBindings"
+              ? "Discover bindings"
+              : toolName === "connectToolkit"
+                ? "Start connector OAuth"
+                : toolName === "compileLoop"
+                  ? "Compile loop"
+                  : toolName === "testRunLoop"
+                    ? "Test run"
+                    : toolName === "activateLoop"
+                      ? "Activate loop"
+                      : toolName;
 
   const summary =
     toolName === "patchLoopSpec"
       ? formatPatchSummary(part.output)
-      : toolName === "listConnectors"
-        ? formatConnectorSummary(part.output)
-        : toolName === "discoverConnectorsForBlueprint" || toolName === "discoverBindings"
-          ? formatDiscoverConnectorsSummary(part.output)
-          : toolName === "reviewOutcomeBrief"
-            ? "Prepared your automation summary for review"
+      : toolName === "discoverConnectorsForBlueprint" || toolName === "discoverBindings"
+        ? formatDiscoverConnectorsSummary(part.output)
+        : toolName === "reviewOutcomeBrief"
+          ? "Prepared your automation summary for review"
           : toolName === "compileLoop"
             ? formatCompileSummary(part.output)
             : toolName === "testRunLoop"

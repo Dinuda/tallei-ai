@@ -55,15 +55,6 @@ export function formatPatchSummary(output: unknown): string | null {
   return bindings ? `Bindings: ${bindings}. ${missing}` : missing;
 }
 
-export function formatConnectorSummary(output: unknown): string | null {
-  if (!output || typeof output !== "object") return null;
-  const row = output as { connectors?: Array<{ slug: string; connected: boolean }> };
-  if (!row.connectors?.length) return "No connectors found in workspace.";
-  return row.connectors
-    .map((c) => `${c.slug}: ${c.connected ? "connected" : "not connected"}`)
-    .join(", ");
-}
-
 export function formatToolInputPreview(toolName: string, input: unknown): string | null {
   if (!input || typeof input !== "object") return null;
   const row = input as Record<string, unknown>;
@@ -95,10 +86,14 @@ export function formatDiscoverConnectorsSummary(output: unknown): string | null 
   const row = output as {
     askOptions?: unknown[];
     candidates?: Array<{ connector?: string; actionSlug?: string; name?: string }>;
+    suggestedBindings?: Array<{ connector?: string; actionSlug?: string }>;
     selected?: { connector?: string; actionSlug?: string };
   };
   if (row.selected?.connector) {
     return `Selected ${row.selected.connector}${row.selected.actionSlug ? ` · ${row.selected.actionSlug}` : ""}`;
+  }
+  if (row.suggestedBindings?.length != null) {
+    return `${row.suggestedBindings.length} binding${row.suggestedBindings.length === 1 ? "" : "s"} suggested`;
   }
   const count = row.askOptions?.length ?? row.candidates?.length;
   if (count != null) return `${count} option${count === 1 ? "" : "s"} ranked`;

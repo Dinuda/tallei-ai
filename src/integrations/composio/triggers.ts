@@ -8,7 +8,8 @@ import {
   type LoopTriggerSubscriptionRow,
 } from "./trigger-channels.js";
 import { resolveToolkitSlug } from "./auth.js";
-import { getComposioClient, isComposioConfigured, toObjectRecord } from "./client.js";
+import { getComposioClient, getComposioToolkitVersion, toObjectRecord } from "./client.js";
+import { readComposioMetadata } from "./metadata-cache.js";
 
 export type ComposioTriggerTypeRow = {
   slug: string;
@@ -16,6 +17,11 @@ export type ComposioTriggerTypeRow = {
 };
 
 const MIN_TRIGGER_SCORE = 4;
+const TOOLKIT_TRIGGER_CACHE_POLICY = {
+  freshTtlMs: 6 * 60 * 60 * 1000,
+  staleTtlMs: 24 * 60 * 60 * 1000,
+  emptyTtlMs: 2 * 60 * 1000,
+} as const;
 
 export function scoreTriggerSlugMatch(
   eventType: string,
@@ -28,27 +34,34 @@ export function scoreTriggerSlugMatch(
 }
 
 export async function listComposioTriggerTypes(toolkit: string): Promise<ComposioTriggerTypeRow[]> {
-  const composio = getComposioClient() as unknown as {
-    client?: {
-      triggersTypes?: {
-        list?: (input: Record<string, unknown>) => Promise<unknown>;
+  const toolkitVersion = getComposioToolkitVersion(toolkit);
+  return readComposioMetadata(
+    `composio:triggers:${toolkit}:${toolkitVersion}:v1`,
+    async () => {
+      const composio = getComposioClient() as unknown as {
+        client?: {
+          triggersTypes?: {
+            list?: (input: Record<string, unknown>) => Promise<unknown>;
+          };
+        };
       };
-    };
-  };
-  const response = toObjectRecord(
-    await composio.client?.triggersTypes?.list?.({
-      toolkit_slugs: [toolkit],
-      toolkit_versions: "latest",
-      limit: 50,
-    }),
+      const response = toObjectRecord(
+        await composio.client?.triggersTypes?.list?.({
+          toolkit_slugs: [toolkit],
+          toolkit_versions: toolkitVersion,
+          limit: 50,
+        }),
+      );
+      const items = Array.isArray(response.items) ? response.items : [];
+      return items.flatMap((item) => {
+        const row = toObjectRecord(item);
+        const slug = String(row.slug ?? "").trim();
+        if (!slug) return [];
+        return [{ slug, name: String(row.name ?? slug).trim() }];
+      });
+    },
+    TOOLKIT_TRIGGER_CACHE_POLICY,
   );
-  const items = Array.isArray(response.items) ? response.items : [];
-  return items.flatMap((item) => {
-    const row = toObjectRecord(item);
-    const slug = String(row.slug ?? "").trim();
-    if (!slug) return [];
-    return [{ slug, name: String(row.name ?? slug).trim() }];
-  });
 }
 
 function pickAvailableSlug(

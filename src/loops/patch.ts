@@ -133,7 +133,7 @@ export function seedSpecFromTemplate(
         profile: "agentic",
         trigger: { kind: "schedule", cron: "0 9 * * 5", timezone: "UTC" },
         output: { kind: "email" },
-        approval: { mode: "ask", sensitiveCapabilities: ["email.send"] },
+        approval: { mode: "mixed", sensitiveRoles: ["destination"], sensitiveCapabilities: ["email.send"] },
       });
     case "lead_scoring":
       return applySpecPatch(base, {
@@ -155,7 +155,7 @@ export function seedSpecFromTemplate(
         },
         profile: "agentic",
         trigger: { kind: "event", source: "zendesk", composioSlug: "ZENDESK_NEW_TICKET", eventType: "ticket.created" },
-        approval: { mode: "ask", sensitiveCapabilities: ["support.reply.send"] },
+        approval: { mode: "mixed", sensitiveRoles: ["destination"], sensitiveCapabilities: ["support.reply.send"] },
       });
     case "smart_alerts":
       return applySpecPatch(base, {

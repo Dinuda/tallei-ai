@@ -58,11 +58,9 @@ flowchart TD
 | Tool | Server execute? | Purpose |
 |------|-----------------|--------|
 | `patchLoopSpec` | yes | Apply a partial spec patch (`intent`, `taskBlueprint`, bindings, trigger, output, agent, approval). Gated: bindings/triggers/output.connector blocked until blueprint connectors are chosen. |
-| `listConnectorCatalog` | yes | Scoped toolkit lookup when `toolkit` is passed; full catalogue only when browsing without a filter. Use `includeTriggers: true` for event slugs. |
 | `discoverConnectorsForBlueprint` | yes | Rank apps for the whole blueprint (each app once). Returns `askOptions`, `recommendedOptionIds`, `defaultQuestion`. Connected apps get a ranking boost only — user always picks via `pickConnectorApp`. |
 | `pickConnectorApp` | **no** (UI-only) | Present app picker; optional `question` text only — options come from the last discovery output in the transcript. |
-| `discoverBindings` | yes | Search + rank Composio **actions** within a **chosen** connector |
-| `listConnectors` | yes | Limited session connector list (prefer catalogue + discovery) |
+| `discoverBindings` | yes | Search + rank Composio **actions** within a **chosen** connector. Returns `suggestedBindings` only. |
 | `listTriggers` | yes | List Composio event triggers for a toolkit |
 | `listActions` | yes | Full action dump for one toolkit |
 | `connectToolkit` | yes | Start OAuth for a toolkit |
@@ -168,7 +166,7 @@ sequenceDiagram
   C->>S: patchLoopSpec — selectedConnector on all pending non-transform outcomes
 
   C->>B: discoverBindings per connector
-  B-->>C: suggestedBindings (auto-apply unless needsUserChoice)
+  B-->>C: suggestedBindings
   C->>S: patch bindings, event trigger, output, approval
 
   C->>U: Summarize choices; presentReplyOptions for compile/test when ready
@@ -326,11 +324,11 @@ After connector pick, pending outcomes get `selectedConnector` + `status: "chose
 
 ## Binding discovery
 
-After connectors are chosen, `discoverBindings` resolves Composio actions. Returns `suggestedBindings` — Conductor should auto-apply them. `needsUserChoice` is rare (send vs draft forks only); use discovery’s plain-language `askOptions`, never invented capability bundles.
+After connectors are chosen, `discoverBindings` resolves Composio actions. Returns `suggestedBindings` only — Conductor should auto-apply them.
 
 **Connectors in chat only** — the Conductor UI does not poll connectors separately; OAuth is initiated through `connectToolkit` in conversation.
 
-**API:** `GET /api/connectors/catalog` — merged catalogue for UI and `listConnectorCatalog`.
+**API:** `GET /api/connectors/catalog` — merged catalogue for UI.
 
 **Conductor ownership:** The model configures triggers, bindings, `agent.instructions`, and output from the user's goal — not a checklist of missing slots.
 

@@ -224,6 +224,61 @@ const CONDUCTOR_UI_ONLY_TOOLS = new Set([
   "confirmOutcomeBrief",
 ]);
 
+function hasQuestionOptionsInput(input: unknown): boolean {
+  if (!input || typeof input !== "object") return false;
+  const row = input as { question?: string; options?: unknown[] };
+  return typeof row.question === "string"
+    && row.question.trim().length > 0
+    && Array.isArray(row.options)
+    && row.options.length >= 2;
+}
+
+function hasPresentReplyOptionsInput(input: unknown): boolean {
+  return Boolean(
+    input
+    && typeof input === "object"
+    && Array.isArray((input as { options?: unknown[] }).options)
+    && (input as { options?: unknown[] }).options!.length >= 2,
+  );
+}
+
+function hasConfirmOutcomeBriefInput(input: unknown): boolean {
+  if (!input || typeof input !== "object") return false;
+  const row = input as { briefHash?: string };
+  return typeof row.briefHash === "string"
+    && row.briefHash.trim().length > 0
+    && hasQuestionOptionsInput(input);
+}
+
+function hasPickConnectorAppInput(input: unknown): boolean {
+  if (!input || typeof input !== "object") return false;
+  const row = input as { outcomeId?: string };
+  return typeof row.outcomeId === "string" && row.outcomeId.trim().length > 0;
+}
+
+function isResumableUiToolPart(
+  toolName: string,
+  state: string | undefined,
+  input: unknown,
+  output: unknown,
+): boolean {
+  if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName) || output != null) return false;
+  if (state === "input-available") return true;
+  if (state !== "input-streaming") return false;
+  switch (toolName) {
+    case "askQuestion":
+      return hasQuestionOptionsInput(input);
+    case "pickConnectorApp":
+      return hasPickConnectorAppInput(input);
+    case "presentReplyOptions":
+      return hasPresentReplyOptionsInput(input);
+    case "confirmOutcomeBrief":
+      return hasConfirmOutcomeBriefInput(input);
+    default:
+      return false;
+  }
+}
+
 export type StaleConfirmOutcomeBriefCall = {
   toolCallId: string;
   briefHash: string;
@@ -232,8 +287,7 @@ export type StaleConfirmOutcomeBriefCall = {
 function isUnansweredUiToolPart(part: { type: string; toolName?: string; state?: string; output?: unknown }): boolean {
   if (!isToolPart(part.type)) return false;
   const toolName = resolveToolPartName(part);
-  if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName)) return false;
-  return part.state === "input-available" && part.output == null;
+  return isResumableUiToolPart(toolName, part.state, (part as { input?: unknown }).input, part.output);
 }
 
 export function findLatestReviewOutcomeBrief(messages: UIMessage[]): OutcomeBriefReviewOutput | null {
@@ -330,7 +384,7 @@ export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBr
       const part = parts[j];
       if (!isConfirmOutcomeBriefPart(part)) continue;
       const toolPart = part as ConfirmOutcomeBriefToolPart;
-      if (toolPart.state === "input-available" && toolPart.output == null) {
+      if (isResumableUiToolPart("confirmOutcomeBrief", toolPart.state, toolPart.input, toolPart.output)) {
         const confirmInput = toolPart.input;
         if (!confirmInput?.briefHash || !confirmInput.question || !confirmInput.options?.length) continue;
         return {
@@ -405,7 +459,7 @@ export function findPendingInteractivePrompt(
 
       if (isPickConnectorAppPart(part)) {
         const pickPart = part as PickConnectorAppToolPart;
-        if (pickPart.state === "input-available" && pickPart.output == null) {
+        if (isResumableUiToolPart("pickConnectorApp", pickPart.state, pickPart.input, pickPart.output)) {
           if (!blueprintNeedsConnectorPick(spec) || !discovery || !pickPart.input?.outcomeId) continue;
           const input = buildConnectorPickInput(discovery, pickPart.input.outcomeId, pickPart.input.question);
           if (!input) continue;
@@ -419,7 +473,7 @@ export function findPendingInteractivePrompt(
 
       if (isAskQuestionPart(part)) {
         const askPart = part as AskQuestionToolPart;
-        if (askPart.state === "input-available" && askPart.output == null) {
+        if (isResumableUiToolPart("askQuestion", askPart.state, askPart.input, askPart.output)) {
           const input = askPart.input;
           if (!input?.question || !input.options?.length) continue;
 

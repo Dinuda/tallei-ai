@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { LoopSpec } from "./spec.js";
 import type { OutcomeBriefUserSummary } from "./outcome-brief-summary.js";
+import { describeApprovalPolicy } from "./approval-policy.js";
 
 export type { OutcomeBriefUserSummary };
 
@@ -54,7 +55,7 @@ export function buildOutcomeBrief(spec: LoopSpec): OutcomeBrief {
         connector: outcome.selectedConnector!,
       })),
     output: [spec.output.kind, spec.output.target, spec.output.connector].filter(Boolean).join(": "),
-    approvals: `${spec.approval.mode}; sensitive: ${spec.approval.sensitiveCapabilities.join(", ") || "none"}`,
+    approvals: describeApprovalPolicy(spec.approval),
     guardrails: [
       `Maximum run: ${spec.guardrails.maxRunDurationMinutes} minutes`,
       `Retries per step: ${spec.guardrails.maxRetriesPerStep}`,

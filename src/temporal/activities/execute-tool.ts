@@ -2,7 +2,7 @@ import { executeComposioAction } from "../../integrations/composio/execute.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { ResolvedTool } from "../../loops/spec.js";
 import { clampComposioArgsForRuntime } from "../../loops/composio-runtime-args.js";
-import { validateToolArgsAgainstSchema } from "../../loops/tool-schema.js";
+import { filterArgsToSchemaProperties, validateToolArgsAgainstSchema } from "../../loops/tool-schema.js";
 import { compactEmailReadToolResult } from "../../loops/tool-result-compact.js";
 import { insertRunStep, updateLoopRun } from "../../loops/store.js";
 
@@ -15,12 +15,13 @@ export async function executeToolActivity(input: {
 }): Promise<unknown> {
   await updateLoopRun(input.runId, { status: "running" });
 
-  const args = clampComposioArgsForRuntime({
-    actionSlug: input.tool.actionSlug,
-    capability: input.tool.capability,
-    inputSchema: input.tool.inputSchema,
-    args: input.args,
-  });
+  const args = filterArgsToSchemaProperties(
+    clampComposioArgsForRuntime({
+      inputSchema: input.tool.inputSchema,
+      args: input.args,
+    }),
+    input.tool.inputSchema,
+  );
 
   const validation = validateToolArgsAgainstSchema(args, input.tool.inputSchema);
   if (!validation.ok) {

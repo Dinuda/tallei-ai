@@ -194,9 +194,8 @@ export function buildComposioToolContract(input: {
     originalOutputSchema: input.outputSchema,
     existing: input.existingInstruction,
   });
-  const outputSufficiencyPaths = input.bindingRole === "source"
-    ? composioAction.outputInstructions.map((instruction) => instruction.path ?? instruction.name)
-    : [];
+  const outputSufficiencyPaths = composioAction.outputInstructions
+    .map((instruction) => instruction.path ?? instruction.name);
   return {
     contract: {
       originalInputSchema: input.inputSchema,
