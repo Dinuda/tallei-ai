@@ -1,4 +1,4 @@
-import { executeComposioAction } from "../../integrations/composio/execute.js";
+import { getConnectorProvider } from "../../integrations/connectors/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { ResolvedTool } from "../../loops/spec.js";
 import { clampComposioArgsForRuntime } from "../../loops/composio-runtime-args.js";
@@ -46,11 +46,11 @@ export async function executeToolActivity(input: {
     return result;
   }
 
-  const raw = await executeComposioAction({
+  const raw = await getConnectorProvider().execute({
     auth: input.auth,
-    connector: input.tool.connector,
+    toolkit: input.tool.connector,
     actionSlug: input.tool.actionSlug,
-    credentialRef: input.tool.credentialRef,
+    connectedAccountId: input.tool.credentialRef,
     args,
     toolkitVersion: input.tool.toolkitVersion,
   });

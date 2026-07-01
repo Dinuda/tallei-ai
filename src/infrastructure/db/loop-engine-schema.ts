@@ -96,6 +96,28 @@ export async function ensureLoopEngineSchema(client: DbClient): Promise<void> {
   `);
 
   await client.query(`
+    CREATE TABLE IF NOT EXISTS connector_connections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      provider TEXT NOT NULL,
+      tenant_id UUID NOT NULL,
+      user_id UUID NOT NULL,
+      workspace_id UUID,
+      toolkit TEXT NOT NULL,
+      external_account_id TEXT,
+      external_request_id TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'connected', 'disconnected', 'failed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE NULLS NOT DISTINCT (provider, tenant_id, user_id, workspace_id, toolkit)
+    );
+    CREATE INDEX IF NOT EXISTS idx_connector_connections_owner
+      ON connector_connections(provider, tenant_id, user_id, workspace_id, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_connections_request
+      ON connector_connections(provider, external_request_id)
+      WHERE external_request_id IS NOT NULL;
+  `);
+
+  await client.query(`
     CREATE TABLE IF NOT EXISTS workspace_memory_records (
       id UUID PRIMARY KEY,
       tenant_id UUID NOT NULL,

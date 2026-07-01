@@ -1,4 +1,4 @@
-import { getAllTools, searchTools } from "../integrations/composio/tools.js";
+import { getConnectorProvider } from "../integrations/connectors/index.js";
 import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/composio/auth.js";
 import {
   capabilityForAction,
@@ -145,14 +145,14 @@ export async function rankBindingCandidates(
   const triggerFields = options?.triggerFields;
 
   if (looksLikeComposioActionSlug(outcomeDescription)) {
-    const tools = await getAllTools(normalizedConnector);
+    const tools = await getConnectorProvider().listActions(normalizedConnector);
     const direct = tools.find((tool) => tool.actionSlug.toUpperCase() === outcomeDescription.toUpperCase());
     if (direct) {
       mergeCandidates(byAction, toCandidate(direct, MIN_CAPABILITY_SCORE + 4));
     }
   }
 
-  const searchResults = await searchTools(`${normalizedConnector} ${outcomeDescription}`, 24);
+  const searchResults = await getConnectorProvider().searchActions(`${normalizedConnector} ${outcomeDescription}`, 24);
   for (const result of searchResults) {
     if (normalizeToolkitSlug(result.toolkit) !== normalizeToolkitSlug(normalizedConnector)) continue;
     const score = scoreAction(outcomeDescription, result, triggerFields);
@@ -160,7 +160,7 @@ export async function rankBindingCandidates(
     mergeCandidates(byAction, toCandidate(result, score));
   }
 
-  const toolkitTools = await getAllTools(normalizedConnector);
+  const toolkitTools = await getConnectorProvider().listActions(normalizedConnector);
   for (const tool of toolkitTools) {
     const score = scoreAction(outcomeDescription, tool, triggerFields);
     if (score <= 0) continue;
@@ -220,7 +220,7 @@ export async function resolveExplicitBindingAction(
   actionSlug: string,
 ): Promise<ExplicitActionResolution> {
   const normalizedConnector = await resolveToolkitSlug(connector);
-  const tools = await getAllTools(normalizedConnector);
+  const tools = await getConnectorProvider().listActions(normalizedConnector);
   const scopedResolution = selectExplicitBindingAction({
     connector: normalizedConnector,
     actionSlug,
@@ -229,7 +229,7 @@ export async function resolveExplicitBindingAction(
   });
   if (scopedResolution.ok) return scopedResolution;
 
-  const globalMatches = await searchTools(actionSlug, 50);
+  const globalMatches = await getConnectorProvider().searchActions(actionSlug, 50);
   return selectExplicitBindingAction({
     connector: normalizedConnector,
     actionSlug,

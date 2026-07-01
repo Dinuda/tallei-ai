@@ -1,22 +1,20 @@
 import type { AuthContext } from "../../domain/auth/index.js";
+import { config } from "../../config/index.js";
 import {
   deleteTtlCacheEntry,
   getTtlCacheEntry,
   setTtlCacheEntry,
   type TtlCacheStore,
 } from "../../infrastructure/cache/ttl-cache.js";
-import { authorizeToolkitForUser, normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
-import { composioRequest, isComposioConfigured } from "./client.js";
+import {
+  findConnectorConnectionByRequest,
+  upsertConnectorConnection,
+} from "../../infrastructure/repositories/connector-connection.repository.js";
+import { normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
+import { composioRequest, getComposioClient, getComposioEntityId, isComposioConfigured } from "./client.js";
 import { listComposioTriggerTypes, type ComposioTriggerTypeRow } from "./triggers.js";
 import { listToolkits } from "./tools.js";
-import {
-  clearSessionCache,
-  createSession,
-  listAllSessionToolkits,
-  listSessionToolkits,
-  listToolkitsForUser,
-} from "./session.js";
-import type { ComposioConnectedAccount, ComposioToolkitView } from "./types.js";
+import type { ComposioToolkitView } from "./types.js";
 
 export type WorkspaceConnectorView = {
   slug: string;
@@ -38,17 +36,6 @@ export type ToolkitConnectionStatus = {
   status: "connected" | "disconnected" | "pending";
 };
 
-type PendingAuthorization = {
-  auth: AuthContext;
-  toolkit: string;
-  sessionId: string;
-  waitForConnection: (timeout?: number) => Promise<ComposioConnectedAccount>;
-  expiresAt: number;
-};
-
-const PENDING_TTL_MS = 15 * 60 * 1000;
-const pendingAuthorizations = new Map<string, PendingAuthorization>();
-
 const CONNECTORS_CACHE_TTL_MS = 60_000;
 const CONNECTORS_CACHE_MAX_SIZE = 200;
 const connectorsCache: TtlCacheStore<WorkspaceConnectorView[]> = new Map();
@@ -66,13 +53,6 @@ export function resetWorkspaceConnectorsCacheForTests(): void {
   connectorsCache.clear();
 }
 
-function prunePendingAuthorizations(): void {
-  const now = Date.now();
-  for (const [key, value] of pendingAuthorizations) {
-    if (value.expiresAt <= now) pendingAuthorizations.delete(key);
-  }
-}
-
 function mapToolkitView(toolkit: ComposioToolkitView): WorkspaceConnectorView {
   return {
     slug: toolkit.slug,
@@ -82,6 +62,70 @@ function mapToolkitView(toolkit: ComposioToolkitView): WorkspaceConnectorView {
     connected: Boolean(toolkit.connected),
     ...(toolkit.connectedAccountId ? { connectedAccountId: toolkit.connectedAccountId } : {}),
   };
+}
+
+type DirectConnectedAccount = {
+  id: string;
+  status: string;
+  toolkit: { slug: string };
+  updatedAt: string;
+};
+
+async function listDirectConnectedAccounts(auth: AuthContext): Promise<DirectConnectedAccount[]> {
+  const composio = getComposioClient();
+  const userId = getComposioEntityId(auth);
+  const accounts: DirectConnectedAccount[] = [];
+  let cursor: string | null | undefined;
+  do {
+    const page = await composio.connectedAccounts.list({
+      userIds: [userId],
+      statuses: ["ACTIVE"],
+      orderBy: "updated_at",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    accounts.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  const selectedByToolkit = new Map<string, DirectConnectedAccount>();
+  for (const account of accounts.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+    const toolkit = normalizeToolkitSlug(account.toolkit.slug);
+    if (!selectedByToolkit.has(toolkit)) selectedByToolkit.set(toolkit, account);
+  }
+  const selected = [...selectedByToolkit.values()];
+  await Promise.all(selected.map((account) => upsertConnectorConnection({
+    auth,
+    provider: "composio",
+    toolkit: normalizeToolkitSlug(account.toolkit.slug),
+    externalAccountId: account.id,
+    status: "connected",
+  })));
+  return selected;
+}
+
+async function resolveAuthConfigId(toolkit: string): Promise<string> {
+  const composio = getComposioClient();
+  const configured = config.composioAuthConfigId.trim();
+  if (configured) {
+    const authConfig = await composio.authConfigs.get(configured);
+    if (normalizeToolkitSlug(authConfig.toolkit.slug) !== normalizeToolkitSlug(toolkit)) {
+      throw new Error(`Configured Composio auth config does not belong to ${toolkit}`);
+    }
+    return configured;
+  }
+  const response = await composio.authConfigs.list({ toolkit, isComposioManaged: true, limit: 50 });
+  return selectComposioAuthConfigId(toolkit, response.items);
+}
+
+export function selectComposioAuthConfigId(
+  toolkit: string,
+  configs: Array<{ id: string; status: string }>,
+): string {
+  const enabled = configs.filter((item) => item.status.toUpperCase() === "ENABLED");
+  if (enabled.length !== 1) {
+    throw new Error(`Expected one enabled Composio-managed auth config for ${toolkit}; found ${enabled.length}`);
+  }
+  return enabled[0]!.id;
 }
 
 export async function withWorkspaceConnectorsCache(
@@ -99,8 +143,17 @@ export async function withWorkspaceConnectorsCache(
 export async function listWorkspaceConnectors(auth: AuthContext): Promise<WorkspaceConnectorView[]> {
   if (!isComposioConfigured()) return [];
   return withWorkspaceConnectorsCache(auth, async () => {
-    const { toolkits } = await listToolkitsForUser(auth, { limit: 50 });
-    return toolkits.map(mapToolkitView);
+    const catalog = await listToolkits();
+    const accounts = await listDirectConnectedAccounts(auth);
+    const activeByToolkit = new Map(accounts.map((account) => [normalizeToolkitSlug(account.toolkit.slug), account]));
+    return catalog.map((toolkit) => {
+      const account = activeByToolkit.get(normalizeToolkitSlug(toolkit.slug));
+      return mapToolkitView({
+        ...toolkit,
+        connected: Boolean(account),
+        ...(account ? { connectedAccountId: account.id } : {}),
+      });
+    });
   });
 }
 
@@ -111,11 +164,15 @@ export async function listAllToolkitsWithStatus(auth: AuthContext): Promise<{
 }> {
   if (!isComposioConfigured()) return { toolkits: [], total: 0 };
 
-  const [catalog, session] = await Promise.all([
-    listToolkits(),
-    createSession(auth),
-  ]);
-  const sessionRows = await listAllSessionToolkits(session);
+  const [catalog, accounts] = await Promise.all([listToolkits(), listDirectConnectedAccounts(auth)]);
+  const sessionRows: ComposioToolkitView[] = accounts.map((account) => ({
+    slug: account.toolkit.slug,
+    name: account.toolkit.slug,
+    description: "",
+    logo: "",
+    connected: true,
+    connectedAccountId: account.id,
+  }));
   const statusBySlug = new Map(
     sessionRows.map((row) => [normalizeToolkitSlug(row.slug), row] as const),
   );
@@ -226,13 +283,13 @@ export async function getToolkitConnectionStatus(
   if (!slug || !isComposioConfigured()) {
     return { toolkit: slug || toolkit, connected: false, status: "disconnected" };
   }
-  const { toolkits } = await listToolkitsForUser(auth, { limit: 50, search: slug });
-  const match = toolkits.find((row) => normalizeToolkitSlug(row.slug) === normalizeToolkitSlug(slug));
-  const connected = Boolean(match?.connected && match.connectedAccountId);
+  const accounts = await listDirectConnectedAccounts(auth);
+  const match = accounts.find((row) => normalizeToolkitSlug(row.toolkit.slug) === normalizeToolkitSlug(slug));
+  const connected = Boolean(match?.id);
   return {
     toolkit: slug,
     connected,
-    ...(match?.connectedAccountId ? { connectedAccountId: match.connectedAccountId } : {}),
+    ...(match?.id ? { connectedAccountId: match.id } : {}),
     status: connected ? "connected" : "disconnected",
   };
 }
@@ -249,20 +306,27 @@ export async function startToolkitAuthorization(
 }> {
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
   const normalized = await resolveToolkitSlug(toolkit);
-  const { session, redirectUrl, connectionRequestId, waitForConnection } = await authorizeToolkitForUser(
-    auth,
-    normalized,
-    { callbackUrl: options?.callbackUrl },
+  const authConfigId = await resolveAuthConfigId(normalized);
+  const request = await getComposioClient().connectedAccounts.link(
+    getComposioEntityId(auth),
+    authConfigId,
+    { ...(options?.callbackUrl ? { callbackUrl: options.callbackUrl } : {}) },
   );
-  prunePendingAuthorizations();
-  pendingAuthorizations.set(connectionRequestId, {
+  if (!request.redirectUrl) throw new Error(`Composio did not return a redirect URL for toolkit "${normalized}"`);
+  await upsertConnectorConnection({
     auth,
+    provider: "composio",
     toolkit: normalized,
-    sessionId: session.sessionId,
-    waitForConnection,
-    expiresAt: Date.now() + PENDING_TTL_MS,
+    externalAccountId: request.id,
+    externalRequestId: request.id,
+    status: "pending",
   });
-  return { sessionId: session.sessionId, redirectUrl, connectionRequestId, toolkit: normalized };
+  return {
+    sessionId: request.id,
+    redirectUrl: request.redirectUrl,
+    connectionRequestId: request.id,
+    toolkit: normalized,
+  };
 }
 
 export async function verifyToolkitConnection(
@@ -273,21 +337,36 @@ export async function verifyToolkitConnection(
     throw new Error("Composio is not configured");
   }
 
-  prunePendingAuthorizations();
   const pending = input.connectionRequestId
-    ? pendingAuthorizations.get(input.connectionRequestId)
-    : undefined;
+    ? await findConnectorConnectionByRequest({
+        auth,
+        provider: "composio",
+        externalRequestId: input.connectionRequestId,
+      })
+    : null;
+  if (input.connectionRequestId && !pending) {
+    throw new Error("Connector authorization request not found for this workspace");
+  }
   const toolkit = await resolveToolkitSlug(input.toolkit ?? pending?.toolkit ?? "");
   if (!toolkit) throw new Error("Toolkit is required");
 
-  if (pending) {
+  if (input.connectionRequestId) {
     try {
-      await pending.waitForConnection(input.timeoutMs ?? 5_000);
+      const account = await getComposioClient().connectedAccounts.waitForConnection(
+        input.connectionRequestId,
+        input.timeoutMs ?? 5_000,
+      );
+      await upsertConnectorConnection({
+        auth,
+        provider: "composio",
+        toolkit,
+        externalAccountId: account.id,
+        externalRequestId: input.connectionRequestId,
+        status: account.status === "ACTIVE" ? "connected" : "pending",
+      });
     } catch {
       // Fall through to live toolkit listing.
     }
-    pendingAuthorizations.delete(input.connectionRequestId!);
-    clearSessionCache();
     invalidateWorkspaceConnectorsCache(auth);
   }
 
@@ -295,6 +374,14 @@ export async function verifyToolkitConnection(
   if (!status.connected) {
     return { ...status, status: pending ? "pending" : "disconnected" };
   }
+  await upsertConnectorConnection({
+    auth,
+    provider: "composio",
+    toolkit,
+    externalAccountId: status.connectedAccountId,
+    externalRequestId: input.connectionRequestId,
+    status: "connected",
+  });
   return status;
 }
 
@@ -304,23 +391,16 @@ export async function disconnectToolkit(auth: AuthContext, toolkit: string): Pro
   if (!status.connectedAccountId) {
     throw new Error(`${normalizeToolkitSlug(toolkit)} is not connected`);
   }
-  const accountId = status.connectedAccountId;
-  const paths = [
-    `/api/v3/connected_accounts/${encodeURIComponent(accountId)}`,
-    `/api/v3.1/connected_accounts/${encodeURIComponent(accountId)}`,
-  ];
-  let lastError: Error | null = null;
-  for (const path of paths) {
-    try {
-      await composioRequest({ path, method: "DELETE" });
-      clearSessionCache();
-      invalidateWorkspaceConnectorsCache(auth);
-      return { ok: true };
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-    }
-  }
-  throw lastError ?? new Error("Failed to disconnect toolkit");
+  await getComposioClient().connectedAccounts.delete(status.connectedAccountId);
+  await upsertConnectorConnection({
+    auth,
+    provider: "composio",
+    toolkit: await resolveToolkitSlug(toolkit),
+    externalAccountId: status.connectedAccountId,
+    status: "disconnected",
+  });
+  invalidateWorkspaceConnectorsCache(auth);
+  return { ok: true };
 }
 
 export async function resolveConnectedAccountId(
@@ -333,6 +413,13 @@ export async function resolveConnectedAccountId(
 
 export async function listConnectedToolkitsForAuth(auth: AuthContext): Promise<ComposioToolkitView[]> {
   if (!isComposioConfigured()) return [];
-  const session = await createSession(auth);
-  return listSessionToolkits(session, { isConnected: true, limit: 50 });
+  const accounts = await listDirectConnectedAccounts(auth);
+  return accounts.map((account) => ({
+    slug: account.toolkit.slug,
+    name: account.toolkit.slug,
+    description: "",
+    logo: "",
+    connected: true,
+    connectedAccountId: account.id,
+  }));
 }

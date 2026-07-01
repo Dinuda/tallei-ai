@@ -1,8 +1,7 @@
 import type { AuthContext } from "../domain/auth/index.js";
-import { listAllToolkitsWithStatus } from "../integrations/composio/accounts.js";
-import type { CatalogToolkitView } from "../integrations/composio/accounts.js";
+import { getConnectorProvider } from "../integrations/connectors/index.js";
+import type { ConnectorToolkit } from "../integrations/connectors/index.js";
 import { normalizeToolkitSlug } from "../integrations/composio/auth.js";
-import { searchTools } from "../integrations/composio/tools.js";
 import type { ComposioToolSearchResult } from "../integrations/composio/types.js";
 import { scoreOutcomeRelevance } from "./binding-discovery.js";
 import type { BindingAskOption } from "./binding-discovery.js";
@@ -50,8 +49,8 @@ export type BlueprintConnectorDiscoveryResult = {
 };
 
 type ConnectorDiscoveryDependencies = {
-  loadToolkits: typeof listAllToolkitsWithStatus;
-  searchTools: typeof searchTools;
+  loadToolkits: (auth: AuthContext) => Promise<{ toolkits: ConnectorToolkit[]; total: number }>;
+  searchTools: (query: string, limit?: number) => Promise<ComposioToolSearchResult[]>;
   now: () => number;
   logTiming: (timing: ConnectorDiscoveryTiming) => void;
 };
@@ -64,8 +63,18 @@ type ConnectorDiscoveryTiming = {
 };
 
 const defaultDiscoveryDependencies: ConnectorDiscoveryDependencies = {
-  loadToolkits: listAllToolkitsWithStatus,
-  searchTools,
+  loadToolkits: async (auth) => {
+    const toolkits = await getConnectorProvider().listCatalogWithConnections(auth);
+    return { toolkits, total: toolkits.length };
+  },
+  searchTools: async (query, limit) => {
+    const results = await getConnectorProvider().searchActions(query, limit);
+    return results.map((result) => ({
+      ...result,
+      toolkitName: result.toolkitName ?? result.toolkit,
+      tags: result.tags ?? [],
+    }));
+  },
   now: Date.now,
   logTiming: (timing) => {
     console.info("[loops/connector-discovery] timing", timing);
@@ -110,7 +119,7 @@ export function inferCatalogToolkitHints(
 }
 
 function ensureHintCandidates(
-  toolkits: Awaited<ReturnType<typeof listAllToolkitsWithStatus>>["toolkits"],
+  toolkits: ConnectorToolkit[],
   hints: string[],
   scoresByToolkit: Map<string, { score: number; actions: Array<{ actionSlug: string; name: string }> }>,
   role: string,
@@ -312,7 +321,7 @@ function rankConnectorsForOutcome(input: {
   outcomeDescription: string;
   role: "trigger" | "source" | "transform" | "destination";
   limit?: number;
-  toolkits: CatalogToolkitView[];
+  toolkits: ConnectorToolkit[];
   searchResults: ComposioToolSearchResult[];
 }): ConnectorDiscoveryResult {
   const limit = Math.max(2, input.limit ?? TOP_CONNECTOR_RECOMMENDATIONS);

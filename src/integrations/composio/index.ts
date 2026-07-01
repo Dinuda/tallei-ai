@@ -8,19 +8,6 @@ export {
   toObjectRecord,
 } from "./client.js";
 export {
-  clearSessionCache,
-  createSession,
-  getOrCreateSession,
-  getSessionMcpHeaders,
-  getSessionMcpUrl,
-  getSessionTools,
-  invalidateSession,
-  listSessionToolkits,
-  listAllSessionToolkits,
-  listToolkitsForUser,
-  useSession,
-} from "./session.js";
-export {
   getAllTools,
   listToolkits,
   normalizeComposioAction,
@@ -28,14 +15,8 @@ export {
   orderedSearchActionSlugs,
   parseComposioSearchItems,
   searchTools,
-  searchToolsViaSession,
 } from "./tools.js";
-export {
-  authorizeToolkit,
-  authorizeToolkitForUser,
-  normalizeToolkitSlug,
-  resolveToolkitSlug,
-} from "./auth.js";
+export { normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
 export {
   listWorkspaceConnectors,
   listAllToolkitsWithStatus,

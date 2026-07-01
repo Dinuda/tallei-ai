@@ -1,6 +1,5 @@
 import { createHmac, timingSafeEqual } from "crypto";
 
-import { clearSessionCache } from "./session.js";
 import { toObjectRecord } from "./client.js";
 import { composioWebhookSecretsToTry } from "./webhook-subscription.js";
 
@@ -215,7 +214,6 @@ export function normalizeComposioWebhookPayload(payload: unknown): NormalizedCom
 
 export function handleComposioAuthWebhook(eventType: string): { ok: true; kind: "auth"; processed: boolean } {
   if (eventType.includes("connected") || eventType.includes("revoked") || eventType.includes("connection")) {
-    clearSessionCache();
     return { ok: true, kind: "auth", processed: true };
   }
   return { ok: true, kind: "auth", processed: false };

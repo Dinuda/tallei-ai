@@ -7,7 +7,7 @@ import {
   fetchConnectorPlaybook,
   PlaybookFetchError,
 } from "../integrations/composio/playbook.js";
-import { listToolkitsForUser } from "../integrations/composio/session.js";
+import { getConnectorProvider } from "../integrations/connectors/index.js";
 import {
   rankBindingCandidates,
   resolveExplicitBindingAction,
@@ -251,7 +251,7 @@ export async function compileLoopSpec(
     }
   }
 
-  const { toolkits } = await listToolkitsForUser(auth, { isConnected: true, limit: 50 });
+  const toolkits = (await getConnectorProvider().listCatalogWithConnections(auth)).filter((toolkit) => toolkit.connected);
   const connectedBySlug = new Map(toolkits.map((t) => [normalizeToolkitSlug(t.slug), t]));
 
   const toolCatalog: ToolCatalogDraft[] = [];

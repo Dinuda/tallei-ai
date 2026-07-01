@@ -20,10 +20,9 @@ import {
   updateLoopRun,
 } from "./store.js";
 import { resolveWorkspaceId } from "../services/workspace/index.js";
-import {
-  registerLoopEventTrigger,
-  unregisterLoopEventTrigger,
-} from "../integrations/composio/triggers.js";
+import { getConnectorProvider } from "../integrations/connectors/index.js";
+
+const connectorProvider = getConnectorProvider();
 
 export async function resolveLoopAuthWorkspace(auth: AuthContext, workspaceId?: string | null) {
   const resolved = await resolveWorkspaceId(auth, workspaceId ?? auth.workspaceId);
@@ -64,12 +63,12 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
 
   try {
     if (plan.trigger.kind === "event") {
-      await registerLoopEventTrigger({
+      await connectorProvider.registerTrigger({
         auth: ctx,
         loopId,
         workspaceId: loop.workspaceId,
-        source: plan.trigger.source,
-        composioSlug: plan.trigger.composioSlug,
+        toolkit: plan.trigger.source,
+        triggerSlug: plan.trigger.composioSlug,
         eventType: plan.trigger.eventType,
       });
     }
@@ -77,7 +76,7 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
     await activateCompiledPlan(ctx, loopId, compiledPlanId);
   } catch (error) {
     if (plan.trigger.kind === "event") {
-      await unregisterLoopEventTrigger(loopId).catch(() => undefined);
+      await connectorProvider.unregisterTrigger(loopId).catch(() => undefined);
     }
     throw error;
   }
@@ -108,7 +107,7 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
 }
 
 export async function pauseLoop(auth: AuthContext, loopId: string) {
-  await unregisterLoopEventTrigger(loopId);
+  await connectorProvider.unregisterTrigger(loopId);
   if (config.temporalEnabled) {
     const { deleteLoopSchedule } = await import("../temporal/schedules.js");
     await deleteLoopSchedule(loopId);
@@ -125,12 +124,12 @@ export async function resumeLoop(auth: AuthContext, loopId: string) {
   const ctx = await resolveLoopAuthWorkspace(auth, loop.workspaceId);
 
   if (plan.trigger.kind === "event") {
-    await registerLoopEventTrigger({
+    await connectorProvider.registerTrigger({
       auth: ctx,
       loopId,
       workspaceId: loop.workspaceId,
-      source: plan.trigger.source,
-      composioSlug: plan.trigger.composioSlug,
+      toolkit: plan.trigger.source,
+      triggerSlug: plan.trigger.composioSlug,
       eventType: plan.trigger.eventType,
     });
   }
@@ -222,7 +221,7 @@ export async function moveLoopToWorkspace(
 }
 
 export async function archiveLoop(auth: AuthContext, loopId: string) {
-  await unregisterLoopEventTrigger(loopId);
+  await connectorProvider.unregisterTrigger(loopId);
   if (config.temporalEnabled) {
     const { deleteLoopSchedule } = await import("../temporal/schedules.js");
     await deleteLoopSchedule(loopId);

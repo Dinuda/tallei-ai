@@ -1,11 +1,8 @@
 import type { AuthContext } from "../../domain/auth/index.js";
 import { normalizeToolkitSlug } from "./auth.js";
 import { isComposioConfigured } from "./client.js";
-import { createSession } from "./session.js";
-import type { ComposioAgentSession } from "./types.js";
-import type { ConnectorPlaybook, ToolBinding, LoopIntent } from "../../loops/spec.js";
+import type { ConnectorPlaybook, ToolBinding, LoopIntent, ToolPlannerCard } from "../../loops/spec.js";
 import { buildPlannerCardFromSchemas } from "../../loops/tool-planner-card.js";
-import type { ToolPlannerCard } from "../../loops/spec.js";
 import { getAllTools } from "./tools.js";
 
 export type PlaybookToolEntry = {
@@ -137,50 +134,13 @@ function parseSearchResponse(response: unknown): {
   };
 }
 
-async function resolveSchemaRefsViaSession(
-  session: ComposioAgentSession,
-  slugs: string[],
-): Promise<Record<string, { inputSchema?: Record<string, unknown>; outputSchema?: Record<string, unknown> }>> {
-  if (slugs.length === 0) return {};
-  try {
-    const result = await session.client.execute("COMPOSIO_GET_TOOL_SCHEMAS", {
-      arguments: {
-        tool_slugs: slugs,
-        include: ["input_schema", "output_schema"],
-      },
-    });
-    const row = asRecord(result) ?? {};
-    const data = asRecord(row.data) ?? row;
-    const schemas = asRecord(data.schemas ?? data.tool_schemas ?? data) ?? {};
-    const resolved: Record<string, { inputSchema?: Record<string, unknown>; outputSchema?: Record<string, unknown> }> = {};
-    for (const [slug, raw] of Object.entries(schemas)) {
-      const schema = asRecord(raw);
-      if (!schema) continue;
-      resolved[slug.toUpperCase()] = {
-        inputSchema: asRecord(schema.input_schema ?? schema.inputSchema) ?? undefined,
-        outputSchema: asRecord(schema.output_schema ?? schema.outputSchema) ?? undefined,
-      };
-    }
-    return resolved;
-  } catch (error) {
-    console.warn("[integrations/composio] GET_TOOL_SCHEMAS failed:", error);
-    return {};
-  }
-}
-
-function buildSearchQuery(intent: LoopIntent, bindings: ToolBinding[]): string {
-  const connectors = [...new Set(bindings.map((b) => b.connector))].join(" ");
-  const capabilities = bindings.map((b) => b.capability.replace(/\./g, " ")).join(" ");
-  return `${intent.outcome} ${intent.goal} ${connectors} ${capabilities}`.trim().replace(/\s+/g, " ");
-}
-
 function toolkitFromSlug(actionSlug: string): string {
   const part = actionSlug.split("_")[0] ?? "";
   return normalizeToolkitSlug(part);
 }
 
 export async function fetchConnectorPlaybook(
-  auth: AuthContext,
+  _auth: AuthContext,
   input: {
     intent: LoopIntent;
     bindings: ToolBinding[];
@@ -206,75 +166,25 @@ export async function fetchConnectorPlaybook(
     );
   }
 
-  let session: ComposioAgentSession;
-  try {
-    session = await createSession(auth, {
-      connectedAccounts: input.connectedAccounts,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new PlaybookFetchError("PLAYBOOK_SESSION_FAILED", `Composio session failed: ${message}`);
-  }
-
-  const searchQuery = buildSearchQuery(input.intent, input.bindings);
-  let parsed = {
-    toolSchemas: {} as ReturnType<typeof parseSearchResponse>["toolSchemas"],
-    relatedSlugs: [] as string[],
-    pitfalls: [] as string[],
-    workflowSteps: [] as string[],
-    sessionId: session.sessionId,
-  };
-
-  try {
-    const searchResponse = await session.client.search({ query: searchQuery });
-    parsed = { ...parseSearchResponse(searchResponse), sessionId: session.sessionId };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new PlaybookFetchError("PLAYBOOK_SEARCH_FAILED", `Composio playbook search failed: ${message}`);
-  }
-
-  const schemaRefSlugs = Object.entries(parsed.toolSchemas)
-    .filter(([, schema]) => schema.schemaRef && !schema.inputSchema)
-    .map(([slug]) => slug);
-  const missingBound = input.boundActionSlugs
-    .map((s) => s.toUpperCase())
-    .filter((slug) => !parsed.toolSchemas[slug]);
-  const refsToResolve = [...new Set([...schemaRefSlugs, ...missingBound])];
-
-  const resolvedRefs = await resolveSchemaRefsViaSession(session, refsToResolve.slice(0, 20));
-
   const toolsBySlug = new Map<string, PlaybookToolEntry>();
-  const allSlugs = new Set([
-    ...input.boundActionSlugs.map((s) => s.toUpperCase()),
-    ...parsed.relatedSlugs,
-    ...Object.keys(parsed.toolSchemas),
-  ]);
+  const toolkits = [...new Set(input.bindings.map((binding) => normalizeToolkitSlug(binding.connector)))];
+  const catalogues = new Map(
+    await Promise.all(toolkits.map(async (toolkit) => [toolkit, await getAllTools(toolkit)] as const)),
+  );
 
-  for (const slug of allSlugs) {
-    const fromSearch = parsed.toolSchemas[slug];
-    const fromResolve = resolvedRefs[slug];
-    let inputSchema = fromSearch?.inputSchema ?? fromResolve?.inputSchema ?? {};
-    let outputSchema = fromSearch?.outputSchema ?? fromResolve?.outputSchema;
-    let description = fromSearch?.description ?? slug;
-    let toolkit = fromSearch?.toolkit ? normalizeToolkitSlug(fromSearch.toolkit) : toolkitFromSlug(slug);
-
-    if (Object.keys(inputSchema).length === 0) {
-      const catalogue = await getAllTools(toolkit);
-      const matched = catalogue.find((t) => t.actionSlug.toUpperCase() === slug);
-      if (matched) {
-        inputSchema = matched.inputSchema ?? {};
-        outputSchema = outputSchema ?? matched.outputSchema;
-        description = matched.description || description;
-      }
-    }
+  for (const slug of new Set(input.boundActionSlugs.map((value) => value.toUpperCase()))) {
+    const binding = input.bindings.find((row) => row.actionSlug?.toUpperCase() === slug);
+    const toolkit = binding ? normalizeToolkitSlug(binding.connector) : toolkitFromSlug(slug);
+    const matched = catalogues.get(toolkit)?.find((tool) => tool.actionSlug.toUpperCase() === slug);
+    if (!matched) continue;
 
     toolsBySlug.set(slug, {
       actionSlug: slug,
       toolkit,
-      description,
-      inputSchema,
-      ...(outputSchema ? { outputSchema } : {}),
-      relatedActionSlugs: parsed.relatedSlugs.filter((s) => s !== slug),
+      description: matched.description || matched.name || slug,
+      inputSchema: matched.inputSchema ?? {},
+      ...(matched.outputSchema ? { outputSchema: matched.outputSchema } : {}),
+      relatedActionSlugs: [],
     });
   }
 
@@ -289,24 +199,19 @@ export async function fetchConnectorPlaybook(
   }
 
   const toolkitVersions: Record<string, string> = {};
-  for (const binding of input.bindings) {
-    const toolkit = normalizeToolkitSlug(binding.connector);
-    const tools = await getAllTools(toolkit);
+  for (const [toolkit, tools] of catalogues) {
     const version = tools.find((t) => t.toolkitVersion)?.toolkitVersion;
     if (version) toolkitVersions[toolkit] = version;
   }
 
   return {
     playbook: {
-      composioSessionId: parsed.sessionId,
       compiledAt,
       useCase,
-      ...(parsed.workflowSteps.length > 0 ? { workflowSteps: parsed.workflowSteps } : {}),
-      ...(parsed.pitfalls.length > 0 ? { pitfalls: parsed.pitfalls } : {}),
       ...(Object.keys(toolkitVersions).length > 0 ? { toolkitVersions } : {}),
     },
     toolsBySlug,
-    relatedSlugs: parsed.relatedSlugs,
+    relatedSlugs: [],
   };
 }
 

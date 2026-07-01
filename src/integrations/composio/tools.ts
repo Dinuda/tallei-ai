@@ -13,7 +13,6 @@ import {
 import { readComposioMetadata } from "./metadata-cache.js";
 import type {
   ComposioActionView,
-  ComposioAgentSession,
   ComposioToolSearchResult,
   ComposioToolkitView,
 } from "./types.js";
@@ -24,9 +23,15 @@ const TOOLKIT_CATALOG_CACHE_POLICY = {
   emptyTtlMs: 2 * 60 * 1000,
 } as const;
 
+const TOOLKIT_VERSION_CACHE_POLICY = {
+  freshTtlMs: 5 * 60 * 1000,
+  staleTtlMs: 60 * 60 * 1000,
+  emptyTtlMs: 60 * 1000,
+} as const;
+
 const TOOLKIT_ACTION_CACHE_POLICY = {
-  freshTtlMs: 6 * 60 * 60 * 1000,
-  staleTtlMs: 24 * 60 * 60 * 1000,
+  freshTtlMs: 5 * 365 * 24 * 60 * 60 * 1000,
+  staleTtlMs: 10 * 365 * 24 * 60 * 60 * 1000,
   emptyTtlMs: 2 * 60 * 1000,
 } as const;
 
@@ -116,74 +121,6 @@ export function parseComposioSearchItems(items: unknown[], cappedLimit: number):
   return [...merged.values()].slice(0, cappedLimit);
 }
 
-function actionFromSessionSchema(
-  slug: string,
-  schema: {
-    toolkit?: string;
-    toolSlug?: string;
-    description?: string;
-    inputSchema?: Record<string, unknown>;
-    outputSchema?: Record<string, unknown>;
-  },
-): ComposioActionView | null {
-  const toolkit = normalizeToolkitSlug(String(schema.toolkit ?? ""));
-  if (!toolkit) return null;
-  return {
-    toolkit,
-    actionSlug: slug,
-    name: slug,
-    description: String(schema.description ?? "").trim(),
-    inputSchema: schema.inputSchema ?? {},
-    ...(schema.outputSchema && Object.keys(schema.outputSchema).length > 0 ? { outputSchema: schema.outputSchema } : {}),
-  };
-}
-
-export async function searchToolsViaSession(
-  session: ComposioAgentSession,
-  query: string,
-): Promise<ComposioToolSearchResult[]> {
-  const normalizedQuery = query.trim().replace(/\s+/g, " ");
-  if (!normalizedQuery) return [];
-
-  const response = await withComposioTimeout(
-    session.client.search({ query: normalizedQuery }),
-    `Composio session search (${normalizedQuery})`,
-  );
-  if (!response.success || !Array.isArray(response.results)) return [];
-
-  const slugs = orderedSearchActionSlugs(response.results);
-  const toolSchemas = response.toolSchemas ?? {};
-  const results: ComposioToolSearchResult[] = [];
-
-  for (const slug of slugs) {
-    const schema = toolSchemas[slug];
-    if (schema) {
-      const action = actionFromSessionSchema(slug, schema);
-      if (action) {
-        results.push({
-          ...action,
-          toolkitName: normalizeToolkitSlug(String(schema.toolkit ?? action.toolkit)),
-          tags: [],
-        });
-        continue;
-      }
-    }
-    const toolkit = slug.includes("_") ? normalizeToolkitSlug(slug.split("_")[0] ?? "") : "";
-    if (!toolkit) continue;
-    results.push({
-      toolkit,
-      actionSlug: slug,
-      name: slug,
-      description: "",
-      inputSchema: {},
-      toolkitName: toolkit,
-      tags: [],
-    });
-  }
-
-  return results;
-}
-
 async function searchToolsViaSdk(query: string, limit: number): Promise<ComposioToolSearchResult[]> {
   const rawTools = getComposioRawToolsClient();
   if (!rawTools?.list) return [];
@@ -238,16 +175,42 @@ export async function searchTools(query: string, limit = 12): Promise<ComposioTo
   );
 }
 
+export async function getLatestToolkitVersion(toolkitSlug: string): Promise<string> {
+  const toolkit = normalizeToolkitSlug(toolkitSlug);
+  if (!isComposioConfigured() || !toolkit) return "latest";
+  const configured = getComposioToolkitVersion(toolkit);
+  if (configured !== "latest") return configured;
+  return readComposioMetadata(
+    `composio:toolkit-version:${toolkit}:v1`,
+    async () => {
+      const response = await withComposioTimeout(
+        getComposioClient().toolkits.get(toolkit),
+        `Composio toolkit version (${toolkit})`,
+      );
+      return selectLatestToolkitVersion(response.meta.availableVersions);
+    },
+    TOOLKIT_VERSION_CACHE_POLICY,
+  );
+}
+
+export function selectLatestToolkitVersion(availableVersions?: string[]): string {
+  return availableVersions?.find((version) => version.trim() && version.toLowerCase() !== "latest") ?? "latest";
+}
+
 export async function getAllTools(toolkitSlug: string): Promise<ComposioActionView[]> {
   const toolkit = normalizeToolkitSlug(toolkitSlug);
   if (!isComposioConfigured() || !toolkit) return [];
-  const toolkitVersion = getComposioToolkitVersion(toolkit);
+  const toolkitVersion = await getLatestToolkitVersion(toolkit);
   const cacheKey = `composio:actions:${toolkit}:${toolkitVersion}:v1`;
 
   const normalizeItems = (items: unknown): ComposioActionView[] =>
     (Array.isArray(items) ? items : [])
       .map((item) => normalizeComposioAction(toolkit, item))
-      .filter((item): item is ComposioActionView => Boolean(item));
+      .filter((item): item is ComposioActionView => Boolean(item))
+      .map((item) => ({
+        ...item,
+        ...(toolkitVersion !== "latest" && !item.toolkitVersion ? { toolkitVersion } : {}),
+      }));
 
   return readComposioMetadata(
     cacheKey,
@@ -330,6 +293,7 @@ export async function listToolkits(): Promise<ComposioToolkitView[]> {
               description: item.meta?.description ?? item.description ?? "",
               logo: item.meta?.logo ?? item.logo ?? "",
               ...(item.category ? { category: item.category } : {}),
+              connected: false,
             })).filter((item) => item.slug.length > 0);
           }
         }
@@ -350,6 +314,7 @@ export async function listToolkits(): Promise<ComposioToolkitView[]> {
             description: item.meta?.description ?? item.description ?? "",
             logo: item.meta?.logo ?? item.logo ?? "",
             ...(item.category ? { category: item.category } : {}),
+            connected: false,
           })).filter((item) => item.slug.length > 0);
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error));

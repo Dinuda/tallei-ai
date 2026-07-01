@@ -8,8 +8,9 @@ import {
   type LoopTriggerSubscriptionRow,
 } from "./trigger-channels.js";
 import { resolveToolkitSlug } from "./auth.js";
-import { getComposioClient, getComposioToolkitVersion, toObjectRecord } from "./client.js";
+import { getComposioClient, toObjectRecord } from "./client.js";
 import { readComposioMetadata } from "./metadata-cache.js";
+import { getLatestToolkitVersion } from "./tools.js";
 
 export type ComposioTriggerTypeRow = {
   slug: string;
@@ -18,8 +19,8 @@ export type ComposioTriggerTypeRow = {
 
 const MIN_TRIGGER_SCORE = 4;
 const TOOLKIT_TRIGGER_CACHE_POLICY = {
-  freshTtlMs: 6 * 60 * 60 * 1000,
-  staleTtlMs: 24 * 60 * 60 * 1000,
+  freshTtlMs: 5 * 365 * 24 * 60 * 60 * 1000,
+  staleTtlMs: 10 * 365 * 24 * 60 * 60 * 1000,
   emptyTtlMs: 2 * 60 * 1000,
 } as const;
 
@@ -34,7 +35,7 @@ export function scoreTriggerSlugMatch(
 }
 
 export async function listComposioTriggerTypes(toolkit: string): Promise<ComposioTriggerTypeRow[]> {
-  const toolkitVersion = getComposioToolkitVersion(toolkit);
+  const toolkitVersion = await getLatestToolkitVersion(toolkit);
   return readComposioMetadata(
     `composio:triggers:${toolkit}:${toolkitVersion}:v1`,
     async () => {
