@@ -53,3 +53,77 @@ test("ensureWorkspaceTriggerChannel recreates instance when channel row is stale
     assert.equal(needsRecreate, row.recreate);
   }
 });
+
+test("verifyComposioTriggerInstance retries until the instance becomes visible", async () => {
+  const { verifyComposioTriggerInstance } = await import(
+    "../../../../src/integrations/composio/trigger-channels.js"
+  );
+  let calls = 0;
+  await verifyComposioTriggerInstance({
+    instanceId: "ti-1",
+    triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
+    connectedAccountId: "ca-1",
+    wait: async () => {},
+    listActive: async () => {
+      calls += 1;
+      return calls < 3 ? { items: [] } : {
+        items: [{
+          id: "ti-1",
+          trigger_name: "GMAIL_NEW_GMAIL_MESSAGE",
+          connected_account_id: "ca-1",
+          disabled_at: null,
+        }],
+      };
+    },
+  });
+  assert.equal(calls, 3);
+});
+
+test("verifyComposioTriggerInstance rejects missing instances", async () => {
+  const { ComposioTriggerVerificationError, verifyComposioTriggerInstance } = await import(
+    "../../../../src/integrations/composio/trigger-channels.js"
+  );
+  await assert.rejects(
+    verifyComposioTriggerInstance({
+      instanceId: "ti-missing",
+      triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
+      connectedAccountId: "ca-1",
+      attempts: 1,
+      listActive: async () => ({ items: [] }),
+    }),
+    (error: unknown) => error instanceof ComposioTriggerVerificationError && error.code === "missing_instance",
+  );
+});
+
+test("verifyComposioTriggerInstance distinguishes disabled and mismatched instances", async () => {
+  const { ComposioTriggerVerificationError, verifyComposioTriggerInstance } = await import(
+    "../../../../src/integrations/composio/trigger-channels.js"
+  );
+  const base = {
+    instanceId: "ti-1",
+    triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
+    connectedAccountId: "ca-1",
+    attempts: 1,
+  };
+  await assert.rejects(
+    verifyComposioTriggerInstance({
+      ...base,
+      listActive: async () => ({ items: [{ id: "ti-1", trigger_name: base.triggerSlug, connected_account_id: "ca-1", disabled_at: "2026-01-01" }] }),
+    }),
+    (error: unknown) => error instanceof ComposioTriggerVerificationError && error.code === "disabled_instance",
+  );
+  await assert.rejects(
+    verifyComposioTriggerInstance({
+      ...base,
+      listActive: async () => ({ items: [{ id: "ti-1", trigger_name: base.triggerSlug, connected_account_id: "ca-other", disabled_at: null }] }),
+    }),
+    (error: unknown) => error instanceof ComposioTriggerVerificationError && error.code === "account_mismatch",
+  );
+  await assert.rejects(
+    verifyComposioTriggerInstance({
+      ...base,
+      listActive: async () => ({ items: [{ id: "ti-1", trigger_name: "SLACK_NEW_MESSAGE", connected_account_id: "ca-1", disabled_at: null }] }),
+    }),
+    (error: unknown) => error instanceof ComposioTriggerVerificationError && error.code === "slug_mismatch",
+  );
+});

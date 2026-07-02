@@ -10,9 +10,107 @@ export type WorkspaceTriggerChannelRow = {
   connected_account_id: string;
   composio_trigger_slug: string;
   composio_instance_id: string | null;
+  verified_at: string | null;
+  verification_error: string | null;
   ref_count: number;
   status: string;
 };
+
+export type TriggerVerificationFailure =
+  | "api_failure"
+  | "missing_instance"
+  | "disabled_instance"
+  | "account_mismatch"
+  | "slug_mismatch";
+
+export class ComposioTriggerVerificationError extends Error {
+  constructor(
+    readonly code: TriggerVerificationFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ComposioTriggerVerificationError";
+  }
+}
+
+type RemoteTriggerInstance = {
+  id: string;
+  connectedAccountId: string;
+  triggerName: string;
+  disabledAt: string | null;
+};
+
+function readRemoteTriggerInstance(value: unknown): RemoteTriggerInstance | null {
+  const row = toObjectRecord(value);
+  const id = String(row.id ?? row.trigger_id ?? "").trim();
+  if (!id) return null;
+  return {
+    id,
+    connectedAccountId: String(row.connected_account_id ?? row.connectedAccountId ?? "").trim(),
+    triggerName: String(row.trigger_slug ?? row.trigger_name ?? row.triggerName ?? "").trim().toUpperCase(),
+    disabledAt: row.disabled_at || row.disabledAt ? String(row.disabled_at ?? row.disabledAt) : null,
+  };
+}
+
+export async function verifyComposioTriggerInstance(input: {
+  instanceId: string;
+  triggerSlug: string;
+  connectedAccountId: string;
+  attempts?: number;
+  listActive?: (query: Record<string, unknown>) => Promise<unknown>;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<void> {
+  const composio = (input.listActive ? null : getComposioClient()) as unknown as {
+    client?: { triggerInstances?: { listActive?: (query: Record<string, unknown>) => Promise<unknown> } };
+  } | null;
+  const sdkListActive = composio?.client?.triggerInstances?.listActive;
+  const listActive = input.listActive ?? (sdkListActive
+    ? (query: Record<string, unknown>) => sdkListActive.call(composio?.client?.triggerInstances, query)
+    : undefined);
+  if (!listActive) throw new ComposioTriggerVerificationError("api_failure", "Composio trigger listing is unavailable");
+  const wait = input.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const attempts = input.attempts ?? 3;
+  let lastApiError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = toObjectRecord(await listActive({
+        trigger_ids: [input.instanceId],
+        show_disabled: true,
+        limit: 10,
+      }));
+      const items = Array.isArray(response.items) ? response.items : [];
+      const instance = items.map(readRemoteTriggerInstance).find((row) => row?.id === input.instanceId) ?? null;
+      console.info("[integrations/composio] verifying trigger instance", {
+        instanceId: input.instanceId,
+        triggerSlug: input.triggerSlug,
+        attempt,
+        found: Boolean(instance),
+      });
+      if (instance) {
+        if (instance.disabledAt) throw new ComposioTriggerVerificationError("disabled_instance", "Composio trigger instance is disabled");
+        if (instance.connectedAccountId !== input.connectedAccountId) {
+          throw new ComposioTriggerVerificationError("account_mismatch", "Composio trigger connected account does not match");
+        }
+        if (instance.triggerName !== input.triggerSlug.toUpperCase()) {
+          throw new ComposioTriggerVerificationError("slug_mismatch", "Composio trigger slug does not match");
+        }
+        return;
+      }
+      lastApiError = undefined;
+    } catch (error) {
+      if (error instanceof ComposioTriggerVerificationError) throw error;
+      lastApiError = error;
+    }
+    if (attempt < attempts) await wait(attempt * 250);
+  }
+  if (lastApiError) {
+    throw new ComposioTriggerVerificationError(
+      "api_failure",
+      `Failed to verify Composio trigger: ${lastApiError instanceof Error ? lastApiError.message : String(lastApiError)}`,
+    );
+  }
+  throw new ComposioTriggerVerificationError("missing_instance", "Composio trigger instance was not found after provisioning");
+}
 
 export type LoopTriggerSubscriptionRow = {
   id: string;
@@ -30,7 +128,6 @@ async function upsertComposioTriggerInstance(input: {
     client?: {
       triggerInstances?: {
         upsert?: (slug: string, body: Record<string, unknown>) => Promise<unknown>;
-        delete?: (id: string) => Promise<unknown>;
       };
     };
   };
@@ -45,6 +142,11 @@ async function upsertComposioTriggerInstance(input: {
     response.trigger_id ?? toObjectRecord(response.deprecated).uuid ?? "",
   ).trim();
   if (!triggerId) throw new Error("Composio did not return a trigger ID");
+  await verifyComposioTriggerInstance({
+    instanceId: triggerId,
+    triggerSlug: input.triggerSlug,
+    connectedAccountId: input.connectedAccountId,
+  });
   return triggerId;
 }
 
@@ -52,12 +154,12 @@ async function deleteComposioTriggerInstance(instanceId: string): Promise<void> 
   const composio = getComposioClient() as unknown as {
     client?: {
       triggerInstances?: {
-        delete?: (id: string) => Promise<unknown>;
+        manage?: { delete?: (id: string) => Promise<unknown> };
       };
     };
   };
   try {
-    await composio.client?.triggerInstances?.delete?.(instanceId);
+    await composio.client?.triggerInstances?.manage?.delete?.(instanceId);
   } catch (error) {
     console.warn(`[integrations/composio] failed to delete trigger instance ${instanceId}:`, error);
   }
@@ -70,7 +172,7 @@ export async function getWorkspaceTriggerChannel(
 ): Promise<WorkspaceTriggerChannelRow | null> {
   const result = await pool.query<WorkspaceTriggerChannelRow>(
     `SELECT id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-            composio_instance_id, ref_count, status
+            composio_instance_id, verified_at, verification_error, ref_count, status
      FROM workspace_trigger_channels
      WHERE workspace_id = $1
        AND connected_account_id = $2
@@ -97,7 +199,7 @@ export async function ensureWorkspaceTriggerChannel(input: {
     await client.query("BEGIN");
     const existing = await client.query<WorkspaceTriggerChannelRow>(
       `SELECT id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-              composio_instance_id, ref_count, status
+              composio_instance_id, verified_at, verification_error, ref_count, status
        FROM workspace_trigger_channels
        WHERE workspace_id = $1
          AND connected_account_id = $2
@@ -108,7 +210,24 @@ export async function ensureWorkspaceTriggerChannel(input: {
     const row = existing.rows[0];
     if (row) {
       let composioInstanceId = row.composio_instance_id;
-      if (!composioInstanceId || row.status === "inactive") {
+      let verified = false;
+      if (composioInstanceId && row.status === "active" && row.verified_at) {
+        try {
+          await verifyComposioTriggerInstance({
+            instanceId: composioInstanceId,
+            triggerSlug: slug,
+            connectedAccountId: input.connectedAccountId,
+          });
+          verified = true;
+        } catch (error) {
+          console.warn("[integrations/composio] existing trigger instance is stale", {
+            instanceId: composioInstanceId,
+            triggerSlug: slug,
+            category: error instanceof ComposioTriggerVerificationError ? error.code : "api_failure",
+          });
+        }
+      }
+      if (!verified) {
         composioInstanceId = await upsertComposioTriggerInstance({
           triggerSlug: slug,
           connectedAccountId: input.connectedAccountId,
@@ -119,10 +238,12 @@ export async function ensureWorkspaceTriggerChannel(input: {
          SET ref_count = ref_count + 1,
              status = 'active',
              composio_instance_id = $2,
+             verified_at = NOW(),
+             verification_error = NULL,
              updated_at = NOW()
          WHERE id = $1
          RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-                   composio_instance_id, ref_count, status`,
+                   composio_instance_id, verified_at, verification_error, ref_count, status`,
         [row.id, composioInstanceId],
       );
       await client.query("COMMIT");
@@ -137,16 +258,31 @@ export async function ensureWorkspaceTriggerChannel(input: {
     const inserted = await client.query<WorkspaceTriggerChannelRow>(
       `INSERT INTO workspace_trigger_channels (
          id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-         composio_instance_id, ref_count, status
-       ) VALUES ($1, $2, $3, $4, $5, $6, 1, 'active')
+         composio_instance_id, verified_at, verification_error, ref_count, status
+       ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NULL, 1, 'active')
        RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-                 composio_instance_id, ref_count, status`,
+                 composio_instance_id, verified_at, verification_error, ref_count, status`,
       [id, input.workspaceId, input.toolkit, input.connectedAccountId, slug, composioInstanceId],
     );
     await client.query("COMMIT");
     return inserted.rows[0]!;
   } catch (error) {
     await client.query("ROLLBACK");
+    const category = error instanceof ComposioTriggerVerificationError ? error.code : "api_failure";
+    const message = error instanceof Error ? error.message : String(error);
+    await pool.query(
+      `INSERT INTO workspace_trigger_channels (
+         id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
+         composio_instance_id, verified_at, verification_error, ref_count, status
+       ) VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, 0, 'error')
+       ON CONFLICT (workspace_id, connected_account_id, composio_trigger_slug) DO UPDATE SET
+         composio_instance_id = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN NULL ELSE workspace_trigger_channels.composio_instance_id END,
+         verified_at = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN NULL ELSE workspace_trigger_channels.verified_at END,
+         verification_error = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN EXCLUDED.verification_error ELSE workspace_trigger_channels.verification_error END,
+         status = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN 'error' ELSE workspace_trigger_channels.status END,
+         updated_at = NOW()`,
+      [randomUUID(), input.workspaceId, input.toolkit, input.connectedAccountId, slug, `${category}:${message}`],
+    );
     throw error;
   } finally {
     client.release();
@@ -158,7 +294,7 @@ export async function releaseWorkspaceTriggerChannel(channelId: string): Promise
   try {
     await client.query("BEGIN");
     const existing = await client.query<WorkspaceTriggerChannelRow>(
-      `SELECT id, composio_instance_id, ref_count
+      `SELECT id, composio_instance_id, verified_at, verification_error, ref_count, status
        FROM workspace_trigger_channels
        WHERE id = $1
        FOR UPDATE`,
@@ -171,13 +307,15 @@ export async function releaseWorkspaceTriggerChannel(channelId: string): Promise
     }
     const nextRef = Math.max(0, row.ref_count - 1);
     if (nextRef === 0) {
-      if (row.composio_instance_id) {
+      if (row.composio_instance_id && row.verified_at) {
         await deleteComposioTriggerInstance(row.composio_instance_id);
       }
       await client.query(
         `UPDATE workspace_trigger_channels
          SET ref_count = 0,
              composio_instance_id = NULL,
+             verified_at = NULL,
+             verification_error = NULL,
              status = 'inactive',
              updated_at = NOW()
          WHERE id = $1`,

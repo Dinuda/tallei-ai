@@ -53,6 +53,7 @@ import { saveSpecDraft, getLoopRun, getPendingApprovalForRun, listLoopRunSteps, 
 import { buildIntentAnalysisSpecPatch } from "../../../loops/intent-analysis.js";
 import { composioWebhookDeliveryUrl, isLocalWebhookUrl } from "../../../integrations/composio/webhook-subscription.js";
 import { deriveLoopNameFromPrompt } from "../../../loops/loop-name.js";
+import { resolveActivationGap } from "../../../loops/activation-status.js";
 import {
   CONDUCTOR_TOOL_DESCRIPTIONS,
 } from "../../../loops/conductor-chat-prompts.js";
@@ -141,13 +142,12 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
     const triggerKind = spec?.trigger && typeof spec.trigger === "object" && !Array.isArray(spec.trigger)
       ? String((spec.trigger as Record<string, unknown>).kind ?? "")
       : "";
-    const activationGap = triggerKind === "event"
-      ? loop.status === "active" && eventTrigger && !eventTrigger.subscribed
-        ? "composio_trigger_not_registered"
-        : loop.status !== "active" && (buildChat?.compiledPlanId || loop.activePlanId)
-          ? "needs_activate"
-          : null
-      : null;
+    const activationGap = resolveActivationGap({
+      triggerKind,
+      loopStatus: loop.status,
+      hasCompiledPlan: Boolean(buildChat?.compiledPlanId || loop.activePlanId),
+      eventTrigger,
+    });
     res.json({
       loop,
       spec,

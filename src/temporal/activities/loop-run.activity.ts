@@ -1,9 +1,17 @@
 import type { AuthContext } from "../../domain/auth/index.js";
-import { pollApprovalDecision, runAgenticLoop } from "../../loops/agentic-run.js";
+import { generateText } from "ai";
+import {
+  hasSufficientPriorOutput,
+  missingInputSourceResult,
+  outputAlreadyAvailableResult,
+  pollApprovalDecision,
+  runAgenticLoop,
+} from "../../loops/agentic-run.js";
+import { resolveComposioActionArgs } from "../../loops/composio-action-instructions.js";
 import { buildMonitorAlertMessage, evaluateMonitorRule } from "../../loops/monitor.js";
-import { getCompiledPlan, createLoopRun, getLoopRunById, updateLoopRun } from "../../loops/store.js";
+import { getCompiledPlan, createLoopRun, getLoopRunById, insertRunStep, updateLoopRun } from "../../loops/store.js";
 import { compiledPlanSchema } from "../../loops/spec.js";
-import type { LoopRunResult, LoopRunWorkflowInput } from "../types.js";
+import type { AgentRunState, LoopRunResult, LoopRunWorkflowInput, PreparedAgenticStep } from "../types.js";
 import { plannerActivity } from "./planner.js";
 import { executeToolActivity } from "./execute-tool.js";
 import {
@@ -11,6 +19,8 @@ import {
   resolveApprovalExpiredActivity,
 } from "./approval.js";
 import { deliverOutputActivity, failRunActivity } from "./deliver-output.js";
+import { getStreamingLanguageModel } from "../../providers/ai/streaming/language-model.js";
+import type { ExecutionStep } from "../../loops/spec.js";
 
 function toAuth(input: { userId: string; tenantId: string; workspaceId: string }): AuthContext {
   return {
@@ -54,6 +64,166 @@ function buildAgenticRunDeps(auth: AuthContext) {
     resolveApprovalExpired: resolveApprovalExpiredActivity,
     waitForApproval: pollApprovalDecision,
   };
+}
+
+export async function prepareAgenticStepActivity(input: {
+  workflowInput: LoopRunWorkflowInput;
+  state: AgentRunState;
+}): Promise<PreparedAgenticStep> {
+  const plan = await loadCompiledPlanActivity(input.workflowInput.compiledPlanId);
+  const auth = toAuth(input.workflowInput);
+  const exhaustedToolIds = Object.entries(input.state.failuresByToolId)
+    .filter(([, failures]) => failures >= Math.max(1, plan.guardrails.maxRetriesPerStep))
+    .map(([toolId]) => toolId);
+  const decision = await plannerActivity({
+    auth,
+    plan,
+    runId: input.workflowInput.runId,
+    state: input.state,
+    exhaustedToolIds,
+    ...(input.workflowInput.eventPayload !== undefined
+      ? { eventPayload: input.workflowInput.eventPayload }
+      : {}),
+    ...(input.workflowInput.triggerKind === "event" && plan.trigger.kind === "event"
+      ? { triggerSlug: plan.trigger.composioSlug }
+      : {}),
+  });
+  if (decision.kind === "finish") return decision;
+  const tool = plan.toolCatalog.find((candidate) => candidate.id === decision.toolId);
+  if (!tool) throw new Error(`Unknown tool: ${decision.toolId}`);
+  const resolved = resolveComposioActionArgs({
+    plan,
+    tool,
+    args: decision.args,
+    ...(input.workflowInput.eventPayload !== undefined
+      ? { eventPayload: input.workflowInput.eventPayload }
+      : {}),
+    toolResults: input.state.toolResults,
+  });
+  if (resolved.missing.length > 0) {
+    return {
+      kind: "continue",
+      toolId: tool.id,
+      args: resolved.args,
+      result: missingInputSourceResult(tool, resolved.missing),
+    };
+  }
+  if (hasSufficientPriorOutput(tool, resolved.args, input.state.toolResults)) {
+    return {
+      kind: "continue",
+      toolId: tool.id,
+      args: resolved.args,
+      result: outputAlreadyAvailableResult(tool),
+    };
+  }
+  return {
+    kind: "tool",
+    tool,
+    args: resolved.args,
+    needsApproval: tool.sensitive || plan.approval.mode === "ask",
+    ...(decision.finishOnSuccess !== undefined ? { finishOnSuccess: decision.finishOnSuccess } : {}),
+    ...(decision.completionSummary ? { completionSummary: decision.completionSummary } : {}),
+  };
+}
+
+export async function prepareStrategyToolActivity(input: {
+  workflowInput: LoopRunWorkflowInput;
+  state: AgentRunState;
+  step: ExecutionStep;
+}): Promise<Extract<PreparedAgenticStep, { kind: "tool" | "continue" }>> {
+  const plan = await loadCompiledPlanActivity(input.workflowInput.compiledPlanId);
+  const tool = plan.toolCatalog.find((candidate) => candidate.id === input.step.toolId);
+  if (!tool) throw new Error(`Compiled strategy tool not found: ${input.step.toolId ?? "missing"}`);
+  const auth = toAuth(input.workflowInput);
+  const scopedPlan = { ...plan, toolCatalog: [tool] };
+  const decision = await plannerActivity({
+    auth,
+    plan: scopedPlan,
+    runId: input.workflowInput.runId,
+    state: input.state,
+    ...(input.workflowInput.eventPayload !== undefined
+      ? { eventPayload: input.workflowInput.eventPayload }
+      : {}),
+    ...(input.workflowInput.triggerKind === "event" && plan.trigger.kind === "event"
+      ? { triggerSlug: plan.trigger.composioSlug }
+      : {}),
+  });
+  const suggestedArgs = decision.kind === "tool_call" && decision.toolId === tool.id
+    ? decision.args
+    : {};
+  const resolved = resolveComposioActionArgs({
+    plan,
+    tool,
+    args: suggestedArgs,
+    ...(input.workflowInput.eventPayload !== undefined
+      ? { eventPayload: input.workflowInput.eventPayload }
+      : {}),
+    toolResults: input.state.toolResults,
+  });
+  if (resolved.missing.length > 0) {
+    return { kind: "continue", toolId: tool.id, args: resolved.args, result: missingInputSourceResult(tool, resolved.missing) };
+  }
+  return {
+    kind: "tool",
+    tool,
+    args: resolved.args,
+    needsApproval: input.step.requiresApproval,
+  };
+}
+
+export async function executeTransformStepActivity(input: {
+  auth: AuthContext;
+  runId: string;
+  stepIndex: number;
+  step: ExecutionStep;
+  eventPayload?: unknown;
+  state: AgentRunState;
+}): Promise<unknown> {
+  const prompt = [
+    `Transform objective: ${input.step.description}`,
+    input.eventPayload !== undefined ? `Trigger input: ${JSON.stringify(input.eventPayload)}` : "",
+    `Prior artifacts: ${JSON.stringify(input.state.artifacts ?? {})}`,
+    `Prior step results: ${JSON.stringify(input.state.toolResults)}`,
+    "Return only the transformed artifact content.",
+  ].filter(Boolean).join("\n\n");
+  const { text } = await generateText({
+    model: getStreamingLanguageModel("planner", { userId: input.auth.userId }),
+    system: "You perform one bounded workflow transform. Do not choose or call tools.",
+    prompt,
+  });
+  await insertRunStep({
+    runId: input.runId,
+    stepIndex: input.stepIndex,
+    kind: "transform",
+    toolId: input.step.id,
+    inputJson: { eventPayload: input.eventPayload, artifacts: input.state.artifacts ?? {} },
+    outputJson: { artifact: text },
+    status: "completed",
+    idempotencyKey: `transform:${input.step.id}`,
+  });
+  return text;
+}
+
+export async function persistRunContextActivity(input: {
+  runId: string;
+  state: AgentRunState;
+  eventPayload?: unknown;
+}): Promise<void> {
+  await updateLoopRun(input.runId, {
+    status: input.state.status,
+    resultJson: {
+      runContext: {
+        version: 1,
+        trigger: input.eventPayload,
+        artifacts: input.state.artifacts ?? {},
+        toolResults: input.state.toolResults,
+        failuresByToolId: input.state.failuresByToolId,
+        approvalDecisions: input.state.approvalDecisions ?? [],
+        stepIndex: input.state.stepIndex,
+        status: input.state.status,
+      },
+    },
+  });
 }
 
 export async function runAgenticLoopActivity(

@@ -16,7 +16,13 @@ export async function deliverOutputActivity(input: {
   await updateLoopRun(input.runId, {
     status: "completed",
     finishedAt: new Date().toISOString(),
-    resultJson: { summary: input.summary, toolResults: input.state.toolResults },
+    resultJson: {
+      summary: input.summary,
+      toolResults: input.state.toolResults,
+      artifacts: input.state.artifacts ?? {},
+      approvalDecisions: input.state.approvalDecisions ?? [],
+      runContext: { version: 1, ...input.state, status: "completed" },
+    },
   });
 
   if (input.plan.profile !== "agentic") {

@@ -293,8 +293,30 @@ export const resolvedToolSchema = z.object({
   sensitive: z.boolean().default(false),
   credentialRef: z.string().min(1),
   toolkitVersion: z.string().min(1).optional(),
+  role: outcomeRoleSchema.optional(),
 });
 export type ResolvedTool = z.infer<typeof resolvedToolSchema>;
+
+export const executionStepSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["tool", "transform"]),
+  role: outcomeRoleSchema,
+  toolId: z.string().min(1).optional(),
+  description: z.string().min(1),
+  dependsOn: z.array(z.string().min(1)).default([]),
+  inputRefs: z.array(z.string().min(1)).default([]),
+  outputArtifact: z.string().min(1).optional(),
+  requiresApproval: z.boolean().default(false),
+});
+export type ExecutionStep = z.infer<typeof executionStepSchema>;
+
+export const executionStrategySchema = z.object({
+  version: z.literal(1),
+  mode: z.enum(["deterministic", "hybrid", "agentic"]),
+  blueprint: taskBlueprintSchema.optional(),
+  steps: z.array(executionStepSchema).default([]),
+});
+export type ExecutionStrategy = z.infer<typeof executionStrategySchema>;
 
 export const compiledPlanSchema = z.object({
   id: z.string().uuid(),
@@ -315,6 +337,7 @@ export const compiledPlanSchema = z.object({
   output: outputConfigSchema,
   approval: approvalPolicySchema,
   guardrails: guardrailConfigSchema,
+  executionStrategy: executionStrategySchema.optional(),
   compiledAt: z.string(),
   status: z.enum(["draft", "active", "superseded"]).default("draft"),
 });

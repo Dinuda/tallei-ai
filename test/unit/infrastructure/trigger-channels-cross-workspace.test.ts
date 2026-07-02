@@ -26,3 +26,12 @@ test("migrateTriggerChannelsWorkspaceScope ensures workspace+account unique inde
     "expected cross-workspace index cleanup",
   );
 });
+
+test("loop engine schema adds trigger verification columns idempotently", async () => {
+  const source = await import("node:fs/promises").then((fs) => fs.readFile(
+    new URL("../../../src/infrastructure/db/loop-engine-schema.ts", import.meta.url),
+    "utf8",
+  ));
+  assert.match(source, /ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ/);
+  assert.match(source, /ADD COLUMN IF NOT EXISTS verification_error TEXT/);
+});

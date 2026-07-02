@@ -77,6 +77,7 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
   } catch (error) {
     if (plan.trigger.kind === "event") {
       await connectorProvider.unregisterTrigger(loopId).catch(() => undefined);
+      await setLoopStatus(ctx, loopId, "paused").catch(() => undefined);
     }
     throw error;
   }

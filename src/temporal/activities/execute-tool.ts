@@ -4,7 +4,7 @@ import type { ResolvedTool } from "../../loops/spec.js";
 import { clampComposioArgsForRuntime } from "../../loops/composio-runtime-args.js";
 import { filterArgsToSchemaProperties, validateToolArgsAgainstSchema } from "../../loops/tool-schema.js";
 import { compactEmailReadToolResult } from "../../loops/tool-result-compact.js";
-import { insertRunStep, updateLoopRun } from "../../loops/store.js";
+import { claimRunStep, completeClaimedRunStep, insertRunStep, updateLoopRun } from "../../loops/store.js";
 
 export async function executeToolActivity(input: {
   auth: AuthContext;
@@ -12,6 +12,7 @@ export async function executeToolActivity(input: {
   stepIndex: number;
   tool: ResolvedTool;
   args: Record<string, unknown>;
+  idempotencyKey?: string;
 }): Promise<unknown> {
   await updateLoopRun(input.runId, { status: "running" });
 
@@ -46,6 +47,27 @@ export async function executeToolActivity(input: {
     return result;
   }
 
+  if (input.idempotencyKey) {
+    const claim = await claimRunStep({
+      runId: input.runId,
+      stepIndex: input.stepIndex,
+      kind: "tool",
+      toolId: input.tool.id,
+      inputJson: args,
+      idempotencyKey: input.idempotencyKey,
+    });
+    if (!claim.claimed) {
+      if (claim.step.status === "completed" || claim.step.status === "failed") {
+        return claim.step.output_json;
+      }
+      return {
+        successful: false,
+        error: "tool_execution_outcome_unknown",
+        data: { idempotencyKey: input.idempotencyKey },
+      };
+    }
+  }
+
   const raw = await getConnectorProvider().execute({
     auth: input.auth,
     toolkit: input.tool.connector,
@@ -56,15 +78,24 @@ export async function executeToolActivity(input: {
   });
   const result = compactEmailReadToolResult(raw);
 
-  await insertRunStep({
-    runId: input.runId,
-    stepIndex: input.stepIndex,
-    kind: "tool",
-    toolId: input.tool.id,
-    inputJson: args,
-    outputJson: result,
-    status: "completed",
-  });
+  if (input.idempotencyKey) {
+    await completeClaimedRunStep({
+      runId: input.runId,
+      idempotencyKey: input.idempotencyKey,
+      outputJson: result,
+      status: "completed",
+    });
+  } else {
+    await insertRunStep({
+      runId: input.runId,
+      stepIndex: input.stepIndex,
+      kind: "tool",
+      toolId: input.tool.id,
+      inputJson: args,
+      outputJson: result,
+      status: "completed",
+    });
+  }
 
   return result;
 }

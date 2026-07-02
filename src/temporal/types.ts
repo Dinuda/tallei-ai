@@ -23,7 +23,21 @@ export type AgentRunState = {
   failuresByToolId: Record<string, number>;
   totalCostUsd: number;
   status: "running" | "waiting_approval" | "completed" | "failed";
+  artifacts?: Record<string, unknown>;
+  approvalDecisions?: ApprovalDecision[];
 };
+
+export type PreparedAgenticStep =
+  | { kind: "finish"; summary: string }
+  | { kind: "continue"; result: unknown; toolId: string; args: Record<string, unknown> }
+  | {
+      kind: "tool";
+      tool: import("../loops/spec.js").ResolvedTool;
+      args: Record<string, unknown>;
+      needsApproval: boolean;
+      finishOnSuccess?: boolean;
+      completionSummary?: string;
+    };
 
 export type LoopRunResult = {
   status: "completed" | "failed" | "cancelled";

@@ -218,11 +218,16 @@ export async function ensureLoopEngineSchema(client: DbClient): Promise<void> {
       input_json JSONB,
       output_json JSONB,
       status TEXT NOT NULL,
+      idempotency_key TEXT,
       started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       finished_at TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS idx_loop_run_steps_run
       ON loop_run_steps(run_id, step_index);
+    ALTER TABLE loop_run_steps ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_run_steps_idempotency
+      ON loop_run_steps(run_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
   `);
 
   await client.query(`
@@ -236,6 +241,7 @@ export async function ensureLoopEngineSchema(client: DbClient): Promise<void> {
       proposed_action JSONB NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       decision_json JSONB,
+      idempotency_key TEXT,
       temporal_workflow_id TEXT,
       expires_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -243,6 +249,10 @@ export async function ensureLoopEngineSchema(client: DbClient): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_approval_requests_workspace_status
       ON approval_requests(workspace_id, status, created_at DESC);
+    ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_idempotency
+      ON approval_requests(run_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
   `);
 
   await client.query(`
@@ -253,6 +263,8 @@ export async function ensureLoopEngineSchema(client: DbClient): Promise<void> {
       connected_account_id TEXT NOT NULL,
       composio_trigger_slug TEXT NOT NULL,
       composio_instance_id TEXT,
+      verified_at TIMESTAMPTZ,
+      verification_error TEXT,
       ref_count INT NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'active',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -261,6 +273,8 @@ export async function ensureLoopEngineSchema(client: DbClient): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_workspace_trigger_channels_lookup
       ON workspace_trigger_channels(workspace_id, composio_trigger_slug, status);
+    ALTER TABLE workspace_trigger_channels ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+    ALTER TABLE workspace_trigger_channels ADD COLUMN IF NOT EXISTS verification_error TEXT;
   `);
 
   await migrateTriggerChannelsWorkspaceScope(client);

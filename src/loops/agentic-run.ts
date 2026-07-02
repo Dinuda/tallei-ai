@@ -32,7 +32,7 @@ function parseApprovalDecision(row: NonNullable<Awaited<ReturnType<typeof getApp
   };
 }
 
-function missingInputSourceResult(tool: CompiledPlan["toolCatalog"][number], missing: Array<{
+export function missingInputSourceResult(tool: CompiledPlan["toolCatalog"][number], missing: Array<{
   field: string;
   actionSlug: string;
   toolId: string;
@@ -60,7 +60,7 @@ function valueAtPath(value: unknown, path: string): unknown {
   return current;
 }
 
-function hasSufficientPriorOutput(
+export function hasSufficientPriorOutput(
   tool: CompiledPlan["toolCatalog"][number],
   args: Record<string, unknown>,
   toolResults: AgentRunState["toolResults"],
@@ -94,7 +94,7 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function outputAlreadyAvailableResult(tool: CompiledPlan["toolCatalog"][number]): unknown {
+export function outputAlreadyAvailableResult(tool: CompiledPlan["toolCatalog"][number]): unknown {
   return {
     successful: false,
     error: "action_output_already_available",
@@ -107,13 +107,13 @@ function outputAlreadyAvailableResult(tool: CompiledPlan["toolCatalog"][number])
   };
 }
 
-function toolResultFailed(result: unknown): boolean {
+export function toolResultFailed(result: unknown): boolean {
   if (!result || typeof result !== "object" || Array.isArray(result)) return false;
   const row = result as Record<string, unknown>;
   return row.successful === false || Boolean(row.error);
 }
 
-function recordToolResult(
+export function recordToolResult(
   state: AgentRunState,
   toolId: string,
   result: unknown,

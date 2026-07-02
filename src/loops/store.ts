@@ -63,6 +63,7 @@ export type LoopRunStepRow = {
   input_json: unknown;
   output_json: unknown;
   status: string;
+  idempotency_key: string | null;
   started_at: string;
   finished_at: string | null;
 };
@@ -77,6 +78,7 @@ export type ApprovalRequestRow = {
   proposed_action: unknown;
   status: string;
   decision_json: unknown;
+  idempotency_key: string | null;
   temporal_workflow_id: string | null;
   expires_at: string | null;
   created_at: string;
@@ -390,10 +392,12 @@ export async function insertRunStep(input: {
   inputJson?: unknown;
   outputJson?: unknown;
   status: string;
+  idempotencyKey?: string;
 }): Promise<void> {
   await pool.query(
-    `INSERT INTO loop_run_steps (id, run_id, step_index, kind, tool_id, input_json, output_json, status, finished_at)
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, NOW())`,
+    `INSERT INTO loop_run_steps (id, run_id, step_index, kind, tool_id, input_json, output_json, status, idempotency_key, finished_at)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, NOW())
+     ON CONFLICT (run_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
     [
       randomUUID(),
       input.runId,
@@ -403,10 +407,61 @@ export async function insertRunStep(input: {
       input.inputJson ? JSON.stringify(input.inputJson) : null,
       input.outputJson ? JSON.stringify(input.outputJson) : null,
       input.status,
+      input.idempotencyKey ?? null,
     ]
   );
   const { stepToChatMessages } = await import("./loop-chat.js");
   await appendRunChatMessages(input.runId, stepToChatMessages(input));
+}
+
+export async function getRunStepByIdempotencyKey(
+  runId: string,
+  idempotencyKey: string,
+): Promise<LoopRunStepRow | null> {
+  const result = await pool.query<LoopRunStepRow>(
+    `SELECT * FROM loop_run_steps WHERE run_id = $1 AND idempotency_key = $2 LIMIT 1`,
+    [runId, idempotencyKey],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function claimRunStep(input: {
+  runId: string;
+  stepIndex: number;
+  kind: string;
+  toolId?: string;
+  inputJson?: unknown;
+  idempotencyKey: string;
+}): Promise<{ claimed: boolean; step: LoopRunStepRow }> {
+  const result = await pool.query<LoopRunStepRow>(
+    `INSERT INTO loop_run_steps
+       (id, run_id, step_index, kind, tool_id, input_json, status, idempotency_key)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'running', $7)
+     ON CONFLICT (run_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+     RETURNING *`,
+    [
+      randomUUID(), input.runId, input.stepIndex, input.kind, input.toolId ?? null,
+      input.inputJson ? JSON.stringify(input.inputJson) : null, input.idempotencyKey,
+    ],
+  );
+  if (result.rows[0]) return { claimed: true, step: result.rows[0] };
+  const existing = await getRunStepByIdempotencyKey(input.runId, input.idempotencyKey);
+  if (!existing) throw new Error("Idempotent run-step claim disappeared");
+  return { claimed: false, step: existing };
+}
+
+export async function completeClaimedRunStep(input: {
+  runId: string;
+  idempotencyKey: string;
+  outputJson: unknown;
+  status: "completed" | "failed";
+}): Promise<void> {
+  await pool.query(
+    `UPDATE loop_run_steps
+     SET output_json = $3::jsonb, status = $4, finished_at = NOW()
+     WHERE run_id = $1 AND idempotency_key = $2`,
+    [input.runId, input.idempotencyKey, JSON.stringify(input.outputJson), input.status],
+  );
 }
 
 export async function listLoopRuns(auth: AuthContext, loopId: string): Promise<LoopRunRow[]> {
@@ -486,12 +541,15 @@ export async function createApprovalRequest(input: {
   proposedAction: unknown;
   temporalWorkflowId: string;
   expiresAt: string;
+  idempotencyKey?: string;
 }): Promise<ApprovalRequestRow> {
   const id = randomUUID();
   const result = await pool.query<ApprovalRequestRow>(
     `INSERT INTO approval_requests
-       (id, run_id, loop_id, workspace_id, step_index, tool_id, proposed_action, temporal_workflow_id, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::timestamptz)
+       (id, run_id, loop_id, workspace_id, step_index, tool_id, proposed_action, temporal_workflow_id, expires_at, idempotency_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::timestamptz, $10)
+     ON CONFLICT (run_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+     DO UPDATE SET proposed_action = EXCLUDED.proposed_action
      RETURNING *`,
     [
       id,
@@ -503,6 +561,7 @@ export async function createApprovalRequest(input: {
       JSON.stringify(input.proposedAction),
       input.temporalWorkflowId,
       input.expiresAt,
+      input.idempotencyKey ?? null,
     ]
   );
   return result.rows[0];
@@ -662,33 +721,54 @@ export async function getLoopEventTriggerStatus(
   composioTriggerSlug: string | null;
   channelStatus: string | null;
   composioInstanceId: string | null;
+  verifiedAt: string | null;
+  verificationError: string | null;
 } | null> {
   const result = await pool.query<{
     sub_status: string | null;
     composio_trigger_slug: string | null;
     channel_status: string | null;
     composio_instance_id: string | null;
+    verified_at: string | null;
+    verification_error: string | null;
   }>(
     `SELECT s.status AS sub_status,
-            c.composio_trigger_slug,
-            c.status AS channel_status,
-            c.composio_instance_id
+            COALESCE(c.composio_trigger_slug, ec.composio_trigger_slug) AS composio_trigger_slug,
+            COALESCE(c.status, ec.status) AS channel_status,
+            COALESCE(c.composio_instance_id, ec.composio_instance_id) AS composio_instance_id,
+            COALESCE(c.verified_at, ec.verified_at) AS verified_at,
+            COALESCE(c.verification_error, ec.verification_error) AS verification_error
      FROM loops l
      LEFT JOIN loop_trigger_subscriptions s ON s.loop_id = l.id
      LEFT JOIN workspace_trigger_channels c ON c.id = s.channel_id
+     LEFT JOIN LATERAL (
+       SELECT candidate.*
+       FROM workspace_trigger_channels candidate
+       INNER JOIN loop_specs ls ON ls.loop_id = l.id
+       WHERE c.id IS NULL
+         AND candidate.workspace_id = l.workspace_id
+         AND candidate.composio_trigger_slug = UPPER(ls.spec_json->'trigger'->>'composioSlug')
+       ORDER BY ls.revision DESC, candidate.updated_at DESC
+       LIMIT 1
+     ) ec ON TRUE
      WHERE l.id = $1
      LIMIT 1`,
     [loopId],
   );
   const row = result.rows[0];
   if (!row) return null;
-  const subscribed = row.sub_status === "active" && row.channel_status === "active";
+  const subscribed = row.sub_status === "active"
+    && row.channel_status === "active"
+    && Boolean(row.verified_at)
+    && !row.verification_error;
   return {
     subscribed,
     subscriptionStatus: row.sub_status,
     composioTriggerSlug: row.composio_trigger_slug,
     channelStatus: row.channel_status,
     composioInstanceId: row.composio_instance_id,
+    verifiedAt: row.verified_at,
+    verificationError: row.verification_error,
   };
 }
 

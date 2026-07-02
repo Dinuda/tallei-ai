@@ -11,6 +11,7 @@ export async function createApprovalRequestActivity(input: {
   proposedAction: Record<string, unknown>;
   temporalWorkflowId: string;
   expiresAt: string;
+  idempotencyKey?: string;
 }): Promise<string> {
   const row = await createApprovalRequest(input);
   await updateLoopRun(input.runId, { status: "waiting_approval" });

@@ -37,6 +37,7 @@ import { buildComposioToolContract } from "./composio-schema-contract.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
 import { getPendingConnectorOutcomes } from "./task-decomposition.js";
 import { approvalTargetsRole } from "./approval-policy.js";
+import { buildExecutionStrategy } from "./execution-strategy.js";
 
 const MAX_AUTO_EXPAND_TOOLS = 2;
 
@@ -341,6 +342,7 @@ export async function compileLoopSpec(
       sensitive,
       credentialRef: toolkit.connectedAccountId,
       bindingRole: binding.role,
+      role: binding.role,
       ...(resolved.toolkitVersion ? { toolkitVersion: resolved.toolkitVersion } : {}),
     });
   }
@@ -421,6 +423,7 @@ export async function compileLoopSpec(
     toolCatalog as ResolvedTool[],
     composioActions,
   );
+  const executionStrategy = buildExecutionStrategy(parsed, resolvedCatalog);
 
   const specRevision = await getLatestSpecRevision(loopId);
   const revision = await getNextPlanRevision(loopId);
@@ -444,6 +447,7 @@ export async function compileLoopSpec(
     output: parsed.output,
     approval: parsed.approval,
     guardrails: parsed.guardrails,
+    executionStrategy,
     compiledAt,
     status: "draft" as const,
   };
