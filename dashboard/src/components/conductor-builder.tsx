@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObjec
 import { flushSync } from "react-dom";
 
 import { ConductorBuilderLayout } from "@/components/conductor/conductor-builder-layout";
+import { useConductorLayout } from "@/components/conductor/conductor-layout-context";
 import type { LoopEventTriggerStatus } from "@/components/conductor/conductor-spec-sheet";
 import {
   ConductorChatProvider,
@@ -72,7 +73,15 @@ function ConductorChatBridge({
     [loopId],
   );
 
-  const { messages, sendMessage, status: chatStatus, addToolOutput, setMessages, stop } = useChat({
+  const {
+    messages,
+    sendMessage,
+    status: chatStatus,
+    addToolOutput,
+    regenerate,
+    setMessages,
+    stop,
+  } = useChat({
     transport,
     sendAutomaticallyWhen: shouldAutoSendConductorChat,
   });
@@ -84,6 +93,7 @@ function ConductorChatBridge({
   const chatApi = useMemo<ConductorChatApi>(
     () => ({
       sendMessage,
+      regenerate,
       stop,
       addToolOutput: (params) => {
         flushSync(() => {
@@ -100,7 +110,7 @@ function ConductorChatBridge({
         });
       },
     }),
-    [addToolOutput, sendMessage, setMessages, stop],
+    [addToolOutput, regenerate, sendMessage, setMessages, stop],
   );
 
   const chatContextValue = {
@@ -260,7 +270,7 @@ function ConductorBuilderLive({
   creating: boolean;
   pendingUserBubble: UIMessage | null;
   setPendingUserBubble: (message: UIMessage | null) => void;
-  onCreateLoop: (text: string) => void | Promise<void>;
+  onCreateLoop: (text: string, meta?: { loopName?: string }) => void | Promise<void>;
   onRun?: () => void;
 }) {
   const liveChat = useConductorChat();
@@ -319,11 +329,11 @@ function ConductorBuilderLive({
     }
   }, [messages, setPendingUserBubble]);
 
-  function handleSubmit(text: string) {
+  function handleSubmit(text: string, meta?: { loopName?: string }) {
     if (creating) return;
     if (hasUnansweredUiToolCalls(messages)) return;
     if (!loopId) {
-      onCreateLoop(text);
+      onCreateLoop(text, meta);
       return;
     }
     chatApi?.sendMessage({ text });
@@ -429,6 +439,7 @@ function ConductorBuilderLive({
       setInput={setInput}
       onSubmit={handleSubmit}
       onStop={() => chatApi?.stop()}
+      onRetry={() => { void chatApi?.regenerate(); }}
       pendingQuestion={pendingQuestion}
       pendingOutcomeBrief={pendingOutcomeBrief}
       pendingReplyOptionsCallId={pendingReplyOptions?.toolCallId ?? null}
@@ -453,6 +464,9 @@ function ConductorBuilderLive({
 }
 
 function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) {
+  const setLoopMeta = useConductorLayout()?.setLoopMeta;
+  const resetLoopMeta = useConductorLayout()?.resetLoopMeta;
+  const registerHandlers = useConductorLayout()?.registerHandlers;
   const [loopId, setLoopId] = useState<string | null>(initialLoopId ?? null);
   const [loopName, setLoopName] = useState<string | undefined>();
   const [spec, setSpec] = useState<Record<string, unknown> | null>(null);
@@ -506,7 +520,25 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     }
   }, []);
 
-  async function createLoopFromPrompt(text: string) {
+  useEffect(() => {
+    if (initialLoopId) return;
+    resetLoopMeta?.();
+    setLoopName(undefined);
+  }, [initialLoopId, resetLoopMeta]);
+
+  useEffect(() => {
+    registerHandlers?.({ onLoopNameChange: setLoopName });
+  }, [registerHandlers]);
+
+  useEffect(() => {
+    setLoopMeta?.({
+      loopId: loopId ?? undefined,
+      loopName,
+      status,
+    });
+  }, [setLoopMeta, loopId, loopName, status]);
+
+  async function createLoopFromPrompt(text: string, meta?: { loopName?: string }) {
     setPendingUserBubble(makeUserMessage(text));
     setCreating(true);
     pendingPromptRef.current = text;
@@ -514,7 +546,12 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     try {
       const res = await apiFetch("/api/loops", {
         method: "POST",
-        body: JSON.stringify({ prompt: text }),
+        body: JSON.stringify({
+          prompt: text,
+          ...((meta?.loopName ?? loopName)?.trim()
+            ? { name: (meta?.loopName ?? loopName)!.trim() }
+            : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to create loop");

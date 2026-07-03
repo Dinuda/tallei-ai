@@ -89,6 +89,32 @@ test("parseStoredLoopSpec infers one legacy role connector from bindings", () =>
   assert.equal(spec.taskBlueprint?.outcomes[0]?.selectedConnector, "outlook");
 });
 
+test("parseStoredLoopSpec does not reorder legacy multi-phase blueprints on hydrate", () => {
+  const outcomes = [
+    { id: "read1", role: "source", description: "Read Gmail", status: "pending", selectedConnector: "gmail" },
+    { id: "llm1", role: "transform", description: "Summarize for Slack", status: "pending" },
+    { id: "slack", role: "destination", description: "Post Slack", status: "pending", selectedConnector: "slack" },
+    { id: "read2", role: "source", description: "Re-read Gmail", status: "pending", selectedConnector: "gmail" },
+    { id: "llm2", role: "transform", description: "Draft reply", status: "pending" },
+    { id: "send", role: "destination", description: "Send Gmail", status: "pending", selectedConnector: "gmail" },
+  ];
+  const spec = parseStoredLoopSpec({
+    workspaceId,
+    intent: { goal: "g", outcome: "o", successCriteria: [] },
+    trigger: { kind: "manual" },
+    profile: "agentic",
+    bindings: [],
+    taskBlueprint: {
+      version: 1,
+      summary: "Cross-app workflow",
+      outcomes,
+    },
+    output: { kind: "none" },
+  });
+
+  assert.deepEqual(spec.taskBlueprint?.outcomes.map((outcome) => outcome.id), outcomes.map((outcome) => outcome.id));
+});
+
 test("hydrateStoredTrigger leaves schedule triggers unchanged", () => {
   const trigger = hydrateStoredTrigger({ kind: "schedule", cron: "0 7 * * *", timezone: "UTC" });
   assert.deepEqual(trigger, { kind: "schedule", cron: "0 7 * * *", timezone: "UTC" });

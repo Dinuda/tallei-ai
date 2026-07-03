@@ -8,7 +8,8 @@ import {
   type UIMessage,
 } from "ai";
 
-import { sanitizeConductorChatMessages } from "../../../loops/conductor-chat.js";
+import { applyPendingIntentAnswersFromTranscript, sanitizeConductorChatMessages } from "../../../loops/conductor-chat.js";
+import { isIntentResolutionPatch } from "../../../loops/intent-analysis.js";
 import { applySpecPatch } from "../../../loops/patch.js";
 import {
   activateLoopInputSchema,
@@ -24,11 +25,9 @@ import {
   listWorkspaceConnectorsInputSchema,
   pickConnectorAppInputSchema,
   presentReplyOptionsInputSchema,
-  reviewOutcomeBriefInputSchema,
   testRunLoopInputSchema,
 } from "../../../loops/conductor-tools.js";
-import { buildOutcomeBrief, computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
-import { summarizeOutcomeBriefForUser } from "../../../loops/outcome-brief-summary.js";
+import { computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
 import { discoverOutcomeBindings } from "../../../loops/binding-discovery.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
 import { validateConnectorChoicesBeforeSpecPatch } from "../../../loops/task-decomposition.js";
@@ -44,6 +43,7 @@ import {
   listLoops,
   moveLoopToWorkspace,
   pauseLoop,
+  renameLoop,
   resumeLoop,
   resolveLoopAuthWorkspace,
   triggerManualRun,
@@ -260,6 +260,19 @@ router.post("/:loopId/move", requireScopes(["memory:write"]), async (req: AuthRe
   }
 });
 
+router.patch("/:loopId", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { loopId } = loopIdSchema.parse(req.params);
+    const body = z.object({
+      name: z.string().min(1).max(200),
+    }).parse(req.body ?? {});
+    const loop = await renameLoop(req.authContext!, loopId, body.name);
+    res.json({ loop });
+  } catch (error) {
+    sendError(res, error, "Failed to update loop");
+  }
+});
+
 router.delete("/:loopId", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
     const { loopId } = loopIdSchema.parse(req.params);
@@ -306,6 +319,12 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       return;
     }
 
+    const intentHandoff = applyPendingIntentAnswersFromTranscript(chatMessages, currentSpec);
+    if (intentHandoff.applied) {
+      currentSpec = intentHandoff.spec;
+      await saveSpecDraft(auth, loopId, currentSpec, "intent-answer");
+    }
+
     const [workspace, initialConnectors, buildMeta] = await Promise.all([
       getWorkspace(auth, loop.workspaceId),
       listWorkspaceConnectors(auth),
@@ -313,6 +332,10 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
     ]);
     let latestCompiledPlanId = buildMeta?.compiledPlanId ?? null;
     let latestTestRunPass: { planId: string; runId: string } | null = null;
+    if (intentHandoff.applied) {
+      latestCompiledPlanId = null;
+      latestTestRunPass = null;
+    }
     if (latestCompiledPlanId) {
       const storedPass = await getLatestPassingTestRunForPlan(auth, loopId, latestCompiledPlanId);
       if (storedPass) {
@@ -320,18 +343,22 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       }
     }
 
+    const buildCurrentSystemPrompt = () => buildConductorSystemPrompt({
+      workspaceName: workspace.name,
+      spec: currentSpec!,
+      confirmationHash: computeOutcomeBriefHash(currentSpec!),
+      connectedToolkits: initialConnectors.map((t) => ({
+        slug: t.slug,
+        name: t.name,
+        connected: Boolean(t.connected),
+      })),
+    });
+
     const result = streamText({
       model: getStreamingLanguageModel("conductor", { userId: auth.userId }),
       stopWhen: stepCountIs(16),
-      system: buildConductorSystemPrompt({
-        workspaceName: workspace.name,
-        spec: currentSpec,
-        connectedToolkits: initialConnectors.map((t) => ({
-          slug: t.slug,
-          name: t.name,
-          connected: Boolean(t.connected),
-        })),
-      }),
+      system: buildCurrentSystemPrompt(),
+      prepareStep: () => ({ system: buildCurrentSystemPrompt() }),
       messages: await convertToModelMessages(chatMessages),
       tools: {
         analyzeIntent: tool({
@@ -365,7 +392,10 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: specPatchSchema,
           execute: async (patch) => {
             const intentStatus = currentSpec!.intentDiscovery.status;
-            if (intentStatus === "pending" || intentStatus === "needs_input") {
+            if (
+              (intentStatus === "pending" || intentStatus === "needs_input")
+              && !isIntentResolutionPatch(patch)
+            ) {
               return {
                 ok: false,
                 error: "Intent is not resolved yet. Finish analyzeIntent / askQuestion until status is ready before patching the loop spec.",
@@ -498,22 +528,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         askQuestion: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.askQuestion,
           inputSchema: askQuestionInputSchema,
-        }),
-        reviewOutcomeBrief: tool({
-          description: CONDUCTOR_TOOL_DESCRIPTIONS.reviewOutcomeBrief,
-          inputSchema: reviewOutcomeBriefInputSchema,
-          execute: async () => {
-            const brief = buildOutcomeBrief(currentSpec!);
-            const userSummary = await summarizeOutcomeBriefForUser({
-              spec: currentSpec!,
-              brief,
-              userId: auth.userId,
-            });
-            return {
-              brief: { ...brief, userSummary },
-              briefHash: computeOutcomeBriefHash(currentSpec!),
-            };
-          },
         }),
         confirmOutcomeBrief: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.confirmOutcomeBrief,

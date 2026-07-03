@@ -107,41 +107,12 @@ export type PendingPresentReplyOptions = {
   input: PresentReplyOptionsInput;
 };
 
-export type OutcomeBriefUserSummary = {
-  whenItRuns: string;
-  appsInvolved: string[];
-  steps: string[];
-  beforeSending: string;
-  howYouKnowItWorked: string;
-  whereResultsGo: string;
-  safetyLimits: string[];
-  assumptionsNote?: string;
-};
-
-export type OutcomeBrief = {
-  outcome: string;
-  successCriteria: string[];
-  trigger: string;
-  actions: string[];
-  connectors: Array<{ outcomeId: string; role: string; description: string; connector: string }>;
-  output: string;
-  approvals: string;
-  guardrails: string[];
-  assumptions: string[];
-  userSummary?: OutcomeBriefUserSummary;
-};
-
 export type ConfirmOutcomeBriefInput = {
   briefHash: string;
   question: string;
   options: InteractivePromptOption[];
   recommendedOptionIds?: string[];
   allowOther?: boolean;
-};
-
-export type OutcomeBriefReviewOutput = {
-  brief: OutcomeBrief;
-  briefHash: string;
 };
 
 export type ConfirmOutcomeBriefOutput = {
@@ -163,7 +134,6 @@ export type ConfirmOutcomeBriefToolPart = {
 
 export type PendingOutcomeBrief = {
   toolCallId: string;
-  input: OutcomeBriefReviewOutput;
   confirmBriefHash: string;
   confirmPrompt: Pick<ConfirmOutcomeBriefInput, "question" | "options" | "recommendedOptionIds" | "allowOther">;
 };
@@ -290,22 +260,6 @@ function isUnansweredUiToolPart(part: { type: string; toolName?: string; state?:
   return isResumableUiToolPart(toolName, part.state, (part as { input?: unknown }).input, part.output);
 }
 
-export function findLatestReviewOutcomeBrief(messages: UIMessage[]): OutcomeBriefReviewOutput | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (message.role !== "assistant") continue;
-    for (let j = (message.parts ?? []).length - 1; j >= 0; j -= 1) {
-      const part = message.parts[j];
-      if (!part || resolveToolPartName(part as { type: string; toolName?: string }) !== "reviewOutcomeBrief") continue;
-      const toolPart = part as DynamicToolUIPart & { output?: unknown };
-      if (toolPart.state !== "output-available" || !toolPart.output) continue;
-      const output = toolPart.output as OutcomeBriefReviewOutput;
-      if (output.briefHash && output.brief) return output;
-    }
-  }
-  return null;
-}
-
 /** Any UI-only tool call in the transcript still waiting for addToolOutput. */
 export function hasUnansweredUiToolCalls(messages: UIMessage[]): boolean {
   for (const message of messages) {
@@ -373,9 +327,6 @@ export function shouldAutoSendConductorChat({
 }
 
 export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBrief | null {
-  const review = findLatestReviewOutcomeBrief(messages);
-  if (!review) return null;
-
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.role !== "assistant") continue;
@@ -389,7 +340,6 @@ export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBr
         if (!confirmInput?.briefHash || !confirmInput.question || !confirmInput.options?.length) continue;
         return {
           toolCallId: toolPart.toolCallId,
-          input: review,
           confirmBriefHash: confirmInput.briefHash,
           confirmPrompt: {
             question: confirmInput.question,
@@ -531,46 +481,6 @@ export function makeUserMessage(text: string): UIMessage {
     role: "user",
     parts: [{ type: "text", text }],
   };
-}
-
-const TECHNICAL_TEXT = /[A-Z]{2,}_[A-Z0-9_]+|composio|\/[A-Z_]+|gmail:|slack:|cron\s/i;
-
-function isTechnicalLine(text: string): boolean {
-  return TECHNICAL_TEXT.test(text);
-}
-
-/** Plain-language lines for the confirmation card when userSummary is missing. */
-export function plainLanguageBriefSummary(brief: OutcomeBrief): {
-  whenItRuns: string;
-  steps: string[];
-  beforeSending: string;
-} {
-  if (brief.userSummary) {
-    return {
-      whenItRuns: brief.userSummary.whenItRuns,
-      steps: brief.userSummary.steps.slice(0, 4),
-      beforeSending: brief.userSummary.beforeSending,
-    };
-  }
-
-  const connectorSteps = brief.connectors
-    .map((row) => row.description.trim())
-    .filter(Boolean)
-    .filter((line) => !isTechnicalLine(line));
-  const steps = connectorSteps.length > 0
-    ? connectorSteps.slice(0, 4)
-    : [brief.outcome];
-
-  const triggerLine = brief.connectors.find((row) => row.role === "trigger")?.description?.trim();
-  const whenItRuns = triggerLine && !isTechnicalLine(triggerLine)
-    ? triggerLine
-    : brief.outcome;
-
-  const beforeSending = /ask|review|approv/i.test(brief.approvals)
-    ? "You'll review before anything is sent."
-    : "It runs automatically — no extra approval step.";
-
-  return { whenItRuns, steps, beforeSending };
 }
 
 /**

@@ -1,7 +1,7 @@
 "use client";
 
 import type { UIMessage } from "ai";
-import { History } from "lucide-react";
+import { History, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useMemo, useState } from "react";
@@ -40,8 +40,9 @@ export type ConductorBuilderLayoutProps = {
   chatStatus: ChatStatus;
   input: string;
   setInput: (value: string) => void;
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string, meta?: { loopName?: string }) => void;
   onStop?: () => void;
+  onRetry?: () => void;
   pendingQuestion: PendingInteractivePrompt | null;
   pendingOutcomeBrief: PendingOutcomeBrief | null;
   promptSuggestions: ConductorPromptSuggestion[];
@@ -72,6 +73,7 @@ export function ConductorBuilderLayout({
   setInput,
   onSubmit,
   onStop,
+  onRetry,
   pendingQuestion,
   pendingOutcomeBrief,
   promptSuggestions,
@@ -125,15 +127,20 @@ export function ConductorBuilderLayout({
     ? promptVariantForQuestion(pendingQuestion.input.questionId)
     : "neutral";
 
-  const submitComposerText = useCallback((text: string) => {
+  const submitComposerText = useCallback((text: string, meta?: { loopName?: string }) => {
     const answerText = text.trim();
     if (!answerText || sendBlocked || chatBusy) return;
-    onSubmit(answerText);
+    onSubmit(answerText, meta);
     setInput("");
   }, [chatBusy, onSubmit, sendBlocked, setInput]);
 
   const emptyState = useMemo(
-    () => (!loopId ? <LoopSuggestionCards className="max-w-3xl" onSelect={submitComposerText} /> : undefined),
+    () => (!loopId ? (
+      <LoopSuggestionCards
+        className="max-w-3xl"
+        onSelect={({ name, message }) => submitComposerText(message, { loopName: name })}
+      />
+    ) : undefined),
     [loopId, submitComposerText],
   );
 
@@ -148,6 +155,7 @@ export function ConductorBuilderLayout({
             messages={messages}
             pendingQuestionCallId={pendingQuestionCallId}
             pendingReplyOptionsCallId={pendingReplyOptionsCallId}
+            spec={spec}
             showThinking={showTranscriptThinking}
             thinkingLabel={thinkingLabel}
           />
@@ -155,6 +163,29 @@ export function ConductorBuilderLayout({
 
         <div className="conductor-builder-page__composer-wrap">
           <div className="conductor-builder-page__composer-inner">
+            <AnimatePresence initial={false}>
+              {chatStatus === "error" && onRetry ? (
+                <motion.div
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-3 flex justify-center"
+                  exit={{ opacity: 0, y: 6 }}
+                  initial={{ opacity: 0, y: 6 }}
+                  role="alert"
+                >
+                  <div className="flex items-center gap-3 border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 shadow-sm">
+                    <span>The response was interrupted.</span>
+                    <button
+                      className="inline-flex items-center gap-1.5 bg-red-900 px-3 py-1.5 font-medium text-white transition-colors hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-2"
+                      onClick={onRetry}
+                      type="button"
+                    >
+                      <RefreshCw className="size-4" aria-hidden />
+                      Retry
+                    </button>
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
             <motion.div className="conductor-builder-page__composer-surface">
               <AnimatePresence initial={false} mode="popLayout">
                 {pendingOutcomeBrief ? (
@@ -166,7 +197,6 @@ export function ConductorBuilderLayout({
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
                     <BuilderOutcomeBriefPrompt
-                      brief={pendingOutcomeBrief.input.brief}
                       confirmPrompt={pendingOutcomeBrief.confirmPrompt}
                       onSubmit={onOutcomeBriefAnswer}
                     />
@@ -261,7 +291,7 @@ export function ConductorBuilderLayout({
                         <PromptInputTextarea
                           className="min-h-0 pr-12 pb-2"
                           onChange={(event) => setInput(event.currentTarget.value)}
-                          placeholder="Describe the outcome you want (e.g. urgent tickets flagged, drafts ready for review)..."
+                          placeholder="What should this loop do? (e.g. Help with support tickets, Weekly team digest)"
                           value={input}
                         />
 

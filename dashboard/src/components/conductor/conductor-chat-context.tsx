@@ -9,6 +9,7 @@ import type { ChatStatus } from "@/components/conductor/conductor-shared";
 export type ConductorChatApi = {
   sendMessage: (input: { text: string }) => void;
   addToolOutput: ReturnType<typeof useChat>["addToolOutput"];
+  regenerate: ReturnType<typeof useChat>["regenerate"];
   stop: ReturnType<typeof useChat>["stop"];
 };
 

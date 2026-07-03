@@ -17,6 +17,7 @@ import {
   moveLoopToWorkspace as moveLoopRow,
   saveSpecDraft,
   setLoopStatus,
+  updateLoopName,
   updateLoopRun,
 } from "./store.js";
 import { resolveWorkspaceId } from "../services/workspace/index.js";
@@ -207,6 +208,14 @@ export async function triggerManualRun(auth: AuthContext, loopId: string) {
     userId: auth.userId,
   });
   return run;
+}
+
+export async function renameLoop(auth: AuthContext, loopId: string, name: string) {
+  const loop = await getLoop(auth, loopId);
+  if (!loop) throw new Error("Loop not found");
+  const updated = await updateLoopName(auth, loopId, name);
+  if (!updated) throw new Error("Loop not found");
+  return updated;
 }
 
 export async function moveLoopToWorkspace(

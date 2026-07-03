@@ -114,12 +114,8 @@
   scroll-behavior: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  transition:
-    height 0.52s cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 0.45s ease;
 }
 
-/* Top fade only once the viewport is tall enough to scroll. */
 .conductor-reasoning-stream__scroll--masked {
   -webkit-mask-image: linear-gradient(
     to bottom,
@@ -135,11 +131,14 @@
   );
 }
 
-.conductor-reasoning-stream__scroll--collapse-out {
+.conductor-reasoning-stream__scroll--collapsing {
   overflow: hidden;
   mask-image: none !important;
   -webkit-mask-image: none !important;
   pointer-events: none;
+  transition:
+    height 0.52s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.45s ease;
 }
 
 .conductor-reasoning-stream--collapsing .conductor-reasoning-stream__toggle {

@@ -26,9 +26,15 @@ export const intentDecisionSchema = z.object({
   answer: z.string().min(1),
 });
 
+export const intentExecutionStepSchema = z.object({
+  role: approvalSensitiveRoleSchema,
+  description: z.string().min(1),
+});
+
 export const intentAnalysisSchema = z.object({
   outcome: z.string().min(1),
   trigger: z.string().min(1),
+  executionOrder: z.array(intentExecutionStepSchema).default([]),
   question: intentQuestionSchema.optional(),
   approval: intentApprovalSchema.optional(),
   decisions: z.array(intentDecisionSchema).default([]),
@@ -45,6 +51,7 @@ export const intentDiscoveryStateSchema = z.object({
 export type IntentQuestion = z.infer<typeof intentQuestionSchema>;
 export type IntentDecision = z.infer<typeof intentDecisionSchema>;
 export type IntentApproval = z.infer<typeof intentApprovalSchema>;
+export type IntentExecutionStep = z.infer<typeof intentExecutionStepSchema>;
 export type IntentAnalysis = z.infer<typeof intentAnalysisSchema>;
 export type IntentDiscoveryState = z.infer<typeof intentDiscoveryStateSchema>;
 

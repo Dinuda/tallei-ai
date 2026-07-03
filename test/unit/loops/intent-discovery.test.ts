@@ -10,6 +10,11 @@ test("intent analysis schema accepts canonical approval payloads", () => {
   const analysis = intentAnalysisSchema.parse({
     outcome: "Send personalized replies to incoming support emails",
     trigger: "When a new support email arrives",
+    executionOrder: [
+      { role: "trigger", description: "When a new support email arrives" },
+      { role: "transform", description: "Classify and draft personalized replies" },
+      { role: "destination", description: "Send replies after review" },
+    ],
     approval: {
       mode: "mixed",
       sensitiveRoles: ["destination"],
@@ -24,6 +29,15 @@ test("intent analysis schema accepts canonical approval payloads", () => {
 
   assert.equal(analysis.approval?.mode, "mixed");
   assert.deepEqual(analysis.approval?.sensitiveRoles, ["destination"]);
+  assert.equal(analysis.executionOrder.length, 3);
+});
+
+test("intent analysis schema defaults executionOrder to empty array", () => {
+  const analysis = intentAnalysisSchema.parse({
+    outcome: "Send personalized replies to incoming support emails",
+    trigger: "When a new support email arrives",
+  });
+  assert.deepEqual(analysis.executionOrder, []);
 });
 
 test("unresolvedIntentQuestion suppresses already asked or answered questions", () => {

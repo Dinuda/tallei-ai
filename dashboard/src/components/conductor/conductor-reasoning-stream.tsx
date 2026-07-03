@@ -3,9 +3,10 @@
 import { ChevronDown } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
+import { useReasoning } from "@/components/ai-elements/reasoning";
 import { cn } from "@/lib/utils";
 
-/** Tall enough to read ~6–8 lines; older tokens scroll up and fade at the top. */
+/** Tall enough to read ~6–8 lines before scrolling. */
 export const CONDUCTOR_REASONING_STREAM_MAX_HEIGHT = 240;
 
 /** Matches CSS transition duration — Reasoning auto-close waits for this. */
@@ -15,133 +16,123 @@ export function ConductorReasoningStream({
   liveContent,
   settledContent,
   isStreaming,
-  isMessageStreaming = false,
   textLength,
   maxHeight = CONDUCTOR_REASONING_STREAM_MAX_HEIGHT,
 }: {
   liveContent: ReactNode;
   settledContent: ReactNode;
   isStreaming: boolean;
-  /** When true, defer the collapse animation until the assistant turn finishes. */
-  isMessageStreaming?: boolean;
   textLength: number;
   maxHeight?: number;
 }) {
+  const { isOpen } = useReasoning();
   const [expanded, setExpanded] = useState(false);
-  const [collapseOut, setCollapseOut] = useState(false);
-  const [panelHidden, setPanelHidden] = useState(false);
-  const [peakHeight, setPeakHeight] = useState(0);
-  const [collapseHeight, setCollapseHeight] = useState(maxHeight);
+  const [collapsing, setCollapsing] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [collapseHeight, setCollapseHeight] = useState(0);
+  const [isOverflowing, setIsOverflowing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const peakHeightRef = useRef(0);
-  const hadLiveStreamRef = useRef(isStreaming);
+  const hadStreamRef = useRef(false);
   const wasStreamingRef = useRef(isStreaming);
+
+  const showClamped = isStreaming && !expanded;
+  const showLive = isStreaming || collapsing || expanded;
 
   useEffect(() => {
     if (isStreaming && !wasStreamingRef.current) {
-      peakHeightRef.current = 0;
-      setPeakHeight(0);
+      setExpanded(false);
     }
     wasStreamingRef.current = isStreaming;
 
     if (isStreaming) {
-      hadLiveStreamRef.current = true;
-      setCollapseOut(false);
-      setPanelHidden(false);
-      setExpanded(false);
+      hadStreamRef.current = true;
+      setCollapsing(false);
+      setCollapsed(false);
       return;
     }
 
-    if (hadLiveStreamRef.current && !isMessageStreaming) {
-      setCollapseOut(true);
+    if (hadStreamRef.current) {
+      setCollapsing(true);
     }
-  }, [isMessageStreaming, isStreaming]);
+  }, [isStreaming]);
 
   useEffect(() => {
-    if (!collapseOut) {
-      setCollapseHeight(peakHeightRef.current || maxHeight);
-      return;
+    if (isOpen && collapsed) {
+      setCollapsed(false);
+      setCollapsing(false);
+      setCollapseHeight(0);
     }
+  }, [collapsed, isOpen]);
 
-    const fromHeight = peakHeightRef.current || scrollRef.current?.clientHeight || maxHeight;
+  useEffect(() => {
+    if (!collapsing) return;
+
+    const fromHeight = scrollRef.current?.getBoundingClientRect().height ?? 0;
     setCollapseHeight(fromHeight);
+
     let inner = 0;
     const outer = requestAnimationFrame(() => {
       inner = requestAnimationFrame(() => {
         setCollapseHeight(0);
       });
     });
+
     return () => {
       cancelAnimationFrame(outer);
       cancelAnimationFrame(inner);
     };
-  }, [collapseOut, maxHeight]);
+  }, [collapsing]);
 
   useLayoutEffect(() => {
-    if (!isStreaming || expanded || collapseOut) return;
+    if (!showClamped || collapsing) {
+      setIsOverflowing(false);
+      return;
+    }
+
     const el = scrollRef.current;
     if (!el) return;
 
-    const contentHeight = Math.min(maxHeight, el.scrollHeight);
-    if (contentHeight > peakHeightRef.current) {
-      peakHeightRef.current = contentHeight;
-      setPeakHeight(contentHeight);
+    const overflowing = el.scrollHeight > el.clientHeight + 1;
+    setIsOverflowing(overflowing);
+    if (overflowing) {
+      el.scrollTop = el.scrollHeight;
     }
-
-    el.scrollTop = el.scrollHeight;
-  }, [collapseOut, expanded, isStreaming, maxHeight, textLength]);
+  }, [collapsing, showClamped, textLength]);
 
   const handleTransitionEnd = (event: React.TransitionEvent<HTMLDivElement>) => {
-    if (!collapseOut || collapseHeight !== 0) return;
+    if (!collapsing || collapseHeight !== 0) return;
     if (event.propertyName !== "height") return;
-    hadLiveStreamRef.current = false;
-    peakHeightRef.current = 0;
-    setPeakHeight(0);
-    setPanelHidden(true);
-    setCollapseOut(false);
-    setCollapseHeight(maxHeight);
+    hadStreamRef.current = false;
+    setCollapsed(true);
+    setCollapsing(false);
+    setCollapseHeight(0);
   };
 
-  if (panelHidden && !isStreaming) {
-    return (
-      <div className="conductor-reasoning-stream__settled">
-        {settledContent}
-      </div>
-    );
+  if (collapsed && !isStreaming) {
+    if (!isOpen) return null;
+    return <div className="conductor-reasoning-stream__settled">{settledContent}</div>;
   }
 
-  const showLivePanel = isStreaming || collapseOut;
-  const clamped = showLivePanel && !expanded;
-  const scrollContent = isStreaming || collapseOut || expanded ? liveContent : settledContent;
-  const useFadeMask = clamped && !collapseOut && peakHeight > 56;
-
-  const liveScrollStyle = clamped
-    ? {
-        maxHeight,
-        height: collapseOut ? collapseHeight : peakHeight || undefined,
-        opacity: collapseOut && collapseHeight === 0 ? 0 : 1,
-      }
-    : undefined;
+  const scrollStyle = collapsing
+    ? { height: collapseHeight, opacity: collapseHeight === 0 ? 0 : 1, overflow: "hidden" as const }
+    : showClamped
+      ? { maxHeight }
+      : undefined;
 
   return (
-    <div
-      className={cn(
-        "conductor-reasoning-stream",
-        collapseOut && "conductor-reasoning-stream--collapsing",
-      )}
-    >
+    <div className={cn("conductor-reasoning-stream", collapsing && "conductor-reasoning-stream--collapsing")}>
       <div
         ref={scrollRef}
         className={cn(
           "conductor-reasoning-stream__scroll",
-          clamped && "conductor-reasoning-stream__scroll--live",
-          useFadeMask && "conductor-reasoning-stream__scroll--masked",
-          collapseOut && "conductor-reasoning-stream__scroll--collapse-out",
+          showClamped && "conductor-reasoning-stream__scroll--live",
+          isOverflowing && "conductor-reasoning-stream__scroll--masked",
+          collapsing && "conductor-reasoning-stream__scroll--collapsing",
         )}
         onTransitionEnd={handleTransitionEnd}
-        style={liveScrollStyle}
+        style={scrollStyle}
       >
-        {scrollContent}
+        {showLive ? liveContent : settledContent}
       </div>
 
       {isStreaming ? (

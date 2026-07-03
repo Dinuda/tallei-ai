@@ -5,8 +5,8 @@ import { cn } from "@/lib/utils";
 const STARTER_PROMPTS = [
   {
     id: "support-inbox",
-    title: "Support inbox triage",
-    description: "Read new tickets, classify priority, and draft replies for review.",
+    title: "Support ticket helper",
+    description: "Sort new tickets by urgency and draft replies for you to review.",
     message: "When a support ticket arrives, classify it by priority and create a reply draft for my review before anything is sent.",
   },
   {
@@ -28,7 +28,7 @@ export function LoopSuggestionCards({
   onSelect,
 }: {
   className?: string;
-  onSelect: (message: string) => void;
+  onSelect: (selection: { name: string; message: string }) => void;
 }) {
   return (
     <div className={cn("grid gap-3 sm:grid-cols-3", className)}>
@@ -36,7 +36,7 @@ export function LoopSuggestionCards({
         <button
           className="border border-[var(--cb-border,#d1d5db)] bg-white p-4 text-left transition-colors hover:border-[#9ca3af] hover:bg-slate-50"
           key={prompt.id}
-          onClick={() => onSelect(prompt.message)}
+          onClick={() => onSelect({ name: prompt.title, message: prompt.message })}
           type="button"
         >
           <div

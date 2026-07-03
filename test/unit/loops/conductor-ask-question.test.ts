@@ -10,6 +10,7 @@ import {
   testRunLoopInputSchema,
 } from "../../../src/loops/conductor-tools.js";
 import { buildConductorSystemPrompt } from "../../../src/loops/planning-agent.js";
+import { computeOutcomeBriefHash } from "../../../src/loops/outcome-brief.js";
 import { createEmptyLoopSpec } from "../../../src/loops/spec.js";
 
 test("testRunLoopInputSchema accepts scenario payload", () => {
@@ -59,7 +60,7 @@ test("askQuestionInputSchema rejects questions with fewer than two options", () 
 
 test("confirmOutcomeBriefInputSchema requires LLM-provided question and options", () => {
   const parsed = confirmOutcomeBriefInputSchema.parse({
-    briefHash: "abc123",
+    briefHash: "a".repeat(64),
     question: "Ready to build this?",
     options: [
       { id: "confirm", label: "Looks good", value: "confirm" },
@@ -73,7 +74,18 @@ test("confirmOutcomeBriefInputSchema requires LLM-provided question and options"
 
 test("confirmOutcomeBriefInputSchema rejects briefHash-only payloads", () => {
   assert.throws(() => confirmOutcomeBriefInputSchema.parse({
-    briefHash: "abc123",
+    briefHash: "a".repeat(64),
+  }));
+});
+
+test("confirmOutcomeBriefInputSchema rejects non-SHA-256 hashes", () => {
+  assert.throws(() => confirmOutcomeBriefInputSchema.parse({
+    briefHash: "brief-hash-123",
+    question: "Ready to build this?",
+    options: [
+      { id: "confirm", label: "Looks good", value: "confirm" },
+      { id: "changes", label: "Change something", value: "other" },
+    ],
   }));
 });
 
@@ -92,6 +104,7 @@ test("buildConductorSystemPrompt requires askQuestion only as last resort", () =
   const spec = createEmptyLoopSpec("00000000-0000-4000-8000-000000000001");
   const prompt = buildConductorSystemPrompt({
     spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
     connectedToolkits: [{ slug: "gmail", name: "Gmail", connected: true }],
   });
 

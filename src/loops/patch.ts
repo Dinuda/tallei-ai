@@ -7,9 +7,16 @@ import {
 import { isEventTriggerReadyForCompile } from "./event-trigger.js";
 import { normalizeTaskBlueprint } from "./task-decomposition.js";
 
+function resolveExecutionOrder(current: LoopSpec, patch: SpecPatch) {
+  return patch.intentDiscovery?.analysis?.executionOrder
+    ?? current.intentDiscovery.analysis?.executionOrder
+    ?? [];
+}
+
 export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
+  const executionOrder = resolveExecutionOrder(current, patch);
   const nextBlueprint = patch.taskBlueprint
-    ? normalizeTaskBlueprint(patch.taskBlueprint)
+    ? normalizeTaskBlueprint(patch.taskBlueprint, executionOrder)
     : current.taskBlueprint;
   const intentChanged = patch.intent !== undefined
     && JSON.stringify({ ...current.intent, ...patch.intent }) !== JSON.stringify(current.intent);

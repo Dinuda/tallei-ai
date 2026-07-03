@@ -8,9 +8,15 @@ const workspaceId = "00000000-0000-4000-8000-000000000001";
 
 test("buildIntentAnalysisSpecPatch persists canonical approval from analyzeIntent", () => {
   const spec = createEmptyLoopSpec(workspaceId);
+  const executionOrder = [
+    { role: "trigger", description: "When a new support ticket arrives" },
+    { role: "transform", description: "Draft personalized replies" },
+    { role: "destination", description: "Send replies after review" },
+  ] as const;
   const result = buildIntentAnalysisSpecPatch(spec, {
     outcome: "Send personalized replies to incoming support tickets",
     trigger: "When a new support ticket arrives",
+    executionOrder: [...executionOrder],
     approval: {
       mode: "mixed",
       sensitiveRoles: ["destination"],
@@ -26,6 +32,7 @@ test("buildIntentAnalysisSpecPatch persists canonical approval from analyzeInten
   assert.equal(result.patch.approval?.mode, "mixed");
   assert.deepEqual(result.patch.approval?.sensitiveRoles, ["destination"]);
   assert.deepEqual(result.patch.approval?.sensitiveCapabilities, []);
+  assert.deepEqual(result.patch.intentDiscovery?.analysis?.executionOrder, [...executionOrder]);
 });
 
 test("buildIntentAnalysisSpecPatch preserves existing approval when analyzeIntent omits it", () => {

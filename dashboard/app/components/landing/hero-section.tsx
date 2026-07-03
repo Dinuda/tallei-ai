@@ -37,7 +37,7 @@ export function HeroSection() {
             We run the right loop.
           </h1>
           <p className="landing-hero-sub">
-            Describe the work in plain English — weekly reports, inbox triage, research digests.
+            Describe the work in plain English — weekly reports, inbox help, research digests.
             Tallei picks the right agents, remembers your preferences, and runs it on schedule.
           </p>
           <div className="landing-hero-actions">

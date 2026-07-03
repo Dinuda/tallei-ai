@@ -22,6 +22,7 @@ export function ConductorBuilderChat({
   chatStatus,
   pendingQuestionCallId,
   pendingReplyOptionsCallId,
+  spec,
   showThinking,
   thinkingLabel = "Thinking…",
   className,
@@ -31,6 +32,7 @@ export function ConductorBuilderChat({
   chatStatus: ChatStatus;
   pendingQuestionCallId: string | null;
   pendingReplyOptionsCallId: string | null;
+  spec: Record<string, unknown> | null;
   showThinking: boolean;
   thinkingLabel?: string;
   className?: string;
@@ -58,7 +60,6 @@ export function ConductorBuilderChat({
                         <ConductorReasoningPart
                           key={i}
                           part={part as ReasoningUIPart}
-                          isMessageStreaming={chatStatus === "streaming" && message.id === lastMessageId}
                         />
                       );
                     }
@@ -80,6 +81,7 @@ export function ConductorBuilderChat({
                           part={part as DynamicToolUIPart}
                           pendingQuestionCallId={pendingQuestionCallId}
                           pendingReplyOptionsCallId={pendingReplyOptionsCallId}
+                          spec={spec}
                         />
                       );
                     }

@@ -29,8 +29,8 @@ export const SHOWCASE_LOOPS: ShowcaseLoop[] = [
   },
   {
     id: "inbox",
-    title: "Inbox Triage",
-    intent: "Sort my inbox, flag urgent, draft replies",
+    title: "Inbox helper",
+    intent: "Sort my inbox, flag what's urgent, and draft replies",
     cadence: "Daily 8am",
     category: "ops",
     agents: ["Classifier", "Drafter", "Gate"],

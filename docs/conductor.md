@@ -49,7 +49,7 @@ flowchart TD
 
 **Route:** `POST /api/loops/:loopId/chat` (SSE stream, proxied by `dashboard/app/api/loops/[...path]/route.ts`)
 
-**Model:** `getStreamingLanguageModel("conductor")` → `TALLEI_CONDUCTOR__MODEL` (OpenCode Zen by default). **One model, one stream** — there is no separate “intent analyst” or planner pre-pass in the build chat. Conductor analyzes intent inline and patches the spec via `patchLoopSpec`.
+**Model:** `getStreamingLanguageModel("conductor")` → `TALLEI_CONDUCTOR__MODEL` (OpenCode Zen by default). **One model, one stream** — there is no separate intent-analysis, outcome-summary, or planner pre-pass in the build chat. Conductor analyzes intent inline and patches the spec; the dashboard projects the final review directly from that spec.
 
 **System prompt:** `buildConductorSystemPrompt()` in `src/loops/planning-agent.ts` — ownership-first: Conductor resolves compile blockers autonomously; interrupts the user only when a preference materially changes what the loop does.
 
@@ -65,6 +65,7 @@ flowchart TD
 | `listActions` | yes | Full action dump for one toolkit |
 | `connectToolkit` | yes | Start OAuth for a toolkit |
 | `askQuestion` | **no** (UI-only) | **Business forks only** — delivery mode, approval, schedule, ambiguous destination. **Forbidden:** connector app choice, Yes/No to confirm a connected app, Composio/API details. |
+| `confirmOutcomeBrief` | **no** (UI-only) | Display Confirm/Change buttons for the config-driven review card. Receives the server-computed current-spec hash as an internal value. |
 | `presentReplyOptions` | **no** (UI-only) | Clickable chips for compile / test / activate confirmations |
 | `compileLoop` / `testRunLoop` / `activateLoop` | yes | Go-live path after spec is ready |
 
@@ -153,6 +154,7 @@ sequenceDiagram
   participant P as pickConnectorApp
   participant B as discoverBindings
   participant S as patchLoopSpec
+  participant Q as confirmOutcomeBrief
 
   U->>C: Describe outcome (e.g. triage support email, draft replies)
   C->>S: patchLoopSpec — intent + taskBlueprint + agent.instructions
@@ -169,7 +171,10 @@ sequenceDiagram
   B-->>C: suggestedBindings
   C->>S: patch bindings, event trigger, output, approval
 
-  C->>U: Summarize choices; presentReplyOptions for compile/test when ready
+  C->>Q: stream summary fields + current server hash
+  Q-->>U: progressively render review card and confirmation buttons
+  Q-->>C: user confirms or requests a change
+  C->>S: patch confirmation hash, or patch the requested change
 ```
 
 ### Outcome-first planning (unified Conductor)
@@ -179,7 +184,8 @@ sequenceDiagram
 3. **`discoverConnectorsForBlueprint`** once → **`pickConnectorApp`** always (user chooses; connected `*` is ranking hint only).
 4. **`discoverBindings`** per chosen connector → `bindings[]` with optional `role`.
 5. **`listTriggers`** + patch event trigger when the loop is event-driven.
-6. **Compile path:** `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop` after user confirms.
+6. **Confirmation:** the dashboard renders the current `LoopSpec`, and Conductor calls `confirmOutcomeBrief` only for interaction; there is no review tool, duplicated summary payload, Markdown parsing, or nested summarizer model.
+7. **Compile path:** after confirmation, `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop`.
 
 **Default connector rule:** one app powers **trigger, receive, draft, and send** unless the user explicitly asked for **separate apps** for receive vs send (e.g. “read from Zendesk, send via Gmail”). `applyPrimaryConnectorToBlueprint()` in `connector-discovery.ts` applies one slug to all pending non-`transform` outcomes.
 
@@ -188,6 +194,27 @@ sequenceDiagram
 ## System prompt (`buildConductorSystemPrompt`)
 
 Built fresh on **every** chat request. Structured for clarity without blowing the context window:
+
+Before every model step, `prepareStep` rebuilds the system prompt from the request's current in-memory spec. This matters when earlier tools patched the spec during the same request. When the current spec has no compile blockers and is not confirmed, the server computes `computeOutcomeBriefHash(spec)` and supplies it only as the internal `briefHash` for `confirmOutcomeBrief`.
+
+`buildOutcomeReviewViewModel()` projects the card from `LoopSpec`: title and outcome from intent/blueprint, stages from blueprint outcomes, trigger copy from trigger configuration, approval and reversibility from approval policy, and result from destination/output configuration. The model does not generate or duplicate presentation data. The existing interactive menu remains unchanged in the composer.
+
+The card presents this projection as an interactive **routing manifest**, not an implementation graph. It uses the AI Elements `Canvas` with static edges: users can pan, zoom, select a stage, inspect its configured goal, and use a minimap on routes longer than six stages. Connector nodes use the Composio logo service already used by the app picker, Tallei processing nodes use `/tallei.svg`, and approval nodes show the signed-in user's avatar. Styling follows the square-cornered neutral `InteractivePromptMenu` surface. The manifest reference is a short display-only prefix of the confirmation hash.
+
+Tool input examples live only under `test/unit/loops/fixtures`. Production descriptions explain behavior and rely on the Zod `inputSchema` already supplied to the AI SDK; runtime prompts never interpolate example payloads.
+
+### Confirmation integrity and invalidation
+
+- The hash covers intent, trigger, blueprint, bindings, actions, output, approvals, and guardrails.
+- A Confirm response echoes the internal hash; Conductor patches `intentDiscovery.status=confirmed` and `confirmedBriefHash`.
+- `isOutcomeBriefConfirmed()` recomputes the hash before compilation. A mismatch blocks compilation.
+- Any material `applySpecPatch()` change resets confirmed state and clears the stored hash, requiring a new config-driven review.
+
+### Latency and legacy transcripts
+
+The old flow called `reviewOutcomeBrief`, waited for a separate planner-model JSON summary, then resumed Conductor to call `confirmOutcomeBrief`. The current flow removes the nested model request and extra review step. Review content now comes from `LoopSpec`; the model supplies only the interaction call.
+
+Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` parts remain readable, unanswered legacy `confirmOutcomeBrief` calls remain resumable, and the dashboard no longer requires a review result before showing confirmation buttons. New transcripts never call `reviewOutcomeBrief`.
 
 | Block | Purpose |
 |-------|---------|
@@ -201,10 +228,11 @@ Built fresh on **every** chat request. Structured for clarity without blowing th
 
 **Why not spec twice?** An older prompt dumped `taskBlueprint` as its own JSON block *and* the full `LoopSpec` — duplicate tokens with no extra signal. Current prompt includes **one** `Spec JSON:` line (full spec, compact stringify).
 
-**UI tools are not in the prompt as replacements for tool calls** — the prompt tells Conductor to invoke `pickConnectorApp`, `askQuestion`, and `presentReplyOptions` as tools. The dashboard renders those tools:
+**UI tools are not in the prompt as replacements for tool calls** — the prompt tells Conductor to invoke `pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, and `presentReplyOptions` as tools. The dashboard renders those tools:
 
 - **`pickConnectorApp`** → `BuilderConnectorPrompt` app cards
 - **`askQuestion`** → `InteractivePromptMenu`
+- **`confirmOutcomeBrief`** → streamable review card in the transcript plus confirmation/change buttons in the composer
 - **`presentReplyOptions`** + **`deriveConductorPromptSuggestions`** → suggestion chips above the composer when no pending tool prompt
 
 **Auto-apply:** when `discoverConnectorsForBlueprint` returns `autoApplyConnector`, Conductor patches immediately; client may also auto-submit `pickConnectorApp` if the model called it anyway (`findAutoConnectorPromptTarget`).
@@ -273,6 +301,14 @@ Conductor may pass a custom `question` string to `pickConnectorApp`. The UI inje
 
 ## `taskBlueprint` & spec gates
 
+### Execution order
+
+**Primary:** `intentDiscovery.analysis.executionOrder` is the pipeline plan produced by `analyzeIntent`. Each step has a `role` (`trigger`, `source`, `transform`, `destination`) and a plain-language `description` in execution order.
+
+`patchLoopSpec` should derive `taskBlueprint.outcomes` from `executionOrder` in the **same order**. Array order is execution order for the route diagram and `buildExecutionStrategy`.
+
+**Fallback:** When `executionOrder` is missing (legacy specs) or blueprint outcomes diverge from it, the server may apply single-pass role bucket-sort (`trigger → source → transform → destination`) via `normalizeBlueprintOutcomeOrder()`. Multi-phase flows — where a `source` or `trigger` appears after a `destination` — are **never** reordered.
+
 **Shape** (patched via `patchLoopSpec`):
 
 ```json
@@ -302,14 +338,15 @@ After connector pick, pending outcomes get `selectedConnector` + `status: "chose
 
 | Step | Conductor action |
 |------|------------------|
-| 1 | `patchLoopSpec` — `intent.outcome` = classified tickets + drafts ready for review; `taskBlueprint` with trigger/source/transform/destination roles; `agent.instructions` operational brief |
+| 1 | `analyzeIntent` — `intent.outcome`, `executionOrder` (trigger → source → transform → destination), approval |
+| 2 | `patchLoopSpec` — `taskBlueprint.outcomes` derived from `executionOrder` in same order; `agent.instructions` operational brief |
 | 2 | No `askQuestion` — “draft for review” is clear (not send-immediately) |
 | 3 | `discoverConnectorsForBlueprint` — Gmail connected, top ranked |
 | 4 | `pickConnectorApp` — user confirms Gmail (or picks another app) |
 | 5 | `patchLoopSpec` — `selectedConnector: "gmail"` on trigger/source/destination outcomes |
 | 6 | `listTriggers` + `discoverBindings` → patch bindings, event trigger, output, approval |
-| 7 | Summarize; `presentReplyOptions` when compile blockers empty |
-| 7 | Tell user what was configured; `presentReplyOptions` when compile blockers are empty |
+| 7 | Render the review card from `LoopSpec`; call `confirmOutcomeBrief` for the interaction |
+| 8 | After confirmation, patch the current hash and continue to compile/test |
 
 **User:** Same prompt but also says “and send the email” without sequencing.
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applySpecPatch, getMissingSlots, isReadyToCompile, seedSpecFromTemplate } from "../../../src/loops/patch.js";
+import { createEmptyLoopSpec } from "../../../src/loops/spec.js";
 
 test("seedSpecFromTemplate research_digest fills intent", () => {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
@@ -61,6 +62,44 @@ test("applySpecPatch round-trips taskBlueprint", () => {
   assert.equal(updated.taskBlueprint?.summary, "Newsletter");
   assert.equal(updated.taskBlueprint?.outcomes[0]?.status, "chosen");
   assert.equal(updated.taskBlueprint?.outcomes[0]?.selectedConnector, "mailchimp");
+});
+
+test("applySpecPatch preserves blueprint order when executionOrder matches", () => {
+  const workspaceId = "00000000-0000-4000-8000-000000000001";
+  const executionOrder = [
+    { role: "trigger", description: "New support tickets arrive in Gmail" },
+    { role: "transform", description: "Classify priority and draft replies" },
+    { role: "destination", description: "Send drafted replies" },
+  ] as const;
+  const base = applySpecPatch(createEmptyLoopSpec(workspaceId), {
+    intentDiscovery: {
+      status: "ready",
+      analysis: {
+        outcome: "Classified tickets with drafts ready for review",
+        trigger: "When a new support ticket arrives",
+        executionOrder: [...executionOrder],
+        decisions: [],
+      },
+      decisions: [],
+      askedQuestionIds: [],
+    },
+  });
+  const updated = applySpecPatch(base, {
+    taskBlueprint: {
+      version: 1,
+      summary: "Support triage",
+      outcomes: executionOrder.map((step, index) => ({
+        id: `out-${index}`,
+        role: step.role,
+        description: step.description,
+        status: "pending" as const,
+      })),
+    },
+  });
+  assert.deepEqual(
+    updated.taskBlueprint?.outcomes.map((outcome) => outcome.role),
+    ["trigger", "transform", "destination"],
+  );
 });
 
 test("changing a connector invalidates only dependent generated configuration", () => {

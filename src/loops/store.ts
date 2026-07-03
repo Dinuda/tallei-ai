@@ -284,6 +284,21 @@ export async function setLoopStatus(
   );
 }
 
+export async function updateLoopName(
+  auth: AuthContext,
+  loopId: string,
+  name: string,
+): Promise<ReturnType<typeof mapLoop> | null> {
+  const result = await pool.query<LoopRow>(
+    `UPDATE loops SET name = $4, updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND user_id = $3
+     RETURNING *`,
+    [loopId, auth.tenantId, auth.userId, name.trim()],
+  );
+  const row = result.rows[0];
+  return row ? mapLoop(row) : null;
+}
+
 export async function moveLoopToWorkspace(
   auth: AuthContext,
   loopId: string,

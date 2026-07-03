@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState, Suspense } from "react";
 import { Code2, Menu, Sparkles, Workflow, X, Settings } from "lucide-react";
 import { ConductorHeader } from "@/components/conductor-header";
+import { ConductorLayoutProvider } from "@/components/conductor/conductor-layout-context";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -259,6 +260,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const headerUiFont = dashboardUiFont;
   return (
     <WorkspaceProvider>
+    <ConductorLayoutProvider>
     <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900" style={dashboardUiFont}>
       <a
         href="#main-content"
@@ -267,8 +269,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         Skip to main content
       </a>
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6">
-          <div className="flex min-w-0 flex-1 items-center gap-2">
+        <div className="flex h-14 w-full items-center">
+          <div className="flex h-14 shrink-0 items-center gap-2 border-slate-200 px-4 md:w-[248px] md:border-r md:px-3">
             <Button
               type="button"
               variant="ghost"
@@ -282,21 +284,23 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <Link href="/dashboard" className="flex shrink-0 items-center">
               <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
-            {isConductorRoute ? (
+          </div>
+
+          {isConductorRoute ? (
+            <div className="flex min-w-0 flex-1 items-center px-3 md:px-4">
               <Suspense fallback={
-                <div className="ml-4 hidden min-w-0 flex-1 items-center gap-4 border-l border-slate-200 pl-6 md:flex">
-                  <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-400">Conductor</div>
-                    <div className="text-sm font-semibold leading-none text-slate-900">Create a loop</div>
-                  </div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold leading-none text-slate-900">New loop</div>
                 </div>
               }>
                 <ConductorHeader />
               </Suspense>
-            ) : null}
-          </div>
+            </div>
+          ) : (
+            <div className="flex-1" aria-hidden />
+          )}
 
-          <div className="flex items-center gap-2 pl-3 sm:pl-4">
+          <div className="flex shrink-0 items-center gap-2 px-4 sm:px-6">
             <WorkspaceSwitcher />
             {isFreePlan ? (
               <>
@@ -389,6 +393,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </main>
       <Toaster position="top-right" />
     </div>
+    </ConductorLayoutProvider>
     </WorkspaceProvider>
   );
 }

@@ -14,6 +14,7 @@ test("buildConductorSystemPrompt includes workspace and compile blockers", () =>
   const prompt = buildConductorSystemPrompt({
     workspaceName: "Personal",
     spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
     connectedToolkits: [{ slug: "gmail", name: "Gmail", connected: true }],
   });
   assert.match(prompt, /Workspace: Personal/);
@@ -45,10 +46,43 @@ test("buildConductorSystemPrompt reports ready when slots filled", () => {
   };
   const prompt = buildConductorSystemPrompt({
     spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
     connectedToolkits: [],
   });
   assert.match(prompt, /Compile blockers: none/);
   assert.match(prompt, /Next:.*compileLoop/);
+});
+
+test("buildConductorSystemPrompt requests config-driven confirmation without model summary fields", () => {
+  const spec = seedSpecFromTemplate(workspaceId, "research_digest");
+  spec.taskBlueprint = {
+    version: 1,
+    summary: "Research digest",
+    outcomes: [{
+      id: "src",
+      role: "source",
+      description: "Research the requested topics",
+      status: "chosen",
+      selectedConnector: "composio",
+    }],
+  };
+  spec.bindings = [{ capability: "web.search", connector: "composio" }];
+  spec.output = { kind: "chat", target: "Research channel" };
+  spec.intentDiscovery = { status: "ready", decisions: [], assumptions: [], askedQuestionIds: [] };
+  const confirmationHash = computeOutcomeBriefHash(spec);
+
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash,
+    connectedToolkits: [],
+  });
+
+  assert.match(prompt, /UI derives the review card entirely from the current LoopSpec/i);
+  assert.match(prompt, /Do not generate, restate, or pass title, stages/i);
+  assert.doesNotMatch(prompt, /summary\.runsWhen|summary\.steps|summary\.approval|summary\.result/);
+  assert.match(prompt, new RegExp(confirmationHash));
+  assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
+  assert.match(prompt, /never display/i);
 });
 
 test("buildTestRunPlannerPrompt includes scenario and test prefix", () => {
@@ -192,7 +226,11 @@ test("compactStepHistoryForPlanner keeps latest 2 messages and shrinks payloads"
 
 test("buildConductorSystemPrompt includes the requested prompt sections", () => {
   const spec = createEmptyLoopSpec(workspaceId);
-  const prompt = buildConductorSystemPrompt({ spec, connectedToolkits: [] });
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    connectedToolkits: [],
+  });
   assert.match(prompt, /— Core rules —/);
   assert.match(prompt, /— Blueprint & patch flow —/);
   assert.match(prompt, /— Hard stops —/);
@@ -202,6 +240,7 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
   assert.match(prompt, /analyzeIntent/);
   assert.match(prompt, /confirmOutcomeBrief/);
   assert.match(prompt, /presentReplyOptions/);
+  assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
 });
 
 test("buildConductorSystemPrompt includes full spec JSON once", () => {
@@ -216,8 +255,23 @@ test("buildConductorSystemPrompt includes full spec JSON once", () => {
       status: "pending",
     }],
   };
-  const prompt = buildConductorSystemPrompt({ spec, connectedToolkits: [] });
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    connectedToolkits: [],
+  });
   assert.match(prompt, /Spec JSON:/);
   assert.match(prompt, /AI newsletter/);
   assert.equal((prompt.match(/"taskBlueprint"/g) ?? []).length, 1);
+});
+
+test("Conductor refreshes confirmation state per step without a nested summary model", async () => {
+  const source = await import("node:fs/promises").then((fs) => fs.readFile(
+    new URL("../../../src/transport/http/routes/loops.ts", import.meta.url),
+    "utf8",
+  ));
+
+  assert.match(source, /prepareStep:\s*\(\) => \(\{ system: buildCurrentSystemPrompt\(\) \}\)/);
+  assert.match(source, /confirmationHash:\s*computeOutcomeBriefHash\(currentSpec!\)/);
+  assert.doesNotMatch(source, /summarizeOutcomeBriefForUser|reviewOutcomeBrief:\s*tool/);
 });

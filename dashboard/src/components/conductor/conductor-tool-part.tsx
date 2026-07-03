@@ -12,6 +12,13 @@ import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/componen
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { BuilderConnectToolkitCard } from "@/components/conductor/builder-connect-toolkit-card";
 import {
+  OutcomeBriefCard,
+} from "@/components/conductor/outcome-brief-card";
+import {
+  buildOutcomeReviewViewModel,
+  type LegacyOutcomeReviewSummary,
+} from "@/components/conductor/outcome-review-view-model";
+import {
   formatActivateSummary,
   formatCompileSummary,
   formatDiscoverConnectorsSummary,
@@ -31,28 +38,13 @@ import type {
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
 
-const LIVE_REASONING_CHAR_WINDOW = 900;
-
-function liveReasoningText(text: string, isStreaming: boolean): string {
-  if (!isStreaming || text.length <= LIVE_REASONING_CHAR_WINDOW) return text;
-  const sliceAt = text.length - LIVE_REASONING_CHAR_WINDOW;
-  const lineBreak = text.lastIndexOf("\n", text.length - 1);
-  const softBreak = text.lastIndexOf("\n", sliceAt);
-  if (softBreak > sliceAt) return text.slice(softBreak + 1);
-  if (lineBreak > sliceAt) return text.slice(lineBreak + 1);
-  return text.slice(sliceAt);
-}
-
 export function ConductorReasoningPart({
   part,
-  isMessageStreaming,
 }: {
   part: ReasoningUIPart;
-  isMessageStreaming: boolean;
 }) {
-  const isStreaming = part.state === "streaming" || (isMessageStreaming && part.state !== "done");
+  const isStreaming = part.state === "streaming";
   const text = part.text;
-  const liveText = liveReasoningText(text, isStreaming);
 
   return (
     <Reasoning
@@ -63,12 +55,11 @@ export function ConductorReasoningPart({
       <ReasoningTrigger />
       <CollapsibleContent className="conductor-reasoning-collapsible mt-2 text-sm outline-none">
         <ConductorReasoningStream
-          isMessageStreaming={isMessageStreaming}
           isStreaming={isStreaming}
           textLength={text.length}
           liveContent={
             <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
-              {liveText}
+              {text}
             </p>
           }
           settledContent={
@@ -120,10 +111,12 @@ export function ConductorToolPart({
   part,
   pendingQuestionCallId,
   pendingReplyOptionsCallId,
+  spec,
 }: {
   part: DynamicToolUIPart & { toolName?: string; input?: unknown; output?: unknown };
   pendingQuestionCallId: string | null;
   pendingReplyOptionsCallId: string | null;
+  spec: Record<string, unknown> | null;
 }) {
   const toolName = resolveToolPartName(part);
   const [open, setOpen] = useState(false);
@@ -160,15 +153,18 @@ export function ConductorToolPart({
   }
 
   if (toolName === "confirmOutcomeBrief") {
+    const input = part.input as { summary?: LegacyOutcomeReviewSummary } | undefined;
     const output = part.output as { action?: string; otherText?: string } | undefined;
-    if (part.state === "output-available" && output?.action) {
-      return (
-        <div className="mb-2 border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-          {output.action === "confirm" ? "Plan confirmed — ready to build" : `Requested change: ${output.otherText || output.action.replaceAll("_", " ")}`}
-        </div>
-      );
-    }
-    return null;
+    const status = output?.action
+      ? output.action === "confirm" ? "confirmed" as const : "change-requested" as const
+      : undefined;
+    return (
+      <OutcomeBriefCard
+        status={status}
+        streaming={part.state === "input-streaming"}
+        viewModel={buildOutcomeReviewViewModel(spec, input?.summary)}
+      />
+    );
   }
 
   if (toolName === "presentReplyOptions") {
@@ -201,7 +197,7 @@ export function ConductorToolPart({
 
   const title =
     toolName === "patchLoopSpec"
-      ? "Update loop configuration"
+      ? "Making changes..."
       : toolName === "discoverConnectorsForBlueprint"
         ? "Discover connectors"
         : toolName === "pickConnectorApp"
@@ -218,6 +214,8 @@ export function ConductorToolPart({
                     ? "Test run"
                     : toolName === "activateLoop"
                       ? "Activate loop"
+                      : toolName === "reviewOutcomeBrief"
+                        ? "The loop"
                       : toolName;
 
   const summary =

@@ -1,5 +1,14 @@
 import type { UIMessage } from "ai";
 
+import {
+  applySpecPatch,
+} from "./patch.js";
+import type { LoopSpec } from "./spec.js";
+import {
+  buildIntentAnswerPatch,
+} from "./intent-analysis.js";
+import type { AskQuestionInput, AskQuestionOutput } from "./conductor-tools.js";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -247,4 +256,62 @@ export function sanitizeConductorChatMessages(messages: UIMessage[]): UIMessage[
 export function parseStoredConductorChatMessages(raw: unknown): UIMessage[] {
   if (!Array.isArray(raw)) return [];
   return sanitizeConductorChatMessages(raw as UIMessage[]);
+}
+
+type IntentAskQuestionAnswer = {
+  input: AskQuestionInput;
+  output: AskQuestionOutput;
+};
+
+function readIntentAskQuestionAnswer(part: {
+  type: string;
+  toolName?: string;
+  state?: string;
+  input?: unknown;
+  output?: unknown;
+}): IntentAskQuestionAnswer | null {
+  if (resolveToolPartName(part) !== "askQuestion") return null;
+  if (part.state !== "output-available" || !part.output) return null;
+  if (!hasQuestionOptionsInput(part.input)) return null;
+
+  const output = part.output as AskQuestionOutput;
+  if (output.skipped) return null;
+  if (!output.questionId?.trim()) return null;
+
+  return {
+    input: part.input as AskQuestionInput,
+    output,
+  };
+}
+
+/** Apply answered intent-phase askQuestion tool outputs through the normal spec patch path. */
+export function applyPendingIntentAnswersFromTranscript(
+  messages: UIMessage[],
+  spec: LoopSpec,
+): { spec: LoopSpec; applied: boolean } {
+  let nextSpec = spec;
+  let applied = false;
+
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (!isToolPart(part as { type: string })) continue;
+      const answer = readIntentAskQuestionAnswer(part as {
+        type: string;
+        toolName?: string;
+        state?: string;
+        input?: unknown;
+        output?: unknown;
+      });
+      if (!answer) continue;
+
+      const patch = buildIntentAnswerPatch(nextSpec, answer.input, answer.output);
+      if (!patch) continue;
+
+      nextSpec = applySpecPatch(nextSpec, patch);
+      applied = true;
+    }
+  }
+
+  return { spec: nextSpec, applied };
 }
