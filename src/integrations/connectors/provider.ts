@@ -22,7 +22,7 @@ export type ConnectorAction = {
   tags?: string[];
 };
 
-export type ConnectorTrigger = { slug: string; name: string };
+export type ConnectorTrigger = { slug: string; name: string; config?: Record<string, unknown> };
 
 export type ConnectorConnection = {
   toolkit: string;
@@ -45,6 +45,7 @@ export interface ConnectorProvider {
     toolkit: string;
     triggerSlug?: string;
     eventType?: string;
+    config?: Record<string, unknown>;
   }): Promise<unknown>;
   unregisterTrigger(loopId: string): Promise<void>;
   getLatestToolkitVersion(toolkit: string): Promise<string>;

@@ -93,7 +93,7 @@ test("buildOutcomesFromExecutionOrder preserves order and reuses existing outcom
   assert.equal(built[0]?.selectedConnector, "gmail");
 });
 
-test("applySpecPatch applies fallback reorder for legacy single-pass misorder", () => {
+test("applySpecPatch applies fallback reorder when execution order is absent", () => {
   const spec = applySpecPatch(createEmptyLoopSpec(workspaceId), {
     taskBlueprint: {
       version: 1,

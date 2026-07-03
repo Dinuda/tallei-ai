@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  mergeChatMessages,
   runStatusToChatMessage,
   stepToChatMessages,
 } from "../../../src/loops/loop-chat.js";
@@ -29,15 +28,4 @@ test("runStatusToChatMessage uses stable id per run and status", () => {
   });
   assert.equal(message.id, "run-run-1-failed");
   assert.match(String((message.parts[0] as { text?: string }).text), /boom/);
-});
-
-test("mergeChatMessages dedupes by message id", () => {
-  const existing = [{ id: "a", role: "user" as const, parts: [{ type: "text" as const, text: "hi" }] }];
-  const incoming = [
-    { id: "a", role: "user" as const, parts: [{ type: "text" as const, text: "duplicate" }] },
-    { id: "b", role: "assistant" as const, parts: [{ type: "text" as const, text: "ok" }] },
-  ];
-  const merged = mergeChatMessages(existing, incoming);
-  assert.deepEqual(merged.map((m) => m.id), ["a", "b"]);
-  assert.equal((merged[0]?.parts[0] as { text?: string }).text, "hi");
 });

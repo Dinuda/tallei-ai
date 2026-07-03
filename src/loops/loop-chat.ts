@@ -1,10 +1,6 @@
-import { randomUUID } from "crypto";
 import type { UIMessage } from "ai";
 
-export type LoopChatKind = "build" | "run";
-
-export type LoopChatThreadMeta = {
-  specRevision: number | null;
+export type LoopBuildMeta = {
   compiledPlanId: string | null;
 };
 
@@ -88,19 +84,4 @@ export function runStatusToChatMessage(input: {
   };
 }
 
-export { normalizeConductorChatMessages, sanitizeConductorChatMessages, parseStoredConductorChatMessages } from "./conductor-chat.js";
-
-export function mergeChatMessages(existing: UIMessage[], incoming: UIMessage[]): UIMessage[] {
-  const seen = new Set(existing.map((message) => message.id));
-  const merged = [...existing];
-  for (const message of incoming) {
-    if (seen.has(message.id)) continue;
-    seen.add(message.id);
-    merged.push(message);
-  }
-  return merged;
-}
-
-export function newChatMessageId(prefix: string): string {
-  return `${prefix}-${randomUUID()}`;
-}
+export { normalizeConductorChatMessages, prepareConductorChatMessagesForEventLog } from "./conductor-chat.js";

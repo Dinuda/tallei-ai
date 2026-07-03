@@ -53,7 +53,6 @@ export { extractTriggerKnownFields, formatTriggerKnownFields } from "./trigger-k
 export {
   registerLoopEventTrigger,
   unregisterLoopEventTrigger,
-  getLoopTriggerRegistration,
   resolveTriggerSlugWithCatalog,
   validateComposioTriggerSlug,
   listComposioTriggerTypes,

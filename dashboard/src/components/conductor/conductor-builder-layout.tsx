@@ -4,7 +4,7 @@ import type { UIMessage } from "ai";
 import { History, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import {
   InteractivePromptMenu,
@@ -43,12 +43,12 @@ export type ConductorBuilderLayoutProps = {
   onSubmit: (text: string, meta?: { loopName?: string }) => void;
   onStop?: () => void;
   onRetry?: () => void;
-  pendingQuestion: PendingInteractivePrompt | null;
+  pendingQuestions: PendingInteractivePrompt[];
   pendingOutcomeBrief: PendingOutcomeBrief | null;
   promptSuggestions: ConductorPromptSuggestion[];
   promptSuggestionsQuestion: string;
-  onAskQuestionAnswer: (answer: InteractivePromptAnswer) => void;
-  onAskQuestionDismiss: () => void;
+  onAskQuestionAnswer: (prompt: PendingInteractivePrompt, answer: InteractivePromptAnswer) => void;
+  onAskQuestionDismiss: (prompt: PendingInteractivePrompt) => void;
   onOutcomeBriefAnswer: (answer: InteractivePromptAnswer) => void;
   onPromptSuggestionsSubmit: (answer: InteractivePromptAnswer) => void;
   spec: Record<string, unknown> | null;
@@ -74,7 +74,7 @@ export function ConductorBuilderLayout({
   onSubmit,
   onStop,
   onRetry,
-  pendingQuestion,
+  pendingQuestions,
   pendingOutcomeBrief,
   promptSuggestions,
   promptSuggestionsQuestion,
@@ -94,17 +94,30 @@ export function ConductorBuilderLayout({
   sendBlocked = false,
   pendingReplyOptionsCallId = null,
 }: ConductorBuilderLayoutProps) {
-  const pendingQuestionCallId = pendingQuestion?.toolCallId ?? null;
+  const pendingInteractivePromptCallIds = useMemo(
+    () => new Set(pendingQuestions.map((prompt) => prompt.toolCallId)),
+    [pendingQuestions],
+  );
+  const pendingQuestionStepsRef = useRef(new Map<string, { index: number; total: number }>());
+  for (const prompt of pendingQuestions) {
+    if (prompt.input.step && !pendingQuestionStepsRef.current.has(prompt.toolCallId)) {
+      pendingQuestionStepsRef.current.set(prompt.toolCallId, prompt.input.step);
+    }
+  }
+  const activePendingQuestion = pendingQuestions[0] ?? null;
+  const activePendingQuestionStep = activePendingQuestion
+    ? pendingQuestionStepsRef.current.get(activePendingQuestion.toolCallId) ?? activePendingQuestion.input.step
+    : undefined;
   const readyToCompile = missingSlots.length === 0 && Boolean(spec);
   const showThinking = shouldShowThinkingIndicator(
     messages,
     chatStatus,
-    Boolean(pendingQuestion || pendingOutcomeBrief),
+    Boolean(pendingQuestions.length || pendingOutcomeBrief),
     forceThinking,
   );
   const chatBusy = composerDisabled || chatStatus === "streaming" || chatStatus === "submitted";
   const composerInteractiveReady = chatStatus === "ready" && !composerDisabled;
-  const showComposerBusy = chatBusy && !pendingQuestion && !pendingOutcomeBrief;
+  const showComposerBusy = chatBusy && pendingQuestions.length === 0 && !pendingOutcomeBrief;
   const showTranscriptThinking = showThinking && !showComposerBusy;
   const suggestionsKey = promptSuggestions.map((suggestion) => suggestion.id).join("|");
   const [dismissedSuggestionsKey, setDismissedSuggestionsKey] = useState<string | null>(null);
@@ -121,11 +134,6 @@ export function ConductorBuilderLayout({
     () => (promptSuggestions[0] ? [promptSuggestions[0].id] : []),
     [promptSuggestions],
   );
-
-  const isConnectorPick = pendingQuestion?.input.questionId.startsWith("connector-app:") ?? false;
-  const promptVariant = pendingQuestion
-    ? promptVariantForQuestion(pendingQuestion.input.questionId)
-    : "neutral";
 
   const submitComposerText = useCallback((text: string, meta?: { loopName?: string }) => {
     const answerText = text.trim();
@@ -153,7 +161,7 @@ export function ConductorBuilderLayout({
             chatStatus={chatStatus}
             emptyState={emptyState}
             messages={messages}
-            pendingQuestionCallId={pendingQuestionCallId}
+            pendingInteractivePromptCallIds={pendingInteractivePromptCallIds}
             pendingReplyOptionsCallId={pendingReplyOptionsCallId}
             spec={spec}
             showThinking={showTranscriptThinking}
@@ -195,44 +203,44 @@ export function ConductorBuilderLayout({
                     exit={{ opacity: 0, y: 20 }}
                     initial={{ opacity: 0, y: 20 }}
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-                  >
-                    <BuilderOutcomeBriefPrompt
-                      confirmPrompt={pendingOutcomeBrief.confirmPrompt}
-                      onSubmit={onOutcomeBriefAnswer}
-                    />
-                  </motion.div>
-                ) : pendingQuestion ? (
+                    >
+                      <BuilderOutcomeBriefPrompt
+                        confirmPrompt={pendingOutcomeBrief.confirmPrompt}
+                        onSubmit={onOutcomeBriefAnswer}
+                      />
+                    </motion.div>
+                ) : activePendingQuestion ? (
                   <motion.div
-                    key={isConnectorPick ? "connector-pick" : `prompt-${pendingQuestion.toolCallId}`}
+                    key={`pending-question-${activePendingQuestion.toolCallId}`}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 20 }}
                     initial={{ opacity: 0, y: 20 }}
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    {isConnectorPick ? (
+                    {activePendingQuestion.input.questionId.startsWith("connector-app:") ? (
                       <BuilderConnectorPrompt
-                        allowMultiple={pendingQuestion.input.allowMultiple}
-                        allowOther={pendingQuestion.input.allowOther ?? true}
-                        onDismiss={onAskQuestionDismiss}
-                        onSubmit={onAskQuestionAnswer}
-                        options={pendingQuestion.input.options}
-                        question={pendingQuestion.input.question}
-                        recommendedOptionIds={pendingQuestion.input.recommendedOptionIds}
+                        allowMultiple={activePendingQuestion.input.allowMultiple}
+                        allowOther={activePendingQuestion.input.allowOther ?? true}
+                        onDismiss={() => onAskQuestionDismiss(activePendingQuestion)}
+                        onSubmit={(answer) => onAskQuestionAnswer(activePendingQuestion, answer)}
+                        options={activePendingQuestion.input.options}
+                        question={activePendingQuestion.input.question}
+                        recommendedOptionIds={activePendingQuestion.input.recommendedOptionIds}
                         selectionHint="Search or scroll to find an app"
-                        step={pendingQuestion.input.step}
+                        step={activePendingQuestionStep}
                       />
                     ) : (
                       <InteractivePromptMenu
-                        allowMultiple={pendingQuestion.input.allowMultiple}
-                        allowOther={pendingQuestion.input.allowOther ?? true}
-                        onDismiss={onAskQuestionDismiss}
-                        onSubmit={onAskQuestionAnswer}
-                        options={pendingQuestion.input.options}
+                        allowMultiple={activePendingQuestion.input.allowMultiple}
+                        allowOther={activePendingQuestion.input.allowOther ?? true}
+                        onDismiss={() => onAskQuestionDismiss(activePendingQuestion)}
+                        onSubmit={(answer) => onAskQuestionAnswer(activePendingQuestion, answer)}
+                        options={activePendingQuestion.input.options}
                         placement="composer"
-                        question={pendingQuestion.input.question}
-                        recommendedOptionIds={pendingQuestion.input.recommendedOptionIds}
-                        step={pendingQuestion.input.step}
-                        variant={promptVariant}
+                        question={activePendingQuestion.input.question}
+                        recommendedOptionIds={activePendingQuestion.input.recommendedOptionIds}
+                        step={activePendingQuestionStep}
+                        variant={promptVariantForQuestion(activePendingQuestion.input.questionId)}
                       />
                     )}
                   </motion.div>

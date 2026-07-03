@@ -41,6 +41,12 @@ test("releaseWorkspaceTriggerChannel decrements ref_count before deleting instan
   }
 });
 
+test("trigger channel identity includes canonical trigger configuration", async () => {
+  const { triggerConfigHash } = await import("../../../../src/integrations/composio/trigger-channels.js");
+  assert.equal(triggerConfigHash({ labelIds: ["INBOX"], unread: true }), triggerConfigHash({ unread: true, labelIds: ["INBOX"] }));
+  assert.notEqual(triggerConfigHash({ labelIds: ["INBOX"] }), triggerConfigHash({ labelIds: ["SUPPORT"] }));
+});
+
 test("ensureWorkspaceTriggerChannel recreates instance when channel row is stale", () => {
   const cases = [
     { composio_instance_id: null, status: "inactive", recreate: true },

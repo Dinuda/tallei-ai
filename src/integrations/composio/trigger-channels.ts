@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 
 import { pool } from "../../infrastructure/db/index.js";
 import { getComposioClient, isComposioConfigured, toObjectRecord } from "./client.js";
@@ -9,6 +9,8 @@ export type WorkspaceTriggerChannelRow = {
   toolkit: string;
   connected_account_id: string;
   composio_trigger_slug: string;
+  trigger_config: Record<string, unknown>;
+  config_hash: string;
   composio_instance_id: string | null;
   verified_at: string | null;
   verification_error: string | null;
@@ -39,6 +41,19 @@ type RemoteTriggerInstance = {
   triggerName: string;
   disabledAt: string | null;
 };
+
+function canonicalConfig(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalConfig).join(",")}]`;
+  if (value && typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    return `{${Object.keys(row).sort().map((key) => `${JSON.stringify(key)}:${canonicalConfig(row[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+export function triggerConfigHash(config: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalConfig(config)).digest("hex");
+}
 
 function readRemoteTriggerInstance(value: unknown): RemoteTriggerInstance | null {
   const row = toObjectRecord(value);
@@ -123,6 +138,7 @@ export type LoopTriggerSubscriptionRow = {
 async function upsertComposioTriggerInstance(input: {
   triggerSlug: string;
   connectedAccountId: string;
+  config: Record<string, unknown>;
 }): Promise<string> {
   const composio = getComposioClient() as unknown as {
     client?: {
@@ -135,11 +151,11 @@ async function upsertComposioTriggerInstance(input: {
     await composio.client?.triggerInstances?.upsert?.(input.triggerSlug, {
       connected_account_id: input.connectedAccountId,
       toolkit_versions: "latest",
-      trigger_config: {},
+      trigger_config: input.config,
     }),
   );
   const triggerId = String(
-    response.trigger_id ?? toObjectRecord(response.deprecated).uuid ?? "",
+    response.trigger_id ?? "",
   ).trim();
   if (!triggerId) throw new Error("Composio did not return a trigger ID");
   await verifyComposioTriggerInstance({
@@ -169,16 +185,18 @@ export async function getWorkspaceTriggerChannel(
   workspaceId: string,
   connectedAccountId: string,
   composioTriggerSlug: string,
+  config: Record<string, unknown> = {},
 ): Promise<WorkspaceTriggerChannelRow | null> {
   const result = await pool.query<WorkspaceTriggerChannelRow>(
-    `SELECT id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
+    `SELECT id, workspace_id, toolkit, connected_account_id, composio_trigger_slug, trigger_config, config_hash,
             composio_instance_id, verified_at, verification_error, ref_count, status
      FROM workspace_trigger_channels
      WHERE workspace_id = $1
        AND connected_account_id = $2
        AND composio_trigger_slug = $3
+       AND config_hash = $4
      LIMIT 1`,
-    [workspaceId, connectedAccountId, composioTriggerSlug.toUpperCase()],
+    [workspaceId, connectedAccountId, composioTriggerSlug.toUpperCase(), triggerConfigHash(config)],
   );
   return result.rows[0] ?? null;
 }
@@ -188,24 +206,28 @@ export async function ensureWorkspaceTriggerChannel(input: {
   toolkit: string;
   connectedAccountId: string;
   composioTriggerSlug: string;
+  config?: Record<string, unknown>;
 }): Promise<WorkspaceTriggerChannelRow> {
   if (!isComposioConfigured()) {
     throw new Error("Composio is not configured");
   }
 
   const slug = input.composioTriggerSlug.toUpperCase();
+  const config = input.config ?? {};
+  const configHash = triggerConfigHash(config);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const existing = await client.query<WorkspaceTriggerChannelRow>(
-      `SELECT id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
+      `SELECT id, workspace_id, toolkit, connected_account_id, composio_trigger_slug, trigger_config, config_hash,
               composio_instance_id, verified_at, verification_error, ref_count, status
        FROM workspace_trigger_channels
        WHERE workspace_id = $1
          AND connected_account_id = $2
          AND composio_trigger_slug = $3
+         AND config_hash = $4
        FOR UPDATE`,
-      [input.workspaceId, input.connectedAccountId, slug],
+      [input.workspaceId, input.connectedAccountId, slug, configHash],
     );
     const row = existing.rows[0];
     if (row) {
@@ -231,6 +253,7 @@ export async function ensureWorkspaceTriggerChannel(input: {
         composioInstanceId = await upsertComposioTriggerInstance({
           triggerSlug: slug,
           connectedAccountId: input.connectedAccountId,
+          config,
         });
       }
       const updated = await client.query<WorkspaceTriggerChannelRow>(
@@ -242,7 +265,7 @@ export async function ensureWorkspaceTriggerChannel(input: {
              verification_error = NULL,
              updated_at = NOW()
          WHERE id = $1
-         RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
+         RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug, trigger_config, config_hash,
                    composio_instance_id, verified_at, verification_error, ref_count, status`,
         [row.id, composioInstanceId],
       );
@@ -253,16 +276,17 @@ export async function ensureWorkspaceTriggerChannel(input: {
     const composioInstanceId = await upsertComposioTriggerInstance({
       triggerSlug: slug,
       connectedAccountId: input.connectedAccountId,
+      config,
     });
     const id = randomUUID();
     const inserted = await client.query<WorkspaceTriggerChannelRow>(
       `INSERT INTO workspace_trigger_channels (
          id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-         composio_instance_id, verified_at, verification_error, ref_count, status
-       ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NULL, 1, 'active')
-       RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
+         trigger_config, config_hash, composio_instance_id, verified_at, verification_error, ref_count, status
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NOW(), NULL, 1, 'active')
+       RETURNING id, workspace_id, toolkit, connected_account_id, composio_trigger_slug, trigger_config, config_hash,
                  composio_instance_id, verified_at, verification_error, ref_count, status`,
-      [id, input.workspaceId, input.toolkit, input.connectedAccountId, slug, composioInstanceId],
+      [id, input.workspaceId, input.toolkit, input.connectedAccountId, slug, JSON.stringify(config), configHash, composioInstanceId],
     );
     await client.query("COMMIT");
     return inserted.rows[0]!;
@@ -273,15 +297,15 @@ export async function ensureWorkspaceTriggerChannel(input: {
     await pool.query(
       `INSERT INTO workspace_trigger_channels (
          id, workspace_id, toolkit, connected_account_id, composio_trigger_slug,
-         composio_instance_id, verified_at, verification_error, ref_count, status
-       ) VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, 0, 'error')
-       ON CONFLICT (workspace_id, connected_account_id, composio_trigger_slug) DO UPDATE SET
+         trigger_config, config_hash, composio_instance_id, verified_at, verification_error, ref_count, status
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NULL, NULL, $8, 0, 'error')
+       ON CONFLICT (workspace_id, connected_account_id, composio_trigger_slug, config_hash) DO UPDATE SET
          composio_instance_id = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN NULL ELSE workspace_trigger_channels.composio_instance_id END,
          verified_at = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN NULL ELSE workspace_trigger_channels.verified_at END,
          verification_error = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN EXCLUDED.verification_error ELSE workspace_trigger_channels.verification_error END,
          status = CASE WHEN workspace_trigger_channels.ref_count = 0 THEN 'error' ELSE workspace_trigger_channels.status END,
          updated_at = NOW()`,
-      [randomUUID(), input.workspaceId, input.toolkit, input.connectedAccountId, slug, `${category}:${message}`],
+      [randomUUID(), input.workspaceId, input.toolkit, input.connectedAccountId, slug, JSON.stringify(config), configHash, `${category}:${message}`],
     );
     throw error;
   } finally {

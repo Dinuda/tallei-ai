@@ -1,9 +1,10 @@
 "use client";
 
-import { ExternalLink, LoaderCircle, ShieldCheck } from "lucide-react";
+import { ExternalLink, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
+import { connectorLogoUrl } from "@/components/conductor/conductor-shared";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "@/lib/utils";
@@ -93,6 +94,8 @@ export function BuilderConnectToolkitCard({
   if (connected) {
     return (
       <BuilderCompletedCard
+        iconAlt={toolkit}
+        iconSrc={connectorLogoUrl(toolkit)}
         subtitle={`${displayName} is connected and ready to use.`}
         title="App connected"
         variant="emerald"
@@ -117,8 +120,13 @@ export function BuilderConnectToolkitCard({
     <div className="w-full border border-[var(--builder-indigo-border)] bg-[var(--builder-indigo-bg)]" data-transcript-block>
       <div className="border-b border-[var(--builder-indigo-border-light)] bg-white px-4 py-3">
         <div className="flex items-start gap-3">
-          <span className="flex size-8 shrink-0 items-center justify-center bg-[var(--builder-indigo-bg-solid)] text-[var(--builder-indigo-accent)]">
-            <ShieldCheck className="size-4" />
+          <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-[var(--builder-indigo-border-light)] bg-white">
+            <img
+              alt={toolkit}
+              className="size-5 object-contain"
+              draggable={false}
+              src={connectorLogoUrl(toolkit)}
+            />
           </span>
           <div>
             <div

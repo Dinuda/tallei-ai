@@ -367,7 +367,7 @@ export function InteractivePromptMenu({
     );
     const custom = otherText.trim();
     const answerText = [
-      ...selectedOptions.map((option) => option.value),
+      ...selectedOptions.map((option) => option.label),
       ...(custom ? [custom] : []),
     ].join("; ");
     if (!answerText) return;

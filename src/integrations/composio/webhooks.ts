@@ -9,7 +9,6 @@ export type ComposioWebhookSignatureHeaders = {
   webhookId?: string;
   webhookTimestamp?: string;
   webhookSignature?: string;
-  legacySignature?: string;
 };
 
 export type ComposioAuthWebhookEvent = {
@@ -75,23 +74,6 @@ function verifyComposioSubscriptionWebhookSignatureWithSecret(
   return candidates.some((received) => compareDigestStrings(expected, received)) ? "ok" : "invalid_signature";
 }
 
-function verifyLegacyComposioWebhookSignatureWithSecret(
-  rawBody: Buffer,
-  legacySignature: string,
-  secret: string,
-): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-  const provided = legacySignature.replace(/^sha256=/i, "").trim();
-  if (!provided) return false;
-  return compareDigestStrings(expected, provided);
-}
-
-function verifyLegacyComposioWebhookSignature(rawBody: Buffer, legacySignature: string): boolean {
-  return composioWebhookSecretsToTry().some((secret) =>
-    verifyLegacyComposioWebhookSignatureWithSecret(rawBody, legacySignature, secret),
-  );
-}
-
 export type WebhookSignatureVerification = {
   ok: boolean;
   reason?: "missing_secret" | "missing_body" | "missing_headers" | "invalid_timestamp" | "invalid_signature";
@@ -119,13 +101,6 @@ export function verifyComposioWebhookSignatureDetailed(
     return { ok: false, reason: sawInvalidSignature ? "invalid_signature" : "invalid_timestamp" };
   }
 
-  const legacySignature = headers.legacySignature?.trim();
-  if (legacySignature) {
-    return verifyLegacyComposioWebhookSignature(rawBody, legacySignature)
-      ? { ok: true }
-      : { ok: false, reason: "invalid_signature" };
-  }
-
   return { ok: false, reason: "missing_headers" };
 }
 
@@ -139,76 +114,31 @@ export function verifyComposioWebhookSignature(
 export function normalizeComposioWebhookPayload(payload: unknown): NormalizedComposioWebhook {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return { kind: "ignored" };
   const event = payload as Record<string, unknown>;
-  const eventType = typeof event.type === "string"
-    ? event.type
-    : typeof event.event === "string"
-      ? event.event
-      : "";
+  const eventType = typeof event.type === "string" ? event.type : "";
 
   if (eventType.includes("connected_account") || eventType.includes("connection")) {
     return { kind: "auth_event", eventType };
   }
 
-  // Composio V3: metadata at envelope root; event body in `data`.
+  if (eventType !== "composio.trigger.message") return { kind: "ignored" };
+
   const envelopeMetadata = toObjectRecord(event.metadata);
-  const data = event.data && typeof event.data === "object" && !Array.isArray(event.data)
-    ? event.data as Record<string, unknown>
-    : event;
-  const nestedMetadata = data.metadata && typeof data.metadata === "object"
-    ? data.metadata as Record<string, unknown>
-    : {};
-  const metadata = { ...envelopeMetadata, ...nestedMetadata };
-
-  const triggerSlug = String(
-    metadata.trigger_slug
-    ?? metadata.triggerSlug
-    ?? metadata.trigger_name
-    ?? data.triggerName
-    ?? data.trigger_slug
-    ?? data.trigger_name
-    ?? event.trigger_name
-    ?? "",
-  ).trim().toUpperCase();
-
-  const entityId = String(
-    metadata.user_id
-    ?? metadata.userId
-    ?? metadata.entity_id
-    ?? metadata.entityId
-    ?? data.entityId
-    ?? data.entity_id
-    ?? data.user_id
-    ?? data.userId
-    ?? event.entityId
-    ?? event.entity_id
-    ?? "",
-  ).trim();
+  const triggerSlug = String(envelopeMetadata.trigger_slug ?? "").trim().toUpperCase();
+  const entityId = String(envelopeMetadata.user_id ?? "").trim();
 
   if (!triggerSlug || !entityId) {
-    if (eventType.includes("connected") || eventType.includes("revoked")) {
-      return { kind: "auth_event", eventType };
-    }
     return { kind: "ignored" };
   }
 
-  const externalEventId = String(
-    event.id
-    ?? data.id
-    ?? metadata.log_id
-    ?? metadata.trigger_id
-    ?? `${triggerSlug}:${Date.now()}`,
-  ).trim();
-
-  const eventPayload = eventType === "composio.trigger.message" && event.data
-    ? { ...metadata, payload: event.data }
-    : data;
+  const externalEventId = String(event.id ?? "").trim();
+  if (!externalEventId) return { kind: "ignored" };
 
   return {
     kind: "trigger_event",
     entityId,
     triggerSlug,
     externalEventId,
-    payload: eventPayload,
+    payload: { ...envelopeMetadata, payload: event.data },
   };
 }
 

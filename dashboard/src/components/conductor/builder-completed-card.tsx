@@ -46,12 +46,16 @@ export function BuilderCompletedCard({
   subtitle,
   variant = "emerald",
   icon: Icon = Check,
+  iconSrc,
+  iconAlt,
   className,
 }: {
   title: string;
   subtitle?: string;
   variant?: BuilderCompletedVariant;
   icon?: LucideIcon;
+  iconSrc?: string;
+  iconAlt?: string;
   className?: string;
 }) {
   const styles = variantStyles[variant];
@@ -59,9 +63,20 @@ export function BuilderCompletedCard({
   return (
     <div className={cn("border px-4 py-3", styles.border, styles.bg, className)} data-transcript-block>
       <div className="flex items-center gap-3">
-        <span className={cn("flex size-8 shrink-0 items-center justify-center text-white", styles.icon)}>
-          <Icon className="size-4" />
-        </span>
+        {iconSrc ? (
+          <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-[var(--ed-border-light)] bg-white">
+            <img
+              alt={iconAlt ?? ""}
+              className="size-5 object-contain"
+              draggable={false}
+              src={iconSrc}
+            />
+          </span>
+        ) : (
+          <span className={cn("flex size-8 shrink-0 items-center justify-center text-white", styles.icon)}>
+            <Icon className="size-4" />
+          </span>
+        )}
         <div className="min-w-0">
           <div
             className={cn("text-sm font-semibold", styles.title)}

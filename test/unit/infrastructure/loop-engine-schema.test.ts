@@ -1,32 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { migrateLegacyLoopSpecsTable } from "../../../src/infrastructure/db/loop-engine-schema.js";
-
-test("migrateLegacyLoopSpecsTable renames conductor loop_specs when loop_id is absent", async () => {
-  const queries: string[] = [];
-  const client = {
-    async query(sql: string, params?: unknown[]) {
-      queries.push(sql);
-      if (sql.includes("information_schema.tables")) {
-        const name = params?.[0];
-        if (name === "loop_specs") return { rows: [{ exists: true }] };
-        if (name === "loop_specs_legacy") return { rows: [{ exists: false }] };
-      }
-      if (sql.includes("information_schema.columns")) {
-        const [table, col] = params ?? [];
-        if (table === "loop_specs" && col === "loop_id") return { rows: [{ exists: false }] };
-        if (table === "loop_specs" && col === "revision") return { rows: [{ exists: false }] };
-        if (table === "loop_specs" && col === "tenant_id") return { rows: [{ exists: true }] };
-      }
-      return { rows: [] };
-    },
-  };
-
-  await migrateLegacyLoopSpecsTable(client as never);
-
-  assert.ok(
-    queries.some((sql) => sql.includes("ALTER TABLE loop_specs RENAME TO loop_specs_legacy")),
-    `expected legacy loop_specs rename; got: ${queries.join("\n")}`,
-  );
+test("loop engine schema uses only the append-only event log for build state and chat", async () => {
+  const [schema, store] = await Promise.all([
+    import("node:fs/promises").then((fs) => fs.readFile(
+      new URL("../../../src/infrastructure/db/loop-engine-schema.ts", import.meta.url), "utf8",
+    )),
+    import("node:fs/promises").then((fs) => fs.readFile(
+      new URL("../../../src/loops/store.ts", import.meta.url), "utf8",
+    )),
+  ]);
+  assert.match(schema, /CREATE TABLE IF NOT EXISTS loop_build_events/);
+  assert.match(schema, /uq_loop_build_events_sequence/);
+  assert.doesNotMatch(schema, /CREATE TABLE IF NOT EXISTS loop_specs/);
+  assert.doesNotMatch(schema, /CREATE TABLE IF NOT EXISTS loop_chat_threads/);
+  assert.doesNotMatch(store, /messages_json|FROM loop_specs|INTO loop_specs|loop_chat_threads/);
 });

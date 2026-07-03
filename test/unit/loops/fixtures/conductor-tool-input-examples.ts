@@ -7,6 +7,14 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
       { role: "transform", description: "Complete the requested recurring outcome." },
       { role: "destination", description: "Deliver the configured result." },
     ],
+    questions: [{
+      id: "confirm-outcome",
+      question: "Does this outcome match what you want to achieve?",
+      options: [
+        { id: "yes", label: "Yes", value: "confirmed" },
+        { id: "change", label: "Change it", value: "needs_changes" },
+      ],
+    }],
     approval: { mode: "mixed", sensitiveRoles: ["destination"], sensitiveCapabilities: [] },
     decisions: [{ questionId: "approval", question: "When should approval be required?", answer: "Before sensitive actions" }],
   },
@@ -17,30 +25,6 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
       { id: "first", label: "First option", value: "first" },
       { id: "second", label: "Second option", value: "second" },
     ],
-  },
-  patchLoopSpec: {
-    initialBlueprint: {
-      taskBlueprint: {
-        version: 1,
-        summary: "Complete a configured outcome.",
-        outcomes: [{ id: "result", role: "destination", description: "Deliver the configured result.", status: "pending" }],
-      },
-      agent: { instructions: "Complete the configured outcome." },
-      approval: { mode: "mixed", sensitiveRoles: ["destination"], sensitiveCapabilities: [] },
-    },
-    connectorChoice: {
-      taskBlueprint: {
-        version: 1,
-        summary: "Complete a configured outcome.",
-        outcomes: [{ id: "result", role: "destination", description: "Deliver the configured result.", selectedConnector: "example", status: "chosen" }],
-      },
-    },
-    triggerAndBindings: {
-      trigger: { kind: "manual" },
-      bindings: [{ capability: "records.read", connector: "example", role: "source" }],
-      output: { kind: "none" },
-    },
-    confirmation: { intentDiscovery: { status: "confirmed", confirmedBriefHash: "a".repeat(64) } },
   },
   discoverConnectorsForBlueprint: {
     outcomes: [{ id: "result", role: "destination", description: "Deliver the configured result." }],
@@ -66,6 +50,7 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
     toolkit: "example",
     outcomes: [{ id: "result", description: "Deliver the configured result.", role: "destination" }],
   },
+  setBindingConfig: { outcomeId: "trigger", connector: "example", config: { scope: "selected" } },
   connectToolkit: { toolkit: "example", callbackUrl: "https://example.test/callback" },
   listWorkspaceConnectors: {},
   confirmOutcomeBrief: {
@@ -75,8 +60,9 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
       { id: "confirm", label: "Looks good", value: "confirm" },
       { id: "other", label: "Change it", value: "other" },
     ],
+    allowOther: false,
   },
   compileLoop: {},
   testRunLoop: { scenario: { label: "Configured test scenario" } },
-  activateLoop: {},
+  activateLoop: { confirmedByUser: true },
 } as const;

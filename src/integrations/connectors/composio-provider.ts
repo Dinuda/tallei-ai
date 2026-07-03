@@ -31,6 +31,7 @@ export const composioConnectorProvider: ConnectorProvider = {
       source: input.toolkit,
       ...(input.triggerSlug ? { composioSlug: input.triggerSlug } : {}),
       ...(input.eventType ? { eventType: input.eventType } : {}),
+      config: input.config ?? {},
     });
   },
   unregisterTrigger: unregisterLoopEventTrigger,

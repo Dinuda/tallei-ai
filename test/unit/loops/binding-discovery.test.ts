@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  MIN_CAPABILITY_SCORE,
   pickRecommendedBinding,
   scoreOutcomeRelevance,
   selectExplicitBindingAction,
+  extractConfigurableFields,
+  validateConfigAgainstSchema,
   type BindingCandidate,
 } from "../../../src/loops/binding-discovery.js";
 
@@ -29,6 +30,19 @@ test("selectExplicitBindingAction uses the exact scoped action schema", () => {
     assert.equal(result.action.actionSlug, "GENERIC_EXACT_ACTION");
     assert.deepEqual(result.action.inputSchema, { required: ["record_id"] });
   }
+});
+
+test("extractConfigurableFields keeps an optional Gmail label scope and ignores technical fields", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      labelIds: { type: "array", title: "Gmail labels", description: "Only watch messages with these labels", items: { type: "string" } },
+      webhookUrl: { type: "string", description: "Internal callback URL" },
+    },
+  };
+  assert.deepEqual(extractConfigurableFields(schema).map((field) => field.key), ["labelIds"]);
+  assert.deepEqual(validateConfigAgainstSchema(schema, { labelIds: ["INBOX"] }), { ok: true });
+  assert.equal(validateConfigAgainstSchema(schema, { unknown: true }).ok, false);
 });
 
 test("selectExplicitBindingAction distinguishes toolkit mismatch from missing action", () => {

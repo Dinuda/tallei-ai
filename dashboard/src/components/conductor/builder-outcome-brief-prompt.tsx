@@ -23,7 +23,7 @@ export function BuilderOutcomeBriefPrompt({
   return (
     <div className="w-full border border-emerald-200 bg-emerald-50/50">
       <InteractivePromptMenu
-        allowOther={confirmPrompt.allowOther ?? true}
+        allowOther={false}
         disabled={disabled}
         onSubmit={onSubmit}
         options={confirmPrompt.options}

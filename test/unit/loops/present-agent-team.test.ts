@@ -61,10 +61,80 @@ test("normalizeAgentTeam groups adjacent retrieval and classification into one p
   assert.equal(team.triggers?.length, 1);
   assert.equal(team.specialists.length, 3);
   assert.deepEqual(team.specialists[0]?.steps.map((step) => step.outcomeId), ["read", "classify"]);
-  assert.equal(team.specialists[0]?.roleTitle, "Intake Specialist");
+  assert.equal(team.specialists[0]?.roleTitle, "Support Operations Analyst");
   assert.deepEqual(team.specialists[1]?.steps.map((step) => step.outcomeId), ["draft"]);
+  assert.equal(team.specialists[1]?.roleTitle, "Response Specialist");
   assert.deepEqual(team.specialists[2]?.steps.map((step) => step.outcomeId), ["send"]);
+  assert.equal(team.specialists[2]?.roleTitle, "Communications Coordinator");
   assert.equal(team.reviewerInsertIndex, 2);
+});
+
+test("normalizeAgentTeam assigns professional job roles instead of model task labels", () => {
+  const spec = buildSpec([
+    { id: "draft", role: "transform", description: "Draft a personalized reply" },
+    {
+      id: "send",
+      role: "destination",
+      description: "Send the drafted reply email to the customer",
+      selectedConnector: "gmail",
+    },
+  ]);
+
+  const team = normalizeAgentTeam({
+    groups: [
+      { outcomeIds: ["draft"], roleTitle: "Reply Specialist", ownershipSummary: "Drafts personalized replies" },
+      {
+        outcomeIds: ["send"],
+        roleTitle: "Reply Sender",
+        ownershipSummary: "Sends the drafted reply email to the customer (after your review)",
+      },
+    ],
+  }, spec);
+
+  assert.equal(team.specialists[0]?.roleTitle, "Response Specialist");
+  assert.equal(team.specialists[1]?.roleTitle, "Customer Outreach Coordinator");
+  assert.notEqual(team.specialists[1]?.roleTitle, "Reply Sender");
+});
+
+test("normalizeAgentTeam maps support inbox personas to customer-facing job roles", () => {
+  const spec = buildSpec([
+    { id: "trigger", role: "trigger", description: "Detect a new incoming support ticket", selectedConnector: "gmail" },
+    { id: "read", role: "source", description: "Read the ticket details (subject, message, customer info)", selectedConnector: "gmail" },
+    { id: "classify", role: "transform", description: "Classify the ticket priority (urgent, high, normal, low)" },
+    { id: "draft", role: "transform", description: "Draft a personalized reply based on priority and ticket content" },
+    { id: "send", role: "destination", description: "Send the drafted reply email to the customer", selectedConnector: "gmail" },
+  ]);
+
+  const team = normalizeAgentTeam({
+    groups: [
+      { outcomeIds: ["trigger"] },
+      {
+        outcomeIds: ["read", "classify", "draft"],
+        roleTitle: "Ticket Analyst & Drafter",
+        ownershipSummary: "Reads the ticket, classifies its priority (urgent/high/normal/low), and drafts a personalized reply",
+      },
+      {
+        outcomeIds: ["send"],
+        roleTitle: "Reply Sender",
+        ownershipSummary: "Sends the drafted reply email to the customer (after your review)",
+      },
+    ],
+  }, spec);
+
+  assert.equal(team.specialists[0]?.roleTitle, "Customer Support Analyst");
+  assert.equal(team.specialists[1]?.roleTitle, "Customer Outreach Coordinator");
+});
+
+test("normalizeAgentTeam derives job roles when the model omits suggestions", () => {
+  const spec = buildSpec([
+    { id: "send", role: "destination", description: "Send the reply as email", selectedConnector: "gmail" },
+  ]);
+
+  const team = normalizeAgentTeam({
+    groups: [{ outcomeIds: ["send"] }],
+  }, spec);
+
+  assert.equal(team.specialists[0]?.roleTitle, "Communications Coordinator");
 });
 
 test("normalizeAgentTeam falls back to one persona per outcome on invalid grouping", () => {

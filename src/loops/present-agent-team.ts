@@ -108,21 +108,76 @@ function humanizeConnector(slug: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function deriveRoleTitle(roles: string[]): string {
+function deriveJobRoleTitle(
+  steps: Array<{ role: string; description: string }>,
+): string {
+  const roles = steps.map((step) => step.role);
   const roleSet = new Set(roles);
-  if (roleSet.size === 1) {
-    const role = roles[0];
-    if (role === "trigger") return "Trigger Specialist";
-    if (role === "source") return "Research Specialist";
-    if (role === "transform") return "Processing Specialist";
-    if (role === "destination") return "Delivery Specialist";
+  const text = steps.map((step) => step.description.toLowerCase()).join(" ");
+
+  const ticket = /\b(ticket|support|inbox|helpdesk|customer)\b/.test(text);
+  const reply = /\b(reply|respond|response)\w*\b/.test(text);
+  const email = /\b(email|mail|gmail)\b/.test(text);
+  const classify = /\b(classif\w*|priorit\w*|triage|sort\w*|rout\w*)\b/.test(text);
+  const draft = /\b(draft\w*|writ\w*|compos\w*|author\w*)\b/.test(text);
+  const send = /\b(send\w*|deliver\w*|dispatch\w*|transmit\w*)\b/.test(text);
+  const read = /\b(read\w*|retriev\w*|fetch\w*|pull\w*|ingest\w*|monitor\w*)\b/.test(text);
+  const summarize = /\b(summar\w*|digest\w*|synops\w*)\b/.test(text);
+
+  if (roleSet.has("source") && roleSet.has("transform") && draft && ticket) {
+    return "Customer Support Analyst";
   }
-  if (roleSet.has("trigger") && roleSet.has("source")) return "Intake Specialist";
-  if (roleSet.has("source") && roleSet.has("transform")) return "Analysis Specialist";
-  if (roleSet.has("transform") && roleSet.has("destination")) return "Fulfillment Specialist";
-  if (roleSet.has("trigger") && roleSet.has("transform")) return "Workflow Specialist";
-  if (roleSet.has("source") && roleSet.has("destination")) return "Operations Specialist";
-  return "Workflow Specialist";
+  if (roleSet.has("source") && roleSet.has("transform") && classify && ticket) {
+    return "Support Operations Analyst";
+  }
+  if (roleSet.has("transform") && draft && (reply || email)) {
+    return "Response Specialist";
+  }
+  if (roleSet.has("destination") && send && (reply || email) && ticket) {
+    return "Customer Outreach Coordinator";
+  }
+  if (roleSet.has("destination") && send && email) {
+    return "Communications Coordinator";
+  }
+  if (roleSet.has("destination") && send) {
+    return "Fulfillment Coordinator";
+  }
+  if (roleSet.has("transform") && classify) {
+    return "Operations Analyst";
+  }
+  if (roleSet.has("transform") && summarize) {
+    return "Research Analyst";
+  }
+  if (roleSet.has("transform") && draft) {
+    return "Content Specialist";
+  }
+  if (roleSet.has("source") && read && ticket) {
+    return "Intake Analyst";
+  }
+  if (roleSet.has("source") && read) {
+    return "Research Analyst";
+  }
+
+  if (roleSet.has("source") && roleSet.has("transform") && roleSet.has("destination")) {
+    return "Operations Lead";
+  }
+  if (roleSet.has("source") && roleSet.has("transform")) {
+    return "Business Analyst";
+  }
+  if (roleSet.has("transform") && roleSet.has("destination")) {
+    return "Fulfillment Analyst";
+  }
+  if (roleSet.has("source") && roleSet.has("destination")) {
+    return "Operations Coordinator";
+  }
+
+  const onlyRole = roles.length === 1 ? roles[0] : undefined;
+  if (onlyRole === "source") return "Research Analyst";
+  if (onlyRole === "transform") return "Operations Analyst";
+  if (onlyRole === "destination") return "Delivery Coordinator";
+  if (onlyRole === "trigger") return "Automation Lead";
+
+  return "Workflow Analyst";
 }
 
 function deriveOwnershipSummary(
@@ -264,8 +319,7 @@ function buildSpecialist(
       ...(outcome.selectedConnector ? { connector: outcome.selectedConnector } : {}),
     };
   });
-  const roles = steps.map((step) => step.role);
-  const roleTitle = group?.roleTitle?.trim() || deriveRoleTitle(roles);
+  const roleTitle = deriveJobRoleTitle(steps);
   const avatarSeed = avatarSeedForGroup(outcomeIds);
   const name = firstNameOnly(nameBySeed.get(avatarSeed) ?? "Alex");
   return {

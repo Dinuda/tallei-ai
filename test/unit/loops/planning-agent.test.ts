@@ -22,6 +22,23 @@ test("buildConductorSystemPrompt includes workspace and compile blockers", () =>
   assert.match(prompt, /gmail\*/);
 });
 
+test("intent prompt does not expose connector inventory", () => {
+  const spec = createEmptyLoopSpec(workspaceId);
+  const prompt = buildConductorSystemPrompt({
+    workspaceName: "Personal",
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    buildPhase: "intent",
+    connectedToolkits: [
+      { slug: "gmail", name: "Gmail", connected: true },
+      { slug: "outlook", name: "Outlook", connected: false },
+      { slug: "zendesk", name: "Zendesk", connected: false },
+    ],
+  });
+  assert.doesNotMatch(prompt, /Connected \(\*=connected\)/);
+  assert.doesNotMatch(prompt, /\b(?:Gmail|Outlook|Zendesk)\b/);
+});
+
 test("buildConductorSystemPrompt reports ready when slots filled", () => {
   const spec = seedSpecFromTemplate(workspaceId, "research_digest");
   spec.taskBlueprint = {
@@ -79,6 +96,7 @@ test("buildConductorSystemPrompt requests specialist roster confirmation without
 
   assert.match(prompt, /presentAgentTeam/);
   assert.match(prompt, /Do not generate or pass review summary fields to confirmOutcomeBrief/i);
+  assert.match(prompt, /exactly two buttons/i);
   assert.doesNotMatch(prompt, /summary\.runsWhen|summary\.steps|summary\.approval|summary\.result/);
   assert.match(prompt, new RegExp(confirmationHash));
   assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
@@ -272,8 +290,8 @@ test("Conductor refreshes confirmation state per step without a nested summary m
     "utf8",
   ));
 
-  assert.match(source, /prepareStep:\s*\(\) => \(\{ system: buildCurrentSystemPrompt\(\) \}\)/);
-  assert.match(source, /confirmationHash:\s*computeOutcomeBriefHash\(currentSpec!\)/);
+  assert.match(source, /prepareStep:\s*\(\) => \(\{ system: buildCurrentSystemPrompt\(\), activeTools:/);
+  assert.match(source, /confirmationHash:\s*currentBuildState!\.artifacts\.bindings\?\.artifactHash\s*\?\?\s*computeOutcomeBriefHash\(currentSpec!\)/);
   assert.match(source, /presentAgentTeam:\s*tool/);
   assert.doesNotMatch(source, /summarizeOutcomeBriefForUser|reviewOutcomeBrief:\s*tool/);
 });

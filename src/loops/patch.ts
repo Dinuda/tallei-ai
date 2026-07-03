@@ -165,7 +165,7 @@ export function seedSpecFromTemplate(
           successCriteria: ["Consistent scoring", "Timely notification"],
         },
         profile: "agentic",
-        trigger: { kind: "event", source: "hubspot", composioSlug: "HUBSPOT_NEW_CONTACT", eventType: "lead.created" },
+        trigger: { kind: "event", source: "hubspot", composioSlug: "HUBSPOT_NEW_CONTACT", eventType: "lead.created", config: {} },
         output: { kind: "chat" },
       });
     case "support_auto_reply":
@@ -176,7 +176,7 @@ export function seedSpecFromTemplate(
           successCriteria: ["Accurate classification", "Safe replies"],
         },
         profile: "agentic",
-        trigger: { kind: "event", source: "zendesk", composioSlug: "ZENDESK_NEW_TICKET", eventType: "ticket.created" },
+        trigger: { kind: "event", source: "zendesk", composioSlug: "ZENDESK_NEW_TICKET", eventType: "ticket.created", config: {} },
         approval: { mode: "mixed", sensitiveRoles: ["destination"], sensitiveCapabilities: ["support.reply.send"] },
       });
     case "smart_alerts":

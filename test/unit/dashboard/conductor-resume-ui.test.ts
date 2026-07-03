@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { UIMessage } from "ai";
 
+import { createEmptyLoopSpec } from "../../../src/loops/spec.js";
+
 test("hasUnansweredUiToolCalls treats resumable input-streaming prompts as pending", async () => {
   const { hasUnansweredUiToolCalls } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
@@ -27,31 +29,101 @@ test("hasUnansweredUiToolCalls treats resumable input-streaming prompts as pendi
   assert.equal(hasUnansweredUiToolCalls(messages), true);
 });
 
-test("findPendingInteractivePrompt reopens interrupted askQuestion prompts", async () => {
-  const { findPendingInteractivePrompt } = await import(
+test("findPendingInteractivePrompts returns multiple prompts in transcript order", async () => {
+  const { findPendingInteractivePrompts } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
   );
-  const messages = [{
-    id: "assistant-1",
-    role: "assistant",
-    parts: [{
-      type: "tool-askQuestion",
-      toolCallId: "tool-1",
-      state: "input-streaming",
-      input: {
-        questionId: "trigger",
-        question: "How should this start?",
-        options: [
-          { id: "manual", label: "Manual", value: "manual" },
-          { id: "email", label: "Email", value: "email" },
-        ],
-      },
-    }],
-  }] satisfies UIMessage[];
+  const spec = createEmptyLoopSpec("00000000-0000-4000-8000-000000000001", {
+    taskBlueprint: {
+      version: 1,
+      summary: "Route incoming support requests",
+      outcomes: [
+        { id: "source", role: "source", description: "Read support emails", status: "pending" },
+      ],
+    },
+  });
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-askQuestion",
+        toolCallId: "tool-1",
+        state: "input-streaming",
+        input: {
+          questionId: "trigger",
+          question: "How should this start?",
+          options: [
+            { id: "manual", label: "Manual", value: "manual" },
+            { id: "email", label: "Email", value: "email" },
+          ],
+        },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-discoverConnectorsForBlueprint",
+          toolCallId: "discover-1",
+          state: "output-available",
+          input: { outcomes: [{ id: "source", role: "source", description: "Read support emails" }] },
+          output: {
+            groups: [{
+              outcomeId: "source",
+              role: "source",
+              outcomeDescription: "Read support emails",
+              defaultQuestion: "Which app should we use?",
+              recommendedOptionIds: ["gmail"],
+              askOptions: [
+                { id: "gmail", label: "Gmail", value: "gmail" },
+                { id: "outlook", label: "Outlook", value: "outlook" },
+              ],
+            }],
+          },
+        },
+        {
+          type: "tool-pickConnectorApp",
+          toolCallId: "tool-2",
+          state: "input-streaming",
+          input: { outcomeId: "source", role: "source" },
+        },
+      ],
+    },
+    {
+      id: "assistant-3",
+      role: "assistant",
+      parts: [{
+        type: "tool-askQuestion",
+        toolCallId: "tool-3",
+        state: "input-available",
+        input: {
+          questionId: "review",
+          question: "Should drafts be reviewed first?",
+          options: [
+            { id: "review", label: "Review first", value: "review_first" },
+            { id: "auto", label: "Send automatically", value: "auto" },
+          ],
+        },
+      }],
+    },
+  ] satisfies UIMessage[];
 
-  const pending = findPendingInteractivePrompt(messages, null);
-  assert.equal(pending?.toolCallId, "tool-1");
-  assert.equal(pending?.toolName, "askQuestion");
+  const pending = findPendingInteractivePrompts(messages, spec);
+  assert.deepEqual(
+    pending.map((item) => item.toolCallId),
+    ["tool-1", "tool-2", "tool-3"],
+  );
+  assert.equal(pending[1]?.input.questionId, "connector-app:source");
+  assert.deepEqual(
+    pending.map((item) => item.input.step),
+    [
+      { index: 1, total: 3 },
+      { index: 2, total: 3 },
+      { index: 3, total: 3 },
+    ],
+  );
 });
 
 test("findPendingPresentReplyOptions reopens interrupted reply chips", async () => {
@@ -123,65 +195,17 @@ test("findPendingOutcomeBrief shows confirmation without a review tool result", 
   assert.equal(pending?.confirmPrompt.options.length, 2);
 });
 
-test("findPendingOutcomeBrief still resumes legacy review plus confirmation transcripts", async () => {
-  const { findPendingOutcomeBrief } = await import(
-    "../../../dashboard/src/components/conductor/conductor-shared.ts"
-  );
-  const briefHash = "b".repeat(64);
-  const messages = [{
-    id: "assistant-legacy",
-    role: "assistant",
-    parts: [
-      {
-        type: "tool-reviewOutcomeBrief",
-        toolCallId: "review-1",
-        state: "output-available",
-        input: {},
-        output: { briefHash, brief: { outcome: "Legacy summary" } },
-      },
-      {
-        type: "tool-confirmOutcomeBrief",
-        toolCallId: "confirm-legacy",
-        state: "input-available",
-        input: {
-          briefHash,
-          question: "Does this look right?",
-          options: [
-            { id: "confirm", label: "Looks good", value: "confirm" },
-            { id: "change", label: "Change it", value: "other" },
-          ],
-        },
-      },
-    ],
-  }] satisfies UIMessage[];
-
-  assert.equal(findPendingOutcomeBrief(messages)?.toolCallId, "confirm-legacy");
-});
-
-test("confirmation UI keeps legacy workflow chart and skips card for new confirmOutcomeBrief flow", async () => {
+test("completed askQuestion answers stay visible while pending copies stay hidden", async () => {
   const fs = await import("node:fs/promises");
-  const [card, toolPart] = await Promise.all([
-    fs.readFile(new URL("../../../dashboard/src/components/conductor/outcome-brief-card.tsx", import.meta.url), "utf8"),
+  const [toolPart, shared] = await Promise.all([
     fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-tool-part.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(card, /<Canvas/);
-  assert.match(card, /viewModel\.title/);
-  assert.match(card, /tag-blue-text/);
-  assert.match(card, /<Controls/);
-  assert.match(card, /<MiniMap/);
-  assert.match(card, /onNodeClick/);
-  assert.match(card, /\/tallei\.svg/);
-  assert.match(card, /logos\.composio\.dev\/api/);
-  assert.match(card, /<Avatar/);
-  assert.match(card, /useSession/);
-  assert.doesNotMatch(card, /Edge\.Animated|animateMotion|type: "animated"/);
-  assert.doesNotMatch(card, /rounded-2xl|rounded-xl/);
-  assert.doesNotMatch(card, />Starts when</);
-  assert.doesNotMatch(card, />Safety gate</);
-  assert.match(toolPart, /input\?\.summary/);
-  assert.match(toolPart, /OutcomeBriefCard/);
-  assert.match(toolPart, /presentAgentTeam/);
-  assert.match(toolPart, /return null/);
-  assert.doesNotMatch(toolPart, /manifestRef/);
+  assert.match(toolPart, /AnsweredAskQuestionCard/);
+  assert.match(toolPart, /pendingInteractivePromptCallIds\.has/);
+  assert.match(toolPart, /AnsweredPresentReplyOptionsCard/);
+  assert.match(shared, /findPendingInteractivePrompts/);
+  assert.match(shared, /return prompts\.map/);
+  assert.match(shared, /step: \{ index: index \+ 1, total: prompts\.length \}/);
 });

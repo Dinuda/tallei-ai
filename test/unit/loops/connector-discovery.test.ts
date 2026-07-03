@@ -217,5 +217,33 @@ test("discoverConnectorsForBlueprint skips Composio loading for transform-only b
   });
 
   assert.equal(calls, 0);
-  assert.deepEqual(result, { groups: [], pickerKind: "app" });
+  assert.deepEqual(result, { groups: [], autoResolved: [], pickerKind: "app" });
+});
+
+test("discoverConnectorsForBlueprint reuses a clearly leading app selected for a preceding outcome", async () => {
+  const result = await discoverConnectorsForBlueprint(auth, {
+    outcomes: [
+      { id: "receive", role: "trigger", description: "Receive a Gmail message" },
+      { id: "read", role: "source", description: "Read the Gmail message" },
+    ],
+    previousSelections: [{ outcomeId: "receive", role: "trigger", connector: "gmail" }],
+  }, {
+    loadToolkits: async () => ({ toolkits, total: toolkits.length }),
+    searchTools: async () => [searchResult({
+      actionSlug: "GMAIL_FETCH_MESSAGE",
+      name: "Read Gmail message",
+      description: "Read a Gmail email message",
+    })],
+    logTiming: () => undefined,
+  });
+
+  assert.deepEqual(result.groups, []);
+  assert.deepEqual(result.autoResolved, [{
+    outcomeId: "read",
+    role: "source",
+    connector: "gmail",
+    sourceOutcomeId: "receive",
+    sourceRole: "trigger",
+    reason: "same app as trigger",
+  }]);
 });

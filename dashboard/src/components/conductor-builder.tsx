@@ -17,7 +17,7 @@ import {
   type ConductorChatApi,
 } from "@/components/conductor/conductor-chat-context";
 import {
-  findPendingInteractivePrompt,
+  findPendingInteractivePrompts,
   findPendingOutcomeBrief,
   findStaleConfirmOutcomeBriefCalls,
   hasUnansweredUiToolCalls,
@@ -25,6 +25,7 @@ import {
   prepareMessagesForUiToolOutput,
   resolveConfirmOutcomeBriefActionFromSelection,
   shouldAutoSendConductorChat,
+  type PendingInteractivePrompt,
   type ChatStatus,
 } from "@/components/conductor/conductor-shared";
 import type { InteractivePromptAnswer } from "@/components/ai-elements/interactive-prompt-menu";
@@ -171,14 +172,18 @@ function ConductorChatBridge({
     for (const message of messages) {
       for (const part of message.parts ?? []) {
         const metaKey = `${message.id}:${"toolCallId" in part ? String(part.toolCallId) : part.type}`;
-        if (part.type === "tool-patchLoopSpec" && part.state === "output-available") {
-          if (processedToolMetaRef.current.has(metaKey)) continue;
-          processedToolMetaRef.current.add(metaKey);
-          const output = part.output as { spec?: Record<string, unknown>; missingSlots?: string[] };
-          onLoopMetaChangeRef.current({
-            spec: output.spec ?? null,
-            missingSlots: output.missingSlots,
-          });
+        const phaseToolPart = part as { type: string; state?: string; output?: unknown };
+        if (phaseToolPart.type.startsWith("tool-") && phaseToolPart.state === "output-available") {
+          const output = phaseToolPart.output as { spec?: Record<string, unknown>; missingSlots?: string[] };
+          if (output.spec || output.missingSlots) {
+            const specMetaKey = `${metaKey}:spec`;
+            if (processedToolMetaRef.current.has(specMetaKey)) continue;
+            processedToolMetaRef.current.add(specMetaKey);
+            onLoopMetaChangeRef.current({
+              spec: output.spec ?? null,
+              missingSlots: output.missingSlots,
+            });
+          }
         }
         if (part.type === "tool-compileLoop" && part.state === "output-available") {
           if (processedToolMetaRef.current.has(metaKey)) continue;
@@ -284,8 +289,8 @@ function ConductorBuilderLive({
     : liveChat?.chatStatus ?? "ready";
   const chatApi = liveChat?.chatApi ?? null;
 
-  const pendingQuestion = useMemo(
-    () => findPendingInteractivePrompt(messages, spec),
+  const pendingQuestions = useMemo(
+    () => findPendingInteractivePrompts(messages, spec),
     [messages, spec],
   );
   const pendingOutcomeBrief = useMemo(
@@ -307,7 +312,7 @@ function ConductorBuilderLive({
       messages,
       missingSlots,
       status,
-      hasPendingQuestion: Boolean(pendingQuestion || pendingOutcomeBrief),
+      hasPendingQuestion: Boolean(pendingQuestions.length || pendingOutcomeBrief),
       hasPendingReplyOptions: Boolean(pendingReplyOptions),
       chatBusy: creating || chatStatus === "streaming" || chatStatus === "submitted",
       explicitOptions: pendingReplyOptions?.input.options,
@@ -317,7 +322,7 @@ function ConductorBuilderLive({
       chatStatus,
       messages,
       missingSlots,
-      pendingQuestion,
+      pendingQuestions,
       pendingOutcomeBrief,
       pendingReplyOptions,
       status,
@@ -340,36 +345,36 @@ function ConductorBuilderLive({
     chatApi?.sendMessage({ text });
   }
 
-  function submitAskQuestionAnswer(answer: InteractivePromptAnswer) {
-    if (!pendingQuestion || !chatApi) return;
+  function submitAskQuestionAnswer(prompt: PendingInteractivePrompt, answer: InteractivePromptAnswer) {
+    if (!chatApi) return;
     void chatApi.addToolOutput({
-      tool: pendingQuestion.toolName,
-      toolCallId: pendingQuestion.toolCallId,
+      tool: prompt.toolName,
+      toolCallId: prompt.toolCallId,
       output: {
-        questionId: pendingQuestion.input.questionId,
+        questionId: prompt.input.questionId,
         answerText: answer.answerText,
         selectedOptionIds: answer.selectedOptionIds,
         selectedValues: answer.selectedValues,
         ...(answer.otherText ? { otherText: answer.otherText } : {}),
-        ...(pendingQuestion.input.outcomeId ? { outcomeId: pendingQuestion.input.outcomeId } : {}),
-        ...(pendingQuestion.input.role ? { role: pendingQuestion.input.role } : {}),
+        ...(prompt.input.outcomeId ? { outcomeId: prompt.input.outcomeId } : {}),
+        ...(prompt.input.role ? { role: prompt.input.role } : {}),
       },
     });
   }
 
-  function dismissAskQuestion() {
-    if (!pendingQuestion || !chatApi) return;
+  function dismissAskQuestion(prompt: PendingInteractivePrompt) {
+    if (!chatApi) return;
     void chatApi.addToolOutput({
-      tool: pendingQuestion.toolName,
-      toolCallId: pendingQuestion.toolCallId,
+      tool: prompt.toolName,
+      toolCallId: prompt.toolCallId,
       output: {
-        questionId: pendingQuestion.input.questionId,
+        questionId: prompt.input.questionId,
         answerText: "skipped",
         selectedOptionIds: [],
         selectedValues: [],
         skipped: true,
-        ...(pendingQuestion.input.outcomeId ? { outcomeId: pendingQuestion.input.outcomeId } : {}),
-        ...(pendingQuestion.input.role ? { role: pendingQuestion.input.role } : {}),
+        ...(prompt.input.outcomeId ? { outcomeId: prompt.input.outcomeId } : {}),
+        ...(prompt.input.role ? { role: prompt.input.role } : {}),
       },
     });
   }
@@ -434,7 +439,7 @@ function ConductorBuilderLive({
       onSubmit={handleSubmit}
       onStop={() => chatApi?.stop()}
       onRetry={() => { void chatApi?.regenerate(); }}
-      pendingQuestion={pendingQuestion}
+      pendingQuestions={pendingQuestions}
       pendingOutcomeBrief={pendingOutcomeBrief}
       pendingReplyOptionsCallId={pendingReplyOptions?.toolCallId ?? null}
       promptSuggestions={promptSuggestions}

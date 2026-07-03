@@ -103,19 +103,44 @@
 }
 
 /*
- * Transcript stream rhythm:
- * - 20px between major steps (tool calls, clusters)
- * - Patch beats cluster thought + prose + Making changes… tightly
+ * Transcript stream rhythm — spacing is margin-only (no flex `gap`) so each
+ * pair of adjacent parts can be tuned independently and the contrast between
+ * "before a thought" and "right after a thought" actually reads on screen:
+ *
+ * - A thought is a break from what came before → generous margin ABOVE it.
+ * - A thought is a reflection ON what follows → almost no margin BELOW it,
+ *   so the next line/question reads as glued to the thought that led to it.
+ * - An intro sentence directly followed by its question card is one beat →
+ *   small margin between them.
+ * - Everything else (prose → prose, card → card) uses a moderate default.
  */
 .conductor-builder-chat .conductor-transcript-stream {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
 }
 
 .conductor-builder-chat .conductor-transcript-stream > * {
-  margin-bottom: 0;
   margin-top: 0;
+  margin-bottom: 0;
+}
+
+.conductor-builder-chat .conductor-transcript-stream > * + * {
+  margin-top: 1rem;
+}
+
+/* Space out a thought from whatever preceded it (text or a tool/question card). */
+.conductor-builder-chat .conductor-transcript-stream > * + [data-transcript-thought] {
+  margin-top: 1.75rem;
+}
+
+/* Pull the very next line/card tight against the thought that produced it. */
+.conductor-builder-chat .conductor-transcript-stream > [data-transcript-thought] + * {
+  margin-top: 0.3rem;
+}
+
+/* An intro sentence and its question/tool card are one beat — keep them close. */
+.conductor-builder-chat .conductor-transcript-stream > [data-transcript-text] + [data-transcript-block] {
+  margin-top: 0.4rem;
 }
 
 .conductor-builder-chat .conductor-transcript-cluster {
@@ -127,16 +152,6 @@
 .conductor-builder-chat .conductor-transcript-cluster > * {
   margin-top: 0 !important;
   margin-bottom: 0 !important;
-}
-
-/* Investigation steps: tool card then reflection */
-.conductor-builder-chat .conductor-transcript-stream > [data-transcript-block] + [data-transcript-thought] {
-  margin-top: 0.75rem;
-}
-
-/* Prose introduces a standalone tool card or answered prompt */
-.conductor-builder-chat .conductor-transcript-stream > [data-transcript-text] + [data-transcript-block] {
-  margin-top: 0.75rem;
 }
 
 /* Reasoning stream — clamped height while thinking, optional expand */

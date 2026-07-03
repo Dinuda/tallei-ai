@@ -24,6 +24,7 @@ export async function provisionEventTrigger(input: {
   source: string;
   composioSlug?: string;
   eventType?: string;
+  config?: Record<string, unknown>;
 }): Promise<EventTriggerProvisionReceipt> {
   if (!isComposioConfigured()) {
     throw new Error("Composio is not configured");
@@ -52,6 +53,7 @@ export async function provisionEventTrigger(input: {
     toolkit,
     connectedAccountId,
     composioTriggerSlug,
+    config: input.config ?? {},
   });
 
   const webhook = await ensureComposioWebhookSubscription();

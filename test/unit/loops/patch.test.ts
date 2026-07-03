@@ -78,6 +78,14 @@ test("applySpecPatch preserves blueprint order when executionOrder matches", () 
         outcome: "Classified tickets with drafts ready for review",
         trigger: "When a new support ticket arrives",
         executionOrder: [...executionOrder],
+        questions: [{
+          id: "confirm-outcome",
+          question: "Does this outcome look right?",
+          options: [
+            { id: "yes", label: "Yes", value: "yes" },
+            { id: "change", label: "Change it", value: "change" },
+          ],
+        }],
         decisions: [],
       },
       decisions: [],

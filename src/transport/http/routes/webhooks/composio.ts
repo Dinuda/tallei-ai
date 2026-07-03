@@ -25,7 +25,6 @@ async function handleComposioWebhook(req: Request, res: Response): Promise<void>
       webhookId: typeof req.headers["webhook-id"] === "string" ? req.headers["webhook-id"] : undefined,
       webhookTimestamp: typeof req.headers["webhook-timestamp"] === "string" ? req.headers["webhook-timestamp"] : undefined,
       webhookSignature: typeof req.headers["webhook-signature"] === "string" ? req.headers["webhook-signature"] : undefined,
-      legacySignature: typeof req.headers["x-composio-signature"] === "string" ? req.headers["x-composio-signature"] : undefined,
     };
 
     let verification = verifyComposioWebhookSignatureDetailed(rawBody, signatureHeaders);
@@ -41,7 +40,6 @@ async function handleComposioWebhook(req: Request, res: Response): Promise<void>
         hasWebhookId: Boolean(signatureHeaders.webhookId),
         hasWebhookTimestamp: Boolean(signatureHeaders.webhookTimestamp),
         hasWebhookSignature: Boolean(signatureHeaders.webhookSignature),
-        hasLegacySignature: Boolean(signatureHeaders.legacySignature),
         hasRawBody: Boolean(rawBody?.length),
       });
       res.status(401).json({ error: "Invalid webhook signature", reason: verification.reason });

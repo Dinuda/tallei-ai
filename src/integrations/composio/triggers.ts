@@ -15,6 +15,7 @@ import { getLatestToolkitVersion } from "./tools.js";
 export type ComposioTriggerTypeRow = {
   slug: string;
   name: string;
+  config?: Record<string, unknown>;
 };
 
 const MIN_TRIGGER_SCORE = 4;
@@ -34,10 +35,22 @@ export function scoreTriggerSlugMatch(
   return tokens.reduce((score, token) => (hay.includes(token) ? score + 2 : score), 0);
 }
 
+export function normalizeComposioTriggerTypeRows(response: unknown): ComposioTriggerTypeRow[] {
+  const payload = toObjectRecord(response);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  return items.flatMap((item) => {
+    const row = toObjectRecord(item);
+    const slug = String(row.slug ?? "").trim();
+    if (!slug) return [];
+    const config = toObjectRecord(row.config ?? row.trigger_config ?? row.config_schema);
+    return [{ slug, name: String(row.name ?? slug).trim(), ...(Object.keys(config).length ? { config } : {}) }];
+  });
+}
+
 export async function listComposioTriggerTypes(toolkit: string): Promise<ComposioTriggerTypeRow[]> {
   const toolkitVersion = await getLatestToolkitVersion(toolkit);
   return readComposioMetadata(
-    `composio:triggers:${toolkit}:${toolkitVersion}:v1`,
+    `composio:triggers:${toolkit}:${toolkitVersion}:v2`,
     async () => {
       const composio = getComposioClient() as unknown as {
         client?: {
@@ -46,20 +59,12 @@ export async function listComposioTriggerTypes(toolkit: string): Promise<Composi
           };
         };
       };
-      const response = toObjectRecord(
-        await composio.client?.triggersTypes?.list?.({
+      const response = await composio.client?.triggersTypes?.list?.({
           toolkit_slugs: [toolkit],
           toolkit_versions: toolkitVersion,
           limit: 50,
-        }),
-      );
-      const items = Array.isArray(response.items) ? response.items : [];
-      return items.flatMap((item) => {
-        const row = toObjectRecord(item);
-        const slug = String(row.slug ?? "").trim();
-        if (!slug) return [];
-        return [{ slug, name: String(row.name ?? slug).trim() }];
-      });
+        });
+      return normalizeComposioTriggerTypeRows(response);
     },
     TOOLKIT_TRIGGER_CACHE_POLICY,
   );
@@ -159,11 +164,6 @@ export type LoopTriggerRegistrationRow = LoopTriggerSubscriptionRow & {
   event_type?: string;
 };
 
-/** @deprecated Use getLoopTriggerSubscription */
-export async function getLoopTriggerRegistration(loopId: string) {
-  return getLoopTriggerSubscription(loopId);
-}
-
 export async function registerLoopEventTrigger(input: {
   auth: AuthContext;
   loopId: string;
@@ -171,6 +171,7 @@ export async function registerLoopEventTrigger(input: {
   source: string;
   composioSlug?: string;
   eventType?: string;
+  config?: Record<string, unknown>;
 }): Promise<LoopTriggerSubscriptionRow & import("./event-trigger-provision.js").EventTriggerProvisionReceipt> {
   const { provisionEventTrigger } = await import("./event-trigger-provision.js");
   const receipt = await provisionEventTrigger(input);

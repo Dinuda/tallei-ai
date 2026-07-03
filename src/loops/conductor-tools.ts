@@ -1,5 +1,4 @@
 import { z } from "zod";
-
 import {
   confirmOutcomeBriefActionSchema,
   type ConfirmOutcomeBriefAction,
@@ -72,9 +71,11 @@ export const listWorkspaceConnectorsInputSchema = z.object({});
 
 export { confirmOutcomeBriefActionSchema, type ConfirmOutcomeBriefAction };
 
+const confirmOutcomeBriefPickerActionSchema = z.enum(["confirm", "other"]);
+
 const confirmOutcomeBriefOptionSchema = askQuestionOptionSchema.extend({
-  id: confirmOutcomeBriefActionSchema,
-  value: confirmOutcomeBriefActionSchema,
+  id: confirmOutcomeBriefPickerActionSchema,
+  value: confirmOutcomeBriefPickerActionSchema,
 });
 
 const outcomeBriefHashSchema = z.string().regex(/^[a-f0-9]{64}$/, "Expected a SHA-256 confirmation hash");
@@ -82,9 +83,9 @@ const outcomeBriefHashSchema = z.string().regex(/^[a-f0-9]{64}$/, "Expected a SH
 export const confirmOutcomeBriefInputSchema = z.object({
   briefHash: outcomeBriefHashSchema,
   question: z.string().min(1),
-  options: z.array(confirmOutcomeBriefOptionSchema).min(2).max(5),
+  options: z.array(confirmOutcomeBriefOptionSchema).length(2),
   recommendedOptionIds: z.array(z.string()).optional(),
-  allowOther: z.boolean().optional(),
+  allowOther: z.literal(false).optional(),
 });
 
 export const confirmOutcomeBriefOutputSchema = z.object({
@@ -136,6 +137,13 @@ export const discoverBindingsInputSchema = z.object({
 
 export type DiscoverBindingsInput = z.infer<typeof discoverBindingsInputSchema>;
 
+export const setBindingConfigInputSchema = z.object({
+  outcomeId: z.string().min(1),
+  connector: z.string().min(1),
+  config: z.record(z.string(), z.unknown()),
+});
+export type SetBindingConfigInput = z.infer<typeof setBindingConfigInputSchema>;
+
 export const discoverConnectorsForBlueprintInputSchema = z.object({
   outcomes: z.array(z.object({
     id: z.string().min(1),
@@ -150,6 +158,7 @@ export const compileLoopInputSchema = z.object({});
 
 export const activateLoopInputSchema = z.object({
   compiledPlanId: z.string().uuid().optional(),
+  confirmedByUser: z.literal(true),
 });
 
 export type CompileLoopInput = z.infer<typeof compileLoopInputSchema>;

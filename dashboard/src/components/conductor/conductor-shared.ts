@@ -398,7 +398,7 @@ export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBr
             question: confirmInput.question,
             options: confirmInput.options,
             recommendedOptionIds: confirmInput.recommendedOptionIds,
-            allowOther: confirmInput.allowOther ?? true,
+            allowOther: false,
           },
         };
       }
@@ -447,17 +447,18 @@ export function buildConnectorPickInput(
   };
 }
 
-export function findPendingInteractivePrompt(
+export function findPendingInteractivePrompts(
   messages: UIMessage[],
   spec: Record<string, unknown> | null = null,
-): PendingInteractivePrompt | null {
+): PendingInteractivePrompt[] {
   const discovery = findLatestConnectorDiscovery(messages);
+  const prompts: PendingInteractivePrompt[] = [];
 
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
+  for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i];
     if (message.role !== "assistant") continue;
     const parts = message.parts ?? [];
-    for (let j = parts.length - 1; j >= 0; j -= 1) {
+    for (let j = 0; j < parts.length; j += 1) {
       const part = parts[j];
 
       if (isPickConnectorAppPart(part)) {
@@ -466,11 +467,11 @@ export function findPendingInteractivePrompt(
           if (!blueprintNeedsConnectorPick(spec) || !discovery || !pickPart.input?.outcomeId) continue;
           const input = buildConnectorPickInput(discovery, pickPart.input.outcomeId, pickPart.input.question);
           if (!input) continue;
-          return {
+          prompts.push({
             toolCallId: pickPart.toolCallId,
             toolName: "pickConnectorApp",
             input,
-          };
+          });
         }
       }
 
@@ -479,13 +480,21 @@ export function findPendingInteractivePrompt(
         if (isResumableUiToolPart("askQuestion", askPart.state, askPart.input, askPart.output)) {
           const input = askPart.input;
           if (!input?.question || !input.options?.length) continue;
-
-          return { toolCallId: askPart.toolCallId, toolName: "askQuestion", input };
+          prompts.push({ toolCallId: askPart.toolCallId, toolName: "askQuestion", input });
         }
       }
     }
   }
-  return null;
+
+  if (prompts.length <= 1) return prompts;
+
+  return prompts.map((prompt, index) => ({
+    ...prompt,
+    input: {
+      ...prompt.input,
+      step: { index: index + 1, total: prompts.length },
+    },
+  }));
 }
 
 export function shouldShowThinkingIndicator(
@@ -587,6 +596,57 @@ export function promptVariantForQuestion(questionId: string): "connector" | "vio
 }
 
 export { resolveConfirmOutcomeBriefActionFromSelection };
+
+export function connectorLogoUrl(slug: string): string {
+  return `https://logos.composio.dev/api/${slug}`;
+}
+
+export function resolveAskQuestionDisplayAnswer(
+  input: Pick<AskQuestionInput, "options"> | undefined,
+  output: AskQuestionOutput,
+): string {
+  if (output.skipped) return "Skipped";
+
+  const selectedLabels = (output.selectedOptionIds ?? [])
+    .map((id) => input?.options?.find((option) => option.id === id)?.label)
+    .filter((label): label is string => Boolean(label));
+  if (selectedLabels.length > 0) {
+    const custom = output.otherText?.trim();
+    return [...selectedLabels, ...(custom ? [custom] : [])].join("; ");
+  }
+
+  const valueLabels = (output.selectedValues ?? [])
+    .map((value) => input?.options?.find((option) => option.value === value)?.label ?? value)
+    .filter((label) => label.length > 0);
+  if (valueLabels.length > 0) {
+    const custom = output.otherText?.trim();
+    return [...valueLabels, ...(custom ? [custom] : [])].join("; ");
+  }
+
+  return output.otherText?.trim() || output.answerText;
+}
+
+export function resolveConnectorIconSlug(
+  output: Pick<AskQuestionOutput, "selectedOptionIds" | "selectedValues">,
+  options?: InteractivePromptOption[],
+): string | undefined {
+  for (const id of output.selectedOptionIds ?? []) {
+    const icon = options?.find((option) => option.id === id)?.icon;
+    if (icon) return icon;
+  }
+
+  for (const value of output.selectedValues ?? []) {
+    const matched = options?.find((option) => option.value === value || option.id === value);
+    if (matched?.icon) return matched.icon;
+    if (value) return value.toLowerCase();
+  }
+
+  for (const id of output.selectedOptionIds ?? []) {
+    if (id) return id.toLowerCase();
+  }
+
+  return undefined;
+}
 
 export function resolveOutcomeBriefCardStatus(input: {
   output?: ConfirmOutcomeBriefOutput;

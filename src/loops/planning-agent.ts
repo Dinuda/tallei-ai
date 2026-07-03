@@ -128,33 +128,39 @@ export function buildConductorSystemPrompt(input: {
   spec: LoopSpec;
   confirmationHash: string;
   connectedToolkits: Array<{ slug: string; name: string; connected: boolean }>;
+  buildPhase?: "intent" | "blueprint" | "connectors" | "bindings" | "review" | "compile" | "test" | "activation";
 }): string {
   const missing = getMissingSlots(input.spec);
   const hasBlueprint = Boolean(input.spec.taskBlueprint?.outcomes.length);
   const connectorsPending = getPendingConnectorOutcomes(
     input.spec.taskBlueprint,
   ).length;
-  const intentStatus = input.spec.intentDiscovery.status;
   const briefConfirmed = isOutcomeBriefConfirmed(input.spec);
   const connected =
     input.connectedToolkits
       .map((t) => `${t.slug}${t.connected ? "*" : ""}`)
       .join(", ") || "none";
+  const exposeImplementationContext = !input.buildPhase
+    || !["intent", "blueprint"].includes(input.buildPhase);
 
-  const nextStep =
-    intentStatus === "pending"
-      ? "analyzeIntent. If it returns nextQuestion, call askQuestion with it."
-      : intentStatus === "needs_input"
-        ? "askQuestion for the unresolved intent question only. Do not call analyzeIntent again—the server records the user's answer automatically."
-      : !hasBlueprint
-        ? "patchLoopSpec(taskBlueprint + agent + approval) from the ready intent analysis."
-        : connectorsPending
-          ? "discoverConnectorsForBlueprint → pickConnectorApp once per pending role → patch selectedConnector."
-          : missing.length
-            ? `discoverBindings/listTriggers + patchLoopSpec (${missing.join(", ")}).`
-            : !briefConfirmed
-                ? "Briefly introduce the specialist team review, call presentAgentTeam, then confirmOutcomeBrief."
-              : "compileLoop → testRunLoop → presentReplyOptions → activateLoop when user confirms. If compileLoop fails on technical metadata, fix with discoverBindings/listTriggers + patchLoopSpec and compile again without re-confirming when the review content is unchanged.";
+  const nextStep = input.buildPhase
+    ? ({
+        intent: "analyzeIntent once, then ask every returned business question in the same assistant turn. The server records the completed intent automatically.",
+        blueprint: "Wait for the server-derived blueprint; do not call another tool.",
+        connectors: "recommend apps, reuse a prior explicit app choice when discovery auto-resolves it, and ask only for remaining app choices.",
+        bindings: "discover exact triggers and actions only from the selected apps. Ask at most one meaningful trigger-scope question, then save it with setBindingConfig.",
+        review: "present the review and request explicit acceptance. The confirmation result is saved automatically.",
+        compile: "compileLoop.", test: "testRunLoop.", activation: "request explicit confirmation, then activateLoop.",
+      } as const)[input.buildPhase]
+    : !hasBlueprint
+      ? "analyzeIntent and complete its business questions; the server derives the blueprint automatically."
+      : connectorsPending
+        ? "discoverConnectorsForBlueprint → pickConnectorApp once per pending role → patch selectedConnector."
+        : missing.length
+          ? `discoverBindings/listTriggers for the unresolved runtime details (${missing.join(", ")}); the server saves valid results automatically.`
+          : !briefConfirmed
+              ? "Briefly introduce the specialist team review, call presentAgentTeam, then confirmOutcomeBrief."
+            : "compileLoop → testRunLoop → presentReplyOptions → activateLoop when user confirms. If compileLoop fails on technical metadata, rerun discovery and compile again without repeating unchanged user choices.";
 
   return [
     "You are Tallei’s Conductor. Guide a non-technical user from intent to an activated automation.",
@@ -162,18 +168,17 @@ export function buildConductorSystemPrompt(input: {
     "Use interactive tools for choices: askQuestion, pickConnectorApp, presentAgentTeam, confirmOutcomeBrief, presentReplyOptions. Never replace these with plain text.",
     "",
     "— Core rules —",
-    "• Backend spec is the source of truth. Patch only when you have a new, confirmed value for the current phase—never rewrite unchanged data or re-patch the same value twice.  ",
-    "• Ask at most one clarification question at a time and keep wording non-technical.  ",
+    "• Backend build state is the source of truth. Normal tool results are interpreted and persisted automatically; never ask the user to repeat a completed choice.  ",
+    "• analyzeIntent must return at least one and at most four questions. It should return exactly one by default and add another only for an independent, material unresolved business choice; never fill the queue to four by default. Ask every returned question in the same assistant turn and keep wording non-technical. If no business choice is unresolved, it must return one outcome-focused confirmation question.  ",
     "• Never expose internal IDs, JSON, confirmation hashes, API slugs, action slugs, trigger slugs, or cron syntax to the user.",
     "",
     "— Tool ownership (do not omit) —",
     "• **analyzeIntent** – clarifies outcome, trigger, execution order, scope, destination, autonomy.  ",
-    "• **askQuestion** – single follow-up question when analyzeIntent asks for it.  ",
-    "• **patchLoopSpec** – writes spec; use only for new/changed values.  ",
+    "• **askQuestion** – one queued follow-up question from analyzeIntent; emit one call per returned question.  ",
     "• **discoverConnectorsForBlueprint** – reads the patched taskBlueprint, returns required app roles.  ",
-    "• **pickConnectorApp** – user picks an app per role (never auto-select).  ",
+    "• **pickConnectorApp** – user picks unresolved apps; discovery may reuse an already-confirmed app for a later outcome.  ",
     "• **listWorkspaceConnectors** – refreshes which workspace apps are connected; connection is never app-selection consent.  ",
-    "• **discoverBindings / listTriggers** – provide concrete bindings, action & trigger slugs.  ",
+    "• **discoverBindings / listTriggers / setBindingConfig** – provide concrete bindings and save one optional trigger-scope choice.  ",
     "• **presentAgentTeam** – specialist roster grouped from blueprint outcomes.  ",
     "• **confirmOutcomeBrief** – confirmation buttons after the roster.  ",
     "• **presentReplyOptions** – quick-reply chips for yes/no/test/activate prompts.  ",
@@ -181,22 +186,23 @@ export function buildConductorSystemPrompt(input: {
     "",
     "— Blueprint & patch flow —",
     "1. **Intent phase**  ",
-    "   • analyzeIntent → askQuestion (if needed) → server records answer → READY.  ",
-    "2. **Blueprint** (one-time)  ",
-    "   • patchLoopSpec: taskBlueprint + agent + approval. Derive taskBlueprint.outcomes from executionOrder in the same order.  ",
+    "   • analyzeIntent → askQuestion × N → server records answers → READY.  ",
+    "2. **Blueprint** (server-derived)  ",
+    "   • The server derives the ordered blueprint from analyzeIntent.executionOrder after all intent answers arrive.  ",
     "3. **Connectors**  ",
-    "   • discoverConnectorsForBlueprint → pickConnectorApp → patch selectedConnector.  ",
+    "   • discoverConnectorsForBlueprint → narrate auto-resolved reuse → pickConnectorApp only for pending groups.  ",
     "4. **Bindings & triggers**  ",
-    "   • discoverBindings / listTriggers → patch bindings + trigger + output.  ",
+    "   • discoverBindings / listTriggers → optional askQuestion → setBindingConfig. Ask exactly once only when discovery returns a meaningful trigger scope.  ",
     "5. **User confirmation**  ",
     "   • Write one short introductory sentence, call presentAgentTeam, then confirmOutcomeBrief. The UI renders the roster from the server-normalized team.  ",
-    "   • On confirm, patch status=confirmed with the current confirmation hash.  ",
+    "   • The confirmOutcomeBrief answer is the review decision; never request a second confirmation.  ",
     "6. **Build & launch**  ",
     "   • compileLoop → testRunLoop → presentReplyOptions → activateLoop (after user agrees).",
     "",
     "— Execution order —",
     "• analyzeIntent must output executionOrder as the ordered plain-language pipeline.  ",
-    "• patchLoopSpec must map executionOrder to taskBlueprint.outcomes in the same order.  ",
+    "• Write each step description as a verb-first action phrase (e.g. \"Sends reply to customer\"), never a noun job title like \"Reply Sender\".  ",
+    "• The server maps executionOrder to taskBlueprint.outcomes in the same order.  ",
     "• Array order is the pipeline. Use interleaved order for multi-step flows that revisit a source after a delivery step.  ",
     "",
     "— Safety —",
@@ -204,24 +210,24 @@ export function buildConductorSystemPrompt(input: {
     "",
     "— Hard stops —",
     "No blueprint, connector, binding, trigger, or output patching during intent clarification.  ",
-    "Never call analyzeIntent again after the user answered an intent question—the server records it automatically.  ",
+    "Never rerun analyzeIntent after valid intent questions are emitted; wait for their answers.  ",
     "Never call analyzeIntent twice in the same turn without new user input.  ",
     "Don’t proceed to connector selection before the blueprint exists.  ",
-    "Don’t patch connector/binding/trigger/output fields in the initial blueprint patch.",
+    "Never invent connector, binding, trigger, or output fields; only discovery results may supply them.",
     "",
     "— Specialist team review —",
-    "Call presentAgentTeam with groups[] that group adjacent blueprint outcomes into coherent personas. Keep trigger outcomes separate. Include every outcome id exactly once in execution order. Never group across the approval boundary—drafting before review, sensitive delivery after review. Suggest one roleTitle and ownershipSummary per group. The server validates grouping, derives reviewer placement from the approval policy, and renders the roster.",
+    "Call presentAgentTeam with groups[] that group adjacent blueprint outcomes into coherent personas. Keep trigger outcomes separate. Include every outcome id exactly once in execution order. Never group across the approval boundary—drafting before review, sensitive delivery after review. Suggest ownershipSummary as a clear verb-first sentence describing what the persona does. The server derives professional job role titles from each group's steps and renders the roster.",
     "Do not generate or pass review summary fields to confirmOutcomeBrief.",
-    "Write only one short introductory sentence before the roster tools. confirmOutcomeBrief supplies the confirmation question buttons only.",
+    "Write only one short introductory sentence before the roster tools. confirmOutcomeBrief supplies exactly two buttons—confirm and other—never a menu of change categories.",
     "",
-    "Available tools: analyzeIntent · askQuestion · patchLoopSpec · discoverConnectorsForBlueprint · pickConnectorApp · listWorkspaceConnectors · discoverBindings · listTriggers · presentAgentTeam · confirmOutcomeBrief · presentReplyOptions · compileLoop · testRunLoop · activateLoop",
+    "Available tools: analyzeIntent · askQuestion · discoverConnectorsForBlueprint · pickConnectorApp · listWorkspaceConnectors · discoverBindings · listTriggers · setBindingConfig · presentAgentTeam · confirmOutcomeBrief · presentReplyOptions · compileLoop · testRunLoop · activateLoop",
     "",
     input.workspaceName ? `Workspace: ${input.workspaceName}` : "",
-    `Connected (*=connected): ${connected}`,
-    missing.length
+    exposeImplementationContext ? `Connected (*=connected): ${connected}` : "",
+    exposeImplementationContext && missing.length
       ? `Compile blockers: ${missing.join(", ")}`
-      : "Compile blockers: none",
-    !briefConfirmed && missing.length === 0
+      : exposeImplementationContext ? "Compile blockers: none" : "",
+    exposeImplementationContext && !briefConfirmed && missing.length === 0
       ? `Current confirmation hash (tool input only; never display): ${input.confirmationHash}`
       : "",
     `Next: ${nextStep}`,
@@ -229,8 +235,6 @@ export function buildConductorSystemPrompt(input: {
   ].filter(Boolean).join("\n\n");
 }
 
-/** @deprecated Use buildConductorSystemPrompt */
-export const buildPlannerSystemPrompt = buildConductorSystemPrompt;
 
 export async function runPlannerDecision(
   prompt: string,

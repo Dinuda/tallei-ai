@@ -47,7 +47,7 @@ test("technical trigger slug normalization preserves confirmation when review is
       { id: "send", role: "destination", description: "Send the email reply to the customer", selectedConnector: "gmail", status: "chosen" },
     ],
   };
-  spec.trigger = { kind: "event", source: "gmail", eventType: "new_message", composioSlug: "GMAIL_NEW_GMAIL_MESSAGE" };
+  spec.trigger = { kind: "event", source: "gmail", eventType: "new_message", composioSlug: "GMAIL_NEW_GMAIL_MESSAGE", config: {} };
   spec.bindings = [
     { capability: "email.read", connector: "gmail", actionSlug: "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID", role: "source" },
     { capability: "email.send", connector: "gmail", actionSlug: "GMAIL_REPLY_TO_THREAD", role: "destination" },
@@ -66,6 +66,7 @@ test("technical trigger slug normalization preserves confirmation when review is
       source: "gmail",
       eventType: "email.received",
       composioSlug: "GMAIL_NEW_GMAIL_MESSAGE",
+      config: {},
     },
     bindings: confirmed.bindings.map((binding) => ({
       ...binding,

@@ -28,10 +28,11 @@ test("compileLoopInputSchema accepts empty payload", () => {
   assert.deepEqual(compileLoopInputSchema.parse({}), {});
 });
 
-test("activateLoopInputSchema accepts optional compiledPlanId", () => {
+test("activateLoopInputSchema requires explicit confirmation and accepts optional compiledPlanId", () => {
   const id = "00000000-0000-4000-8000-000000000099";
-  assert.deepEqual(activateLoopInputSchema.parse({}), {});
-  assert.deepEqual(activateLoopInputSchema.parse({ compiledPlanId: id }), { compiledPlanId: id });
+  assert.equal(activateLoopInputSchema.safeParse({}).success, false);
+  assert.deepEqual(activateLoopInputSchema.parse({ confirmedByUser: true }), { confirmedByUser: true });
+  assert.deepEqual(activateLoopInputSchema.parse({ compiledPlanId: id, confirmedByUser: true }), { compiledPlanId: id, confirmedByUser: true });
 });
 
 test("askQuestionInputSchema accepts structured question payloads", () => {
@@ -78,6 +79,41 @@ test("confirmOutcomeBriefInputSchema rejects briefHash-only payloads", () => {
   }));
 });
 
+test("confirmOutcomeBriefInputSchema rejects more than two options", () => {
+  assert.throws(() => confirmOutcomeBriefInputSchema.parse({
+    briefHash: "a".repeat(64),
+    question: "Ready to build this?",
+    options: [
+      { id: "confirm", label: "Looks good", value: "confirm" },
+      { id: "other", label: "Change it", value: "other" },
+      { id: "other", label: "Change trigger", value: "other" },
+    ],
+  }));
+});
+
+test("confirmOutcomeBriefInputSchema rejects category-specific change options", () => {
+  assert.throws(() => confirmOutcomeBriefInputSchema.parse({
+    briefHash: "a".repeat(64),
+    question: "Ready to build this?",
+    options: [
+      { id: "confirm", label: "Looks good", value: "confirm" },
+      { id: "change_trigger", label: "Change trigger timing", value: "change_trigger" },
+    ],
+  }));
+});
+
+test("confirmOutcomeBriefInputSchema rejects allowOther true", () => {
+  assert.throws(() => confirmOutcomeBriefInputSchema.parse({
+    briefHash: "a".repeat(64),
+    question: "Ready to build this?",
+    options: [
+      { id: "confirm", label: "Looks good", value: "confirm" },
+      { id: "other", label: "Change it", value: "other" },
+    ],
+    allowOther: true,
+  }));
+});
+
 test("confirmOutcomeBriefInputSchema rejects non-SHA-256 hashes", () => {
   assert.throws(() => confirmOutcomeBriefInputSchema.parse({
     briefHash: "brief-hash-123",
@@ -100,7 +136,7 @@ test("askQuestionOutputSchema accepts user answers", () => {
   assert.equal(parsed.answerText, "manual");
 });
 
-test("buildConductorSystemPrompt requires askQuestion only as last resort", () => {
+test("buildConductorSystemPrompt issues every queued intent question in one turn", () => {
   const spec = createEmptyLoopSpec("00000000-0000-4000-8000-000000000001");
   const prompt = buildConductorSystemPrompt({
     spec,
@@ -109,6 +145,12 @@ test("buildConductorSystemPrompt requires askQuestion only as last resort", () =
   });
 
   assert.match(prompt, /askQuestion/);
+  assert.match(prompt, /ask every returned question in the same assistant turn/i);
+  assert.match(prompt, /askQuestion × N/i);
+  assert.match(prompt, /exactly one by default/i);
+  assert.match(prompt, /never fill the queue to four by default/i);
+  assert.doesNotMatch(prompt, /single follow-up question/i);
+  assert.doesNotMatch(prompt, /one clarification question at a time/i);
   assert.match(prompt, /Compile blockers/i);
   assert.match(prompt, /discoverBindings/);
   assert.match(prompt, /Available tools:/);
@@ -128,12 +170,16 @@ test("conductor builder renders interactive prompts without auto-selecting conne
   assert.match(shared, /shouldAutoSendConductorChat/);
   assert.match(source, /addToolOutput/);
   assert.match(source, /shouldAutoSendConductorChat/);
-  assert.match(source, /findPendingInteractivePrompt/);
-  assert.doesNotMatch(source, /findAutoConnectorPromptTarget/);
+  assert.match(source, /findPendingInteractivePrompts/);
+  assert.match(source, /pendingQuestions/);
+  assert.match(layout, /const activePendingQuestion = pendingQuestions\[0\] \?\? null/);
+  assert.match(layout, /pendingQuestionStepsRef/);
+  assert.doesNotMatch(layout, /\{pendingQuestions\.map\(/);
   assert.doesNotMatch(shared, /autoApplyConnector/);
   const pendingResolver = shared.slice(
-    shared.indexOf("export function findPendingInteractivePrompt"),
+    shared.indexOf("export function findPendingInteractivePrompts"),
     shared.indexOf("export function shouldShowThinkingIndicator"),
   );
-  assert.doesNotMatch(pendingResolver, /if \(!blueprintNeedsConnectorPick\(spec\)\) return null/);
+  assert.match(pendingResolver, /prompts\.push/);
+  assert.match(pendingResolver, /step: \{ index: index \+ 1, total: prompts\.length \}/);
 });

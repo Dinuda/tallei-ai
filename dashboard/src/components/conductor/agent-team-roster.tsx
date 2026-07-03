@@ -2,14 +2,23 @@
 
 import { UserRound } from "lucide-react";
 import { useSession } from "next-auth/react";
+import { useMemo } from "react";
 
-import { AgentTeamAvatar } from "@/components/conductor/agent-team-avatar";
+import { AgentTeamAvatar, rosterAvatarShellClassName } from "@/components/conductor/agent-team-avatar";
+import { OutcomeBriefCard } from "@/components/conductor/outcome-brief-card";
 import type {
   AgentTeamReviewer,
   AgentTeamSpecialist,
   AgentTeamTrigger,
   PresentAgentTeamOutput,
 } from "@/components/conductor/conductor-shared";
+import { buildSpecialistWorkflowViewModel } from "@/components/conductor/outcome-review-view-model";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
@@ -45,17 +54,6 @@ function ConnectorBadge({ connector }: { connector: string }) {
   );
 }
 
-function specialistShowsActionChips(specialist: AgentTeamSpecialist): boolean {
-  return specialist.steps.length > 1;
-}
-
-function ActionChip({ label }: { label: string }) {
-  return (
-    <span className="inline-flex items-center border border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-2 py-0.5 text-[11px] font-medium leading-4 text-[var(--ed-text-2)]">
-      {label}
-    </span>
-  );
-}
 function uniqueConnectors(steps: Array<{ connector?: string }>): string[] {
   const seen = new Set<string>();
   const connectors: string[] = [];
@@ -89,30 +87,33 @@ function TriggerLabRow({ trigger }: { trigger: AgentTeamTrigger }) {
 function SpecialistRow({ specialist }: { specialist: AgentTeamSpecialist }) {
   const connectors = uniqueConnectors(specialist.steps);
   const displayName = specialistDisplayName(specialist.name);
-  const showActionChips = specialistShowsActionChips(specialist);
+  const workflowViewModel = useMemo(
+    () => buildSpecialistWorkflowViewModel({
+      specialistName: displayName,
+      roleTitle: specialist.roleTitle,
+      ownershipSummary: specialist.ownershipSummary,
+      steps: specialist.steps,
+    }),
+    [displayName, specialist.ownershipSummary, specialist.roleTitle, specialist.steps],
+  );
 
   return (
     <article className="border border-[var(--ed-border-light)] bg-white px-4 py-3">
       <div className="flex items-start gap-3">
-        <AgentTeamAvatar
-          alt={`${displayName} avatar`}
-          className="size-10 shrink-0 rounded-full bg-[var(--ed-surface-alt)]"
-          seed={specialist.avatarSeed}
-          size={40}
-        />
+        <span className={rosterAvatarShellClassName(specialist.avatarSeed)}>
+          <AgentTeamAvatar
+            alt={`${displayName} avatar`}
+            className="size-10"
+            seed={specialist.avatarSeed}
+            size={40}
+          />
+        </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
             <h4 className="text-sm font-semibold text-[var(--ed-text)]">{displayName}</h4>
             <p className="text-xs font-medium text-[var(--ed-text-muted)]">{specialist.roleTitle}</p>
           </div>
           <p className="mt-1 text-xs leading-5 text-[var(--ed-text-2)]">{specialist.ownershipSummary}</p>
-          {showActionChips ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {specialist.steps.map((step) => (
-                <ActionChip key={step.outcomeId} label={step.description} />
-              ))}
-            </div>
-          ) : null}
         </div>
         {connectors.length > 0 ? (
           <div className="flex shrink-0 flex-col items-end gap-2">
@@ -122,6 +123,23 @@ function SpecialistRow({ specialist }: { specialist: AgentTeamSpecialist }) {
           </div>
         ) : null}
       </div>
+
+      {specialist.steps.length > 0 ? (
+        <div className="mt-2 flex justify-end">
+          <Accordion className="w-full" collapsible type="single">
+            <AccordionItem className="border-0" value="workflow">
+              <AccordionTrigger
+                className="ml-auto w-auto justify-end gap-1.5 py-1 text-[11px] font-semibold text-[var(--ed-text-muted)] hover:no-underline [&>svg]:size-3.5"
+              >
+                Workflow
+              </AccordionTrigger>
+              <AccordionContent className="pb-0">
+                <OutcomeBriefCard streaming={false} viewModel={workflowViewModel} />
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -140,9 +158,9 @@ function ReviewerRow({
   return (
     <article className="border border-[var(--ed-accent-bg)] bg-[var(--ed-accent-bg)] px-4 py-3">
       <div className="flex items-start gap-3">
-        <Avatar className="size-10 shrink-0">
+        <Avatar className="size-10 shrink-0 shadow-[0_0_0_2px_#ffffff,0_4px_14px_rgba(45,90,135,0.35)] ring-2 ring-white">
           {userImage ? <AvatarImage alt={displayName} src={userImage} /> : null}
-          <AvatarFallback className="bg-white text-[11px] font-semibold text-[var(--tag-blue-text)]">
+          <AvatarFallback className="bg-[var(--tag-blue-bg)] text-[11px] font-semibold text-[var(--tag-blue-text)]">
             {userName?.trim() ? identityInitials(userName) : <UserRound className="size-4" />}
           </AvatarFallback>
         </Avatar>

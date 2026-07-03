@@ -18,3 +18,14 @@ test("resolveCanonicalTriggerSlug accepts eventType hints through static map", a
   assert.equal(staticSlug, "GMAIL_NEW_GMAIL_MESSAGE");
   assert.equal(isComposioTriggerSlugFormat(staticSlug!), true);
 });
+
+test("trigger catalogue normalization preserves provider configuration schema", async () => {
+  const { normalizeComposioTriggerTypeRows } = await import(
+    "../../../../src/integrations/composio/triggers.js"
+  );
+  assert.deepEqual(normalizeComposioTriggerTypeRows({ items: [{
+    slug: "GMAIL_NEW_GMAIL_MESSAGE",
+    name: "New Gmail message",
+    config: { properties: { labelIds: { type: "array" } } },
+  }] })[0]?.config, { properties: { labelIds: { type: "array" } } });
+});

@@ -20,6 +20,21 @@ export const intentQuestionSchema = z.object({
   options: z.array(intentQuestionOptionSchema).min(2).max(4),
 });
 
+const intentQuestionsSchema = z.array(intentQuestionSchema).min(1).max(4).superRefine((questions, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, question] of questions.entries()) {
+    if (seen.has(question.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Intent question IDs must be unique",
+        path: [index, "id"],
+      });
+      continue;
+    }
+    seen.add(question.id);
+  }
+});
+
 export const intentDecisionSchema = z.object({
   questionId: z.string().min(1),
   question: z.string().min(1),
@@ -35,7 +50,7 @@ export const intentAnalysisSchema = z.object({
   outcome: z.string().min(1),
   trigger: z.string().min(1),
   executionOrder: z.array(intentExecutionStepSchema).default([]),
-  question: intentQuestionSchema.optional(),
+  questions: intentQuestionsSchema,
   approval: intentApprovalSchema.optional(),
   decisions: z.array(intentDecisionSchema).default([]),
 });
@@ -54,16 +69,3 @@ export type IntentApproval = z.infer<typeof intentApprovalSchema>;
 export type IntentExecutionStep = z.infer<typeof intentExecutionStepSchema>;
 export type IntentAnalysis = z.infer<typeof intentAnalysisSchema>;
 export type IntentDiscoveryState = z.infer<typeof intentDiscoveryStateSchema>;
-
-export function unresolvedIntentQuestion(
-  analysis: IntentAnalysis,
-  state?: IntentDiscoveryState,
-): IntentQuestion | undefined {
-  if (!analysis.question) return undefined;
-  const resolvedIds = new Set([
-    ...(state?.askedQuestionIds ?? []),
-    ...(state?.decisions ?? []).map((d) => d.questionId),
-    ...analysis.decisions.map((d) => d.questionId),
-  ]);
-  return resolvedIds.has(analysis.question.id) ? undefined : analysis.question;
-}

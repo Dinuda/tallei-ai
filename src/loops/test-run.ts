@@ -149,7 +149,6 @@ async function persistTestRun(input: {
     workspaceId: input.workspaceId,
     compiledPlanId: input.compiledPlanId,
     triggerKind: "test",
-    skipChatThread: true,
     resultJson: {
       testRun: true,
       scenario: input.scenario,

@@ -23,35 +23,10 @@ export const triggerSchema = z.discriminatedUnion("kind", [
         "composioSlug must be an uppercase Composio trigger slug (e.g. GMAIL_NEW_GMAIL_MESSAGE), not the connector name",
       ),
     eventType: z.string().optional(),
+    config: z.record(z.string(), z.unknown()).default({}),
   }),
 ]);
 export type TriggerConfig = z.infer<typeof triggerSchema>;
-
-/** Legacy DB rows may omit composioSlug or store the slug in eventType. */
-export function hydrateStoredTrigger(trigger: unknown): TriggerConfig | unknown {
-  if (!trigger || typeof trigger !== "object" || Array.isArray(trigger)) return trigger;
-  const row = trigger as Record<string, unknown>;
-  if (row.kind !== "event") return trigger;
-
-  const composioSlug = String(row.composioSlug ?? "").trim();
-  const eventType = String(row.eventType ?? "").trim();
-  if (composioSlug) {
-    return triggerSchema.parse({
-      kind: "event",
-      source: row.source,
-      composioSlug,
-      ...(eventType ? { eventType } : {}),
-    });
-  }
-
-  const fromEventType = /^[A-Z][A-Z0-9_]+$/.test(eventType) ? eventType : "";
-  return triggerSchema.parse({
-    kind: "event",
-    source: row.source,
-    composioSlug: fromEventType,
-    ...(eventType ? { eventType } : {}),
-  });
-}
 
 export const toolBindingSchema = z.object({
   capability: z.string().min(1),
@@ -363,7 +338,6 @@ export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopS
       status: "pending",
       decisions: [],
       assumptions: [],
-      askedQuestionIds: [],
     },
     agent: {
       instructions: "Achieve the stated outcome using only the bound tools.",
@@ -385,59 +359,5 @@ export function createEmptyLoopSpec(workspaceId: string, partial?: Partial<LoopS
       maxRunDurationMinutes: 60,
     },
     ...partial,
-  });
-}
-
-export function parseStoredLoopSpec(raw: unknown): LoopSpec {
-  const base =
-    raw && typeof raw === "object" && !Array.isArray(raw)
-      ? { ...(raw as Record<string, unknown>) }
-      : {};
-  return loopSpecSchema.parse({
-    ...base,
-    taskBlueprint: hydrateStoredTaskBlueprint(base.taskBlueprint, base.bindings),
-    trigger: hydrateStoredTrigger(base.trigger),
-  });
-}
-
-function hydrateStoredTaskBlueprint(taskBlueprint: unknown, bindings: unknown): unknown {
-  if (!taskBlueprint || typeof taskBlueprint !== "object" || Array.isArray(taskBlueprint)) return taskBlueprint;
-  const row = taskBlueprint as Record<string, unknown>;
-  if (!Array.isArray(row.outcomes)) return taskBlueprint;
-
-  return {
-    ...row,
-    outcomes: row.outcomes.map((outcome) => {
-      if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) return outcome;
-      const normalized = { ...(outcome as Record<string, unknown>) };
-      if (typeof normalized.selectedConnector === "string" && normalized.selectedConnector.trim()) {
-        normalized.status = "chosen";
-      } else if (normalized.role !== "transform" && normalized.status === "chosen") {
-        const matchingConnectors = Array.isArray(bindings)
-          ? [...new Set(bindings.flatMap((binding) => {
-              if (!binding || typeof binding !== "object" || Array.isArray(binding)) return [];
-              const candidate = binding as Record<string, unknown>;
-              if (candidate.role !== normalized.role || typeof candidate.connector !== "string") return [];
-              return [candidate.connector.trim()].filter(Boolean);
-            }))]
-          : [];
-        if (matchingConnectors.length === 1) normalized.selectedConnector = matchingConnectors[0];
-        else normalized.status = "pending";
-      }
-      delete normalized.selectedCapability;
-      delete normalized.candidates;
-      return normalized;
-    }),
-  };
-}
-
-export function parseStoredCompiledPlan(raw: unknown): CompiledPlan {
-  const base =
-    raw && typeof raw === "object" && !Array.isArray(raw)
-      ? { ...(raw as Record<string, unknown>) }
-      : {};
-  return compiledPlanSchema.parse({
-    ...base,
-    trigger: hydrateStoredTrigger(base.trigger),
   });
 }

@@ -1,4 +1,5 @@
 import { getConnectorProvider } from "../integrations/connectors/index.js";
+import type { AuthContext } from "../domain/auth/index.js";
 import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/composio/auth.js";
 import {
   capabilityForAction,
@@ -11,6 +12,146 @@ import {
 export const MIN_CAPABILITY_SCORE = 2;
 /** Top candidates within this score gap are treated as ambiguous (user picks outcome-framed option). */
 export const BINDING_AMBIGUITY_SCORE_GAP = 1;
+
+export type ConfigurableField = {
+  key: string;
+  label: string;
+  description: string;
+  type: "string" | "array" | "boolean" | "number";
+  options: Array<{ label: string; value: string | number | boolean }>;
+};
+
+function schemaRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function fieldLabel(key: string, schema: Record<string, unknown>): string {
+  const title = typeof schema.title === "string" ? schema.title.trim() : "";
+  if (title) return title;
+  return key.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+/** Return only optional fields that materially scope which records a trigger observes. */
+export function extractConfigurableFields(schema: Record<string, unknown>): ConfigurableField[] {
+  const properties = schemaRecord(schema.properties) ?? schema;
+  const required = new Set(Array.isArray(schema.required)
+    ? schema.required.filter((value): value is string => typeof value === "string")
+    : []);
+  const scopePattern = /(label|folder|filter|query|channel|category|mailbox|scope|status|project|list|board|calendar)/i;
+  return Object.entries(properties).flatMap(([key, raw]) => {
+    if (required.has(key)) return [];
+    const field = schemaRecord(raw);
+    if (!field) return [];
+    const description = typeof field.description === "string" ? field.description.trim() : "";
+    const title = typeof field.title === "string" ? field.title.trim() : "";
+    const type = field.type === "integer" ? "number" : field.type;
+    const enumValues = Array.isArray(field.enum)
+      ? field.enum
+      : Array.isArray(schemaRecord(field.items)?.enum) ? schemaRecord(field.items)!.enum as unknown[] : [];
+    if (!scopePattern.test(`${key} ${title} ${description}`)) return [];
+    if (!["string", "array", "boolean", "number"].includes(String(type))) return [];
+    const options = enumValues
+      .filter((value): value is string | number | boolean => ["string", "number", "boolean"].includes(typeof value))
+      .map((value) => ({ label: String(value), value }));
+    return [{
+      key,
+      label: fieldLabel(key, field),
+      description,
+      type: type as ConfigurableField["type"],
+      options,
+    }];
+  }).sort((left, right) => {
+    const score = (field: ConfigurableField) =>
+      (/label|folder|mailbox|channel/i.test(field.key) ? 4 : 0)
+      + (field.options.length > 0 ? 2 : 0)
+      + (field.description ? 1 : 0);
+    return score(right) - score(left);
+  }).slice(0, 1);
+}
+
+export function validateConfigAgainstSchema(
+  schema: Record<string, unknown>,
+  config: Record<string, unknown>,
+): { ok: true } | { ok: false; error: string } {
+  const properties = schemaRecord(schema.properties) ?? {};
+  for (const [key, value] of Object.entries(config)) {
+    const field = schemaRecord(properties[key]);
+    if (!field) return { ok: false, error: `Unknown trigger configuration field ${key}` };
+    const expected = field.type;
+    const valid = expected === "array" ? Array.isArray(value)
+      : expected === "integer" || expected === "number" ? typeof value === "number"
+        : expected === "boolean" ? typeof value === "boolean"
+          : expected === "string" ? typeof value === "string" : true;
+    if (!valid) return { ok: false, error: `Invalid value for trigger configuration field ${key}` };
+    const allowed = Array.isArray(field.enum) ? field.enum : null;
+    if (allowed && !allowed.includes(value)) return { ok: false, error: `Unsupported value for trigger configuration field ${key}` };
+  }
+  return { ok: true };
+}
+
+function findNamedOptions(value: unknown): Array<{ label: string; value: string }> {
+  if (Array.isArray(value)) {
+    const options = value.flatMap((item) => {
+      const row = schemaRecord(item);
+      if (!row) return [];
+      const id = String(row.id ?? row.value ?? "").trim();
+      const label = String(row.name ?? row.label ?? "").trim();
+      return id && label ? [{ label, value: id }] : [];
+    });
+    if (options.length > 0) return options;
+    return value.flatMap(findNamedOptions);
+  }
+  const row = schemaRecord(value);
+  if (!row) return [];
+  for (const child of Object.values(row)) {
+    const options = findNamedOptions(child);
+    if (options.length > 0) return options;
+  }
+  return [];
+}
+
+/** Resolve opaque label identifiers through a safe catalogue read so users see names, not provider IDs. */
+export async function resolveConfigurableFieldOptions(
+  auth: AuthContext,
+  toolkit: string,
+  fields: ConfigurableField[],
+): Promise<ConfigurableField[]> {
+  if (!fields.some((field) => /label/i.test(field.key) && field.options.length === 0)) return fields;
+  try {
+    const provider = getConnectorProvider();
+    const [actions, connection] = await Promise.all([
+      provider.listActions(toolkit),
+      provider.getConnection(auth, toolkit),
+    ]);
+    if (!connection.connectedAccountId) return fields;
+    const listLabels = actions.find((action) =>
+      /(?:LIST|GET).*LABELS|LABELS.*(?:LIST|GET)/i.test(action.actionSlug)
+      && /list|get|fetch/i.test(`${action.name} ${action.description}`));
+    if (!listLabels) return fields;
+    const output = await provider.execute({
+      auth,
+      toolkit,
+      actionSlug: listLabels.actionSlug,
+      connectedAccountId: connection.connectedAccountId,
+      args: {},
+      ...(listLabels.toolkitVersion ? { toolkitVersion: listLabels.toolkitVersion } : {}),
+    });
+    const options = findNamedOptions(output).filter((option, index, all) =>
+      all.findIndex((candidate) => candidate.value === option.value) === index);
+    if (options.length === 0) return fields;
+    return fields.map((field) => /label/i.test(field.key) && field.options.length === 0
+      ? { ...field, options }
+      : field);
+  } catch (error) {
+    console.warn("[loops/binding-discovery] failed to resolve trigger configuration choices", {
+      toolkit,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return fields;
+  }
+}
 
 export type BindingCandidate = {
   /** Same as actionSlug — kept for spec/API compatibility. */

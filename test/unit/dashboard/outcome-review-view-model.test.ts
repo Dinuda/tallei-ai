@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { buildOutcomeReviewViewModel } = await import(
+const { buildOutcomeReviewViewModel, buildSpecialistWorkflowViewModel } = await import(
   "../../../dashboard/src/components/conductor/outcome-review-view-model.ts"
 );
 
@@ -121,4 +121,24 @@ test("legacy summary is used only when current spec is unavailable", () => {
   };
   assert.equal(buildOutcomeReviewViewModel(null, legacy).title, "Legacy plan");
   assert.notEqual(buildOutcomeReviewViewModel(baseSpec(), legacy).title, "Legacy plan");
+});
+
+test("buildSpecialistWorkflowViewModel maps only the specialist steps to route stages", () => {
+  const review = buildSpecialistWorkflowViewModel({
+    specialistName: "Tatum",
+    roleTitle: "Ticket Analyst & Drafter",
+    ownershipSummary: "Reads tickets, classifies priority, and drafts replies.",
+    steps: [
+      { role: "source", description: "Read the ticket details", connector: "gmail" },
+      { role: "transform", description: "Classify the ticket priority" },
+      { role: "destination", description: "Draft a personalized reply", connector: "gmail" },
+    ],
+  });
+
+  assert.equal(review.title, "Ticket Analyst & Drafter");
+  assert.equal(review.stages.length, 3);
+  assert.equal(review.stages[0]?.label, "Reads from");
+  assert.equal(review.stages[0]?.icon, "gmail");
+  assert.equal(review.stages[1]?.identity, "Tallei");
+  assert.equal(review.stages[2]?.kind, "result");
 });

@@ -10,6 +10,7 @@ import type { OutcomeRole, TaskBlueprint } from "./spec.js";
 
 export const CONNECTED_TOOLKIT_BOOST = 4;
 export const TOP_CONNECTOR_RECOMMENDATIONS = 5;
+export const CONNECTOR_AUTO_RESOLVE_SCORE_GAP = 2;
 
 export type ConnectorCandidate = {
   connector: string;
@@ -44,6 +45,14 @@ export type BlueprintConnectorDiscoveryResult = {
     askOptions: ConnectorAskOption[];
     recommendedOptionIds: string[];
     defaultQuestion: string;
+  }>;
+  autoResolved: Array<{
+    outcomeId: string;
+    role: OutcomeRole;
+    connector: string;
+    sourceOutcomeId: string;
+    sourceRole: OutcomeRole;
+    reason: string;
   }>;
   pickerKind: "app";
 };
@@ -230,11 +239,13 @@ export async function discoverConnectorsForBlueprint(
   input: {
     outcomes: Array<{ id: string; role: OutcomeRole; description: string }>;
     previousConnectors?: string[];
+    previousSelections?: Array<{ outcomeId: string; role: OutcomeRole; connector: string }>;
   },
   dependencyOverrides?: Partial<ConnectorDiscoveryDependencies>,
 ): Promise<BlueprintConnectorDiscoveryResult> {
-  const pending = input.outcomes.filter((outcome) => outcome.role !== "transform");
-  if (pending.length === 0) return { groups: [], pickerKind: "app" };
+  const alreadySelected = new Set((input.previousSelections ?? []).map((selection) => selection.outcomeId));
+  const pending = input.outcomes.filter((outcome) => outcome.role !== "transform" && !alreadySelected.has(outcome.id));
+  if (pending.length === 0) return { groups: [], autoResolved: [], pickerKind: "app" };
 
   const dependencies = resolveDiscoveryDependencies(dependencyOverrides);
   const catalogueStartedAt = dependencies.now();
@@ -269,10 +280,30 @@ export async function discoverConnectorsForBlueprint(
     outcomeCount: pending.length,
   });
 
-  return {
-    groups: discoveries.map((discovery, index) => {
+  const autoResolved: BlueprintConnectorDiscoveryResult["autoResolved"] = [];
+  const groups = discoveries.flatMap((discovery, index) => {
       const outcome = pending[index]!;
-      const reusable = (input.previousConnectors ?? []).find((connector) =>
+      const priorSelection = (input.previousSelections ?? [])
+        .filter((selection) => input.outcomes.findIndex((row) => row.id === selection.outcomeId)
+          < input.outcomes.findIndex((row) => row.id === outcome.id))
+        .reverse()
+        .find((selection) => discovery.candidates[0]?.connector.toLowerCase() === selection.connector.toLowerCase());
+      const top = discovery.candidates[0];
+      const runnerUp = discovery.candidates[1];
+      const clearLead = Boolean(top && top.score > 0 && (!runnerUp || top.score - runnerUp.score >= CONNECTOR_AUTO_RESOLVE_SCORE_GAP));
+      if (priorSelection && top && clearLead) {
+        autoResolved.push({
+          outcomeId: outcome.id,
+          role: outcome.role,
+          connector: top.connector,
+          sourceOutcomeId: priorSelection.outcomeId,
+          sourceRole: priorSelection.role,
+          reason: `same app as ${priorSelection.role}`,
+        });
+        return [];
+      }
+      const reusable = (input.previousSelections?.map((selection) => selection.connector)
+        ?? input.previousConnectors ?? []).find((connector) =>
         discovery.candidates.some((candidate) =>
           candidate.connector.toLowerCase() === connector.toLowerCase() && candidate.score > 0,
         ),
@@ -284,7 +315,7 @@ export async function discoverConnectorsForBlueprint(
         ...(reusableOptionId ? [reusableOptionId] : []),
         ...discovery.recommendedOptionIds,
       ].filter((id, position, all) => all.indexOf(id) === position).slice(0, TOP_CONNECTOR_RECOMMENDATIONS);
-      return {
+      return [{
         outcomeId: outcome.id,
         role: outcome.role,
         outcomeDescription: outcome.description,
@@ -295,8 +326,11 @@ export async function discoverConnectorsForBlueprint(
         })),
         recommendedOptionIds,
         defaultQuestion: `Which app should handle ${outcome.description}?`,
-      };
-    }),
+      }];
+    });
+  return {
+    groups,
+    autoResolved,
     pickerKind: "app",
   };
 }

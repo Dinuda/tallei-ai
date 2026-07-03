@@ -1,64 +1,106 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  intentAnalysisSchema,
-  unresolvedIntentQuestion,
-} from "../../../src/loops/intent-discovery.js";
+import { intentAnalysisSchema } from "../../../src/loops/intent-discovery.js";
 
-test("intent analysis schema accepts canonical approval payloads", () => {
+test("intent analysis schema requires at least one queued question", () => {
+  const missingQuestions = intentAnalysisSchema.safeParse({
+    outcome: "Send personalized replies to incoming support emails",
+    trigger: "When a new support email arrives",
+  });
+  const emptyQuestions = intentAnalysisSchema.safeParse({
+    outcome: "Send personalized replies to incoming support emails",
+    trigger: "When a new support email arrives",
+    questions: [],
+  });
+
+  assert.equal(missingQuestions.success, false);
+  assert.equal(emptyQuestions.success, false);
+});
+
+test("intent analysis schema accepts between one and four queued questions", () => {
   const analysis = intentAnalysisSchema.parse({
     outcome: "Send personalized replies to incoming support emails",
     trigger: "When a new support email arrives",
-    executionOrder: [
-      { role: "trigger", description: "When a new support email arrives" },
-      { role: "transform", description: "Classify and draft personalized replies" },
-      { role: "destination", description: "Send replies after review" },
+    questions: [
+      {
+        id: "channel",
+        question: "Which email inbox should we watch?",
+        options: [
+          { id: "primary", label: "Primary inbox", value: "primary" },
+          { id: "shared", label: "Shared inbox", value: "shared" },
+        ],
+      },
+      {
+        id: "review",
+        question: "Should drafts be reviewed before sending?",
+        options: [
+          { id: "review", label: "Review first", value: "review_first" },
+          { id: "auto", label: "Send automatically", value: "auto" },
+        ],
+      },
+      {
+        id: "tone",
+        question: "What tone should the replies use?",
+        options: [
+          { id: "friendly", label: "Friendly", value: "friendly" },
+          { id: "formal", label: "Formal", value: "formal" },
+        ],
+      },
+      {
+        id: "follow-up",
+        question: "Should we add a follow-up reminder?",
+        options: [
+          { id: "yes", label: "Yes", value: "yes" },
+          { id: "no", label: "No", value: "no" },
+        ],
+      },
     ],
-    approval: {
-      mode: "mixed",
-      sensitiveRoles: ["destination"],
-      sensitiveCapabilities: [],
-    },
-    decisions: [{
-      questionId: "approval-mode",
-      question: "Should replies send automatically or wait for your review?",
-      answer: "Review first",
-    }],
   });
 
-  assert.equal(analysis.approval?.mode, "mixed");
-  assert.deepEqual(analysis.approval?.sensitiveRoles, ["destination"]);
-  assert.equal(analysis.executionOrder.length, 3);
+  assert.equal(analysis.questions.length, 4);
 });
 
-test("intent analysis schema defaults executionOrder to empty array", () => {
-  const analysis = intentAnalysisSchema.parse({
+test("intent analysis schema rejects five queued questions", () => {
+  const parsed = intentAnalysisSchema.safeParse({
     outcome: "Send personalized replies to incoming support emails",
     trigger: "When a new support email arrives",
-  });
-  assert.deepEqual(analysis.executionOrder, []);
-});
-
-test("unresolvedIntentQuestion suppresses already asked or answered questions", () => {
-  const analysis = intentAnalysisSchema.parse({
-    outcome: "Send personalized replies to incoming support emails",
-    trigger: "When a new support email arrives",
-    question: {
-      id: "approval-mode",
-      question: "Should replies send automatically or wait for your review?",
+    questions: Array.from({ length: 5 }, (_, index) => ({
+      id: `q-${index + 1}`,
+      question: `Question ${index + 1}?`,
       options: [
-        { id: "review", label: "Review first", value: "review_first" },
-        { id: "auto", label: "Send automatically", value: "auto" },
+        { id: "yes", label: "Yes", value: "yes" },
+        { id: "no", label: "No", value: "no" },
       ],
-    },
-    decisions: [],
+    })),
   });
 
-  assert.equal(unresolvedIntentQuestion(analysis)?.id, "approval-mode");
-  assert.equal(unresolvedIntentQuestion(analysis, {
-    status: "needs_input",
-    decisions: [],
-    askedQuestionIds: ["approval-mode"],
-  }), undefined);
+  assert.equal(parsed.success, false);
+});
+
+test("intent analysis schema rejects duplicate question IDs", () => {
+  const parsed = intentAnalysisSchema.safeParse({
+    outcome: "Send personalized replies to incoming support emails",
+    trigger: "When a new support email arrives",
+    questions: [
+      {
+        id: "review",
+        question: "Should drafts be reviewed before sending?",
+        options: [
+          { id: "review", label: "Review first", value: "review_first" },
+          { id: "auto", label: "Send automatically", value: "auto" },
+        ],
+      },
+      {
+        id: "review",
+        question: "Should we ask for a second approval?",
+        options: [
+          { id: "yes", label: "Yes", value: "yes" },
+          { id: "no", label: "No", value: "no" },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(parsed.success, false);
 });

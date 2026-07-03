@@ -10,16 +10,23 @@ import {
   createLoopRun,
   getCompiledPlan,
   getLatestSpec,
-  getLatestSpecRevision,
+  getLatestBuildState,
   getLoop,
   listLoopRuns,
   listLoops,
   moveLoopToWorkspace as moveLoopRow,
-  saveSpecDraft,
+  commitLoopBuildArtifact,
   setLoopStatus,
   updateLoopName,
   updateLoopRun,
 } from "./store.js";
+import {
+  assembleLoopSpec,
+  BuildStateError,
+  BUILD_ERROR_CODES,
+  compileArtifactSchema,
+  testArtifactSchema,
+} from "./build-state.js";
 import { resolveWorkspaceId } from "../services/workspace/index.js";
 import { getConnectorProvider } from "../integrations/connectors/index.js";
 
@@ -45,21 +52,68 @@ export async function createLoopInWorkspace(
 }
 
 export async function compileLoop(auth: AuthContext, loopId: string) {
-  const spec = await getLatestSpec(auth, loopId);
-  if (!spec) throw new Error("Loop spec not found");
+  const state = await getLatestBuildState(auth, loopId);
+  if (!state) throw new Error("Loop build state not found");
+  if (state.buildPhase !== "compile" || !state.artifacts.review) {
+    throw new BuildStateError(BUILD_ERROR_CODES.INVALID_TRANSITION, `Cannot compile while phase is ${state.buildPhase}`);
+  }
+  const spec = assembleLoopSpec(state);
   const ctx = await resolveLoopAuthWorkspace(auth, spec.workspaceId);
-  return compileLoopSpec(ctx, loopId, spec);
+  const result = await compileLoopSpec(ctx, loopId, spec);
+  if (!result.plan || result.errors.length > 0) return result;
+  await commitLoopBuildArtifact({
+    auth: ctx, loopId, phase: "compile", expectedParentHash: state.artifacts.review.artifactHash,
+    artifact: {
+      reviewHash: state.artifacts.review.artifactHash,
+      compiledPlanId: result.plan.id,
+      compiledPlanHash: result.plan.contentHash,
+    },
+    source: "compile-plan",
+  });
+  return result;
 }
 
-export async function activateLoop(auth: AuthContext, loopId: string, compiledPlanId: string) {
+export async function recordLoopTestResult(auth: AuthContext, loopId: string, input: {
+  compiledPlanId: string; runId: string; passed: boolean;
+}) {
+  const state = await getLatestBuildState(auth, loopId);
+  if (!state?.artifacts.compile || state.buildPhase !== "test") {
+    throw new BuildStateError(BUILD_ERROR_CODES.INVALID_TRANSITION, `Cannot record test while phase is ${state?.buildPhase ?? "missing"}`);
+  }
+  const compiled = compileArtifactSchema.parse(state.artifacts.compile.artifact);
+  if (compiled.compiledPlanId !== input.compiledPlanId) {
+    throw new BuildStateError(BUILD_ERROR_CODES.PLAN_MISMATCH, "Test result belongs to a different compiled plan");
+  }
+  if (!input.passed) {
+    throw new BuildStateError(BUILD_ERROR_CODES.PASSING_TEST_REQUIRED, "Only a passing test can advance the build");
+  }
+  return commitLoopBuildArtifact({
+    auth, loopId, phase: "test", expectedParentHash: state.artifacts.compile.artifactHash,
+    artifact: {
+      compileHash: state.artifacts.compile.artifactHash,
+      compiledPlanId: input.compiledPlanId,
+      runId: input.runId,
+      passed: true,
+    }, source: "test-result",
+  });
+}
+
+export async function activateLoop(auth: AuthContext, loopId: string, compiledPlanId: string, confirmedByUser = false) {
+  const state = await getLatestBuildState(auth, loopId);
+  if (!state?.artifacts.test || state.buildPhase !== "activation") {
+    throw new BuildStateError(BUILD_ERROR_CODES.INVALID_TRANSITION, `Cannot activate while phase is ${state?.buildPhase ?? "missing"}`);
+  }
+  if (!confirmedByUser) {
+    throw new BuildStateError(BUILD_ERROR_CODES.USER_CONFIRMATION_REQUIRED, "Explicit activation confirmation is required");
+  }
+  const test = testArtifactSchema.parse(state.artifacts.test.artifact);
+  if (test.compiledPlanId !== compiledPlanId) {
+    throw new BuildStateError(BUILD_ERROR_CODES.PLAN_MISMATCH, "Activation plan does not match the passing test");
+  }
   const loop = await getLoop(auth, loopId);
   if (!loop) throw new Error("Loop not found");
   const plan = await getCompiledPlan(compiledPlanId);
   if (!plan || plan.loopId !== loopId) throw new Error("Compiled plan not found");
-  const latestSpecRevision = await getLatestSpecRevision(loopId);
-  if (plan.specRevision !== latestSpecRevision) {
-    throw new Error("Compiled plan is stale; confirm and compile the current outcome brief");
-  }
   const ctx = await resolveLoopAuthWorkspace(auth, loop.workspaceId);
 
   try {
@@ -71,6 +125,7 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
         toolkit: plan.trigger.source,
         triggerSlug: plan.trigger.composioSlug,
         eventType: plan.trigger.eventType,
+        config: plan.trigger.config,
       });
     }
 
@@ -94,6 +149,17 @@ export async function activateLoop(auth: AuthContext, loopId: string, compiledPl
       userId: ctx.userId,
     });
   }
+
+  await setLoopStatus(auth, loopId, "active");
+  await commitLoopBuildArtifact({
+    auth: ctx, loopId, phase: "activation", expectedParentHash: state.artifacts.test.artifactHash,
+    artifact: {
+      testHash: state.artifacts.test.artifactHash,
+      compiledPlanId,
+      confirmedByUser: true,
+      activatedAt: new Date().toISOString(),
+    }, source: "activation",
+  });
 
   const { getLoopEventTriggerStatus } = await import("./store.js");
   const eventTrigger = plan.trigger.kind === "event"
@@ -133,6 +199,7 @@ export async function resumeLoop(auth: AuthContext, loopId: string) {
       toolkit: plan.trigger.source,
       triggerSlug: plan.trigger.composioSlug,
       eventType: plan.trigger.eventType,
+      config: plan.trigger.config,
     });
   }
 
@@ -245,7 +312,6 @@ export {
   getLatestSpec,
   listLoops,
   listLoopRuns,
-  saveSpecDraft,
   setLoopStatus,
   getMissingSlots,
   isReadyToCompile,

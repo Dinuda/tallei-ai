@@ -43,15 +43,6 @@ test("verifyComposioWebhookSignatureDetailed reports invalid signature", () => {
   assert.equal(result.reason, "invalid_signature");
 });
 
-test("verifyComposioWebhookSignature accepts legacy HMAC signature", () => {
-  const rawBody = Buffer.from(JSON.stringify({ type: "trigger" }), "utf8");
-  const legacy = createHmac("sha256", "test-secret").update(rawBody).digest("hex");
-  assert.equal(
-    verifyComposioWebhookSignature(rawBody, { legacySignature: legacy }),
-    true,
-  );
-});
-
 test("normalizeComposioWebhookPayload maps Composio V3 trigger envelope", () => {
   const normalized = normalizeComposioWebhookPayload({
     id: "msg_abc123",
@@ -71,22 +62,5 @@ test("normalizeComposioWebhookPayload maps Composio V3 trigger envelope", () => 
     assert.equal(normalized.triggerSlug, "GMAIL_NEW_GMAIL_MESSAGE");
     assert.equal(normalized.entityId, "tallei:tenant-1:user-1:ws-9");
     assert.equal(normalized.externalEventId, "msg_abc123");
-  }
-});
-
-test("normalizeComposioWebhookPayload maps legacy trigger envelope", () => {
-  const normalized = normalizeComposioWebhookPayload({
-    type: "trigger",
-    data: {
-      entityId: "tallei:tenant-1:user-1:ws-9",
-      metadata: { trigger_slug: "GMAIL_NEW_GMAIL_MESSAGE" },
-      id: "evt-1",
-    },
-  });
-  assert.equal(normalized.kind, "trigger_event");
-  if (normalized.kind === "trigger_event") {
-    assert.equal(normalized.triggerSlug, "GMAIL_NEW_GMAIL_MESSAGE");
-    assert.equal(normalized.entityId, "tallei:tenant-1:user-1:ws-9");
-    assert.equal(normalized.externalEventId, "evt-1");
   }
 });

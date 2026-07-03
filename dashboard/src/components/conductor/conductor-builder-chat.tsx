@@ -26,7 +26,7 @@ function renderTranscriptPart(
     messageId: string;
     lastMessageId: string | undefined;
     isStreamingPart: boolean;
-    pendingQuestionCallId: string | null;
+    pendingInteractivePromptCallIds: Set<string>;
     pendingReplyOptionsCallId: string | null;
     spec: Record<string, unknown> | null;
   },
@@ -53,7 +53,7 @@ function renderTranscriptPart(
       <ConductorToolPart
         key={key}
         part={part as DynamicToolUIPart}
-        pendingQuestionCallId={options.pendingQuestionCallId}
+        pendingInteractivePromptCallIds={options.pendingInteractivePromptCallIds}
         pendingReplyOptionsCallId={options.pendingReplyOptionsCallId}
         spec={options.spec}
       />
@@ -66,22 +66,23 @@ function AssistantTranscriptTurn({
   message,
   chatStatus,
   lastMessageId,
-  pendingQuestionCallId,
+  pendingInteractivePromptCallIds,
   pendingReplyOptionsCallId,
   spec,
 }: {
   message: UIMessage;
   chatStatus: ChatStatus;
   lastMessageId: string | undefined;
-  pendingQuestionCallId: string | null;
+  pendingInteractivePromptCallIds: Set<string>;
   pendingReplyOptionsCallId: string | null;
   spec: Record<string, unknown> | null;
 }) {
   const segments = buildTranscriptSegments(message.parts ?? []);
-  const lastPart = segments.at(-1)?.type === "patch-beat"
-    ? segments.at(-1)?.parts.at(-1)
-    : segments.at(-1)?.type === "part"
-      ? segments.at(-1)?.part
+  const lastSegment = segments.at(-1);
+  const lastPart = lastSegment?.type === "patch-beat"
+    ? lastSegment.parts.at(-1)
+    : lastSegment?.type === "part"
+      ? lastSegment.part
       : undefined;
 
   const renderOptions = {
@@ -89,7 +90,7 @@ function AssistantTranscriptTurn({
     messageId: message.id,
     lastMessageId,
     isStreamingPart: false,
-    pendingQuestionCallId,
+    pendingInteractivePromptCallIds,
     pendingReplyOptionsCallId,
     spec,
   };
@@ -136,7 +137,7 @@ function AssistantTranscriptTurn({
 export function ConductorBuilderChat({
   messages,
   chatStatus,
-  pendingQuestionCallId,
+  pendingInteractivePromptCallIds,
   pendingReplyOptionsCallId,
   spec,
   showThinking,
@@ -146,7 +147,7 @@ export function ConductorBuilderChat({
 }: {
   messages: UIMessage[];
   chatStatus: ChatStatus;
-  pendingQuestionCallId: string | null;
+  pendingInteractivePromptCallIds: Set<string>;
   pendingReplyOptionsCallId: string | null;
   spec: Record<string, unknown> | null;
   showThinking: boolean;
@@ -173,7 +174,7 @@ export function ConductorBuilderChat({
                   chatStatus={chatStatus}
                   lastMessageId={lastMessageId}
                   message={message}
-                  pendingQuestionCallId={pendingQuestionCallId}
+                  pendingInteractivePromptCallIds={pendingInteractivePromptCallIds}
                   pendingReplyOptionsCallId={pendingReplyOptionsCallId}
                   spec={spec}
                 />

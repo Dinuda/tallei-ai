@@ -113,6 +113,65 @@ function legacyViewModel(summary: LegacyOutcomeReviewSummary): OutcomeReviewView
   };
 }
 
+type SpecialistWorkflowStep = {
+  role: "trigger" | "source" | "transform" | "destination";
+  description: string;
+  connector?: string;
+};
+
+function stageFromSpecialistStep(step: SpecialistWorkflowStep): OutcomeReviewStage {
+  const role = step.role;
+  const label = role === "trigger"
+    ? "Starts when"
+    : role === "source"
+      ? "Reads from"
+      : role === "destination"
+        ? "Delivers through"
+        : "Processes";
+  const connectorSlug = text(step.connector).toLowerCase();
+  const connector = humanize(connectorSlug);
+  const identity = role === "transform"
+    ? "Tallei"
+    : role === "trigger"
+      ? "Trigger"
+      : connector || (role === "destination" ? "Destination" : "Source");
+
+  return {
+    identity,
+    ...(connectorSlug ? { icon: connectorSlug } : {}),
+    label,
+    description: text(step.description) || "Configured stage",
+    kind: role === "trigger"
+      ? "trigger"
+      : role === "source"
+        ? "source"
+        : role === "destination"
+          ? "result"
+          : "action",
+  };
+}
+
+export function buildSpecialistWorkflowViewModel(input: {
+  specialistName: string;
+  roleTitle: string;
+  ownershipSummary: string;
+  steps: SpecialistWorkflowStep[];
+}): OutcomeReviewViewModel {
+  const stages = input.steps.map(stageFromSpecialistStep);
+  const triggerStage = stages.find((stage) => stage.kind === "trigger");
+  const resultStage = stages.find((stage) => stage.kind === "result");
+
+  return {
+    title: input.roleTitle.trim() || `${input.specialistName.trim()} workflow`,
+    reversible: false,
+    runsWhen: triggerStage?.description ?? input.ownershipSummary,
+    does: input.ownershipSummary,
+    stages,
+    approval: "Handled by the team approval policy.",
+    result: resultStage?.description ?? "Completes assigned workflow steps.",
+  };
+}
+
 export function buildOutcomeReviewViewModel(
   spec: Record<string, unknown> | null,
   legacySummary?: LegacyOutcomeReviewSummary,

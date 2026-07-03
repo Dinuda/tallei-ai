@@ -38,7 +38,13 @@ import type {
   PresentAgentTeamOutput,
   PresentReplyOptionsToolPart,
 } from "@/components/conductor/conductor-shared";
-import { resolveOutcomeBriefCardStatus, resolveToolPartName } from "@/components/conductor/conductor-shared";
+import {
+  connectorLogoUrl,
+  resolveAskQuestionDisplayAnswer,
+  resolveConnectorIconSlug,
+  resolveOutcomeBriefCardStatus,
+  resolveToolPartName,
+} from "@/components/conductor/conductor-shared";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
@@ -104,10 +110,15 @@ export function AnsweredAskQuestionCard({
   input: AskQuestionInput;
   output: AskQuestionOutput;
 }) {
+  const isConnectorPick = input.questionId.startsWith("connector-app:");
+  const connectorSlug = isConnectorPick ? resolveConnectorIconSlug(output, input.options) : undefined;
+
   return (
     <BuilderCompletedCard
-      icon={BadgeQuestionMark}
-      subtitle={output.skipped ? "Skipped" : output.answerText}
+      icon={isConnectorPick ? undefined : BadgeQuestionMark}
+      iconAlt={connectorSlug}
+      iconSrc={connectorSlug ? connectorLogoUrl(connectorSlug) : undefined}
+      subtitle={resolveAskQuestionDisplayAnswer(input, output)}
       title={input.question}
       variant="emerald"
     />
@@ -116,12 +127,12 @@ export function AnsweredAskQuestionCard({
 
 export function ConductorToolPart({
   part,
-  pendingQuestionCallId,
+  pendingInteractivePromptCallIds,
   pendingReplyOptionsCallId,
   spec,
 }: {
   part: DynamicToolUIPart & { toolName?: string; input?: unknown; output?: unknown };
-  pendingQuestionCallId: string | null;
+  pendingInteractivePromptCallIds: Set<string>;
   pendingReplyOptionsCallId: string | null;
   spec: Record<string, unknown> | null;
 }) {
@@ -130,7 +141,7 @@ export function ConductorToolPart({
 
   if (toolName === "askQuestion") {
     const toolPart = part as AskQuestionToolPart;
-    if (toolPart.toolCallId === pendingQuestionCallId) return null;
+    if (pendingInteractivePromptCallIds.has(toolPart.toolCallId)) return null;
     if (toolPart.state === "output-available" && toolPart.input && toolPart.output) {
       return (
         <AnsweredAskQuestionCard
@@ -145,12 +156,17 @@ export function ConductorToolPart({
   if (toolName === "pickConnectorApp") {
     const input = part.input as { role?: string; question?: string } | undefined;
     const output = part.output as AskQuestionOutput | undefined;
-    if (part.toolCallId === pendingQuestionCallId) return null;
+    if (pendingInteractivePromptCallIds.has(part.toolCallId)) return null;
     if (part.state === "output-available" && output) {
+      const connectorSlug = resolveConnectorIconSlug(output);
+      const connectorLabel = resolveAskQuestionDisplayAnswer(undefined, output);
+
       return (
         <BuilderCompletedCard
-          icon={BadgeQuestionMark}
-          subtitle={output.skipped ? "Skipped" : output.answerText}
+          icon={connectorSlug ? undefined : BadgeQuestionMark}
+          iconAlt={connectorSlug}
+          iconSrc={connectorSlug ? connectorLogoUrl(connectorSlug) : undefined}
+          subtitle={connectorLabel}
           title={input?.question || `App selected for ${input?.role ?? "workflow"}`}
           variant="emerald"
         />
@@ -226,6 +242,10 @@ export function ConductorToolPart({
         />
       );
     }
+  }
+
+  if (["analyzeIntent", "listWorkspaceConnectors", "listTriggers", "listActions", "discoverBindings"].includes(toolName)) {
+    return null;
   }
 
   const title =
