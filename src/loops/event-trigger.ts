@@ -4,6 +4,7 @@ import {
   resolveTriggerSlugWithCatalog,
   validateComposioTriggerSlug,
 } from "../integrations/composio/triggers.js";
+import { isKnownTriggerSlugForSource, lookupStaticTriggerSlug } from "./trigger-catalog.js";
 import type { LoopSpec, SpecPatch, TriggerConfig } from "./spec.js";
 
 /** Composio trigger type slugs are uppercase identifiers, not toolkit names like `gmail`. */
@@ -105,6 +106,34 @@ export async function validateEventTriggerForCompile(
   const shapeError = validateEventTriggerShape(source, composioSlug);
   if (shapeError) throw new Error(shapeError);
   return validateComposioTriggerSlug(source, composioSlug);
+}
+
+/**
+ * Resolve an event trigger slug from the static catalogue when possible.
+ * Returns null when live Composio trigger validation is required.
+ */
+export function resolveEventTriggerLocallyForCompile(
+  source: string,
+  composioSlug: string,
+  eventType?: string,
+): string | null {
+  const shapeError = validateEventTriggerShape(source, composioSlug);
+  if (shapeError) return null;
+
+  const normalized = composioSlug.trim().toUpperCase();
+  if (isKnownTriggerSlugForSource(source, normalized)) return normalized;
+
+  const fromEventType = eventType ? lookupStaticTriggerSlug(source, eventType) : null;
+  if (fromEventType && isKnownTriggerSlugForSource(source, fromEventType)) {
+    return fromEventType.toUpperCase();
+  }
+
+  const fromSlugHint = lookupStaticTriggerSlug(source, composioSlug);
+  if (fromSlugHint && isKnownTriggerSlugForSource(source, fromSlugHint)) {
+    return fromSlugHint.toUpperCase();
+  }
+
+  return null;
 }
 
 export async function listEventTriggersForToolkit(toolkit: string) {

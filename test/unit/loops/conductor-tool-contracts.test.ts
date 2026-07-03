@@ -16,6 +16,7 @@ import {
   listWorkspaceConnectorsInputSchema,
   pickConnectorAppInputSchema,
   presentReplyOptionsInputSchema,
+  presentAgentTeamInputSchema,
   testRunLoopInputSchema,
 } from "../../../src/loops/conductor-tools.js";
 import { specPatchSchema } from "../../../src/loops/spec.js";
@@ -31,6 +32,7 @@ test("test-only conductor examples satisfy production schemas", () => {
   discoverConnectorsForBlueprintInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.discoverConnectorsForBlueprint);
   pickConnectorAppInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.pickConnectorApp);
   presentReplyOptionsInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.presentReplyOptions);
+  presentAgentTeamInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.presentAgentTeam);
   listTriggersInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.listTriggers);
   listActionsInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.listActions);
   discoverBindingsInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.discoverBindings);

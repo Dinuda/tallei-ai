@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.170",
+    "@dicebear/core": "^9.4.2",
+    "@dicebear/dylan": "^9.4.2",
     "@gsap/react": "^2.1.2",
     "@radix-ui/react-separator": "^1.1.8",
     "@radix-ui/react-slot": "^1.2.4",

@@ -6,6 +6,7 @@ import {
   isComposioTriggerSlugFormat,
   isEventTriggerReadyForCompile,
   isToolkitSlugMasqueradingAsTrigger,
+  resolveEventTriggerLocallyForCompile,
   validateEventTriggerShape,
 } from "../../../src/loops/event-trigger.js";
 
@@ -40,4 +41,12 @@ test("validateEventTriggerShape explains toolkit vs trigger confusion", () => {
 test("isComposioTriggerSlugFormat is a thin guard", () => {
   assert.equal(isComposioTriggerSlugFormat("GMAIL_NEW_GMAIL_MESSAGE"), true);
   assert.equal(isComposioTriggerSlugFormat("gmail"), false);
+});
+
+test("resolveEventTriggerLocallyForCompile accepts known static gmail trigger slugs", () => {
+  assert.equal(
+    resolveEventTriggerLocallyForCompile("gmail", "GMAIL_NEW_GMAIL_MESSAGE", "new_message"),
+    "GMAIL_NEW_GMAIL_MESSAGE",
+  );
+  assert.equal(resolveEventTriggerLocallyForCompile("gmail", "GMAIL_FETCH_EMAILS"), null);
 });

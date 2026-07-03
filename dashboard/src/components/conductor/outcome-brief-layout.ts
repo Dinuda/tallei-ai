@@ -39,7 +39,6 @@ export function routeNodePosition(index: number, total: number): {
   const columns = Math.min(ROUTE_COLUMNS, Math.max(total, 1));
   const row = Math.floor(index / columns);
   const col = index % columns;
-  const isReversedRow = row % 2 === 1;
   const rowStart = row * columns;
   const rowEnd = Math.min(rowStart + columns - 1, total - 1);
   const isFirst = index === 0;
@@ -50,30 +49,16 @@ export function routeNodePosition(index: number, total: number): {
 
   let inputSide: RouteHandleSide | undefined;
   if (!isFirst) {
-    if (isRowStart && row > 0) {
-      inputSide = "top";
-    } else if (isReversedRow) {
-      inputSide = "right";
-    } else {
-      inputSide = "left";
-    }
+    inputSide = isRowStart && row > 0 ? "top" : "left";
   }
 
   let outputSide: RouteHandleSide | undefined;
   if (!isLast) {
-    if (wrapsToNextRow) {
-      outputSide = "bottom";
-    } else if (isReversedRow) {
-      outputSide = "left";
-    } else {
-      outputSide = "right";
-    }
+    outputSide = wrapsToNextRow ? "bottom" : "right";
   }
 
-  const x = isReversedRow ? (columns - 1 - col) * HORIZONTAL_GAP : col * HORIZONTAL_GAP;
-
   return {
-    x,
+    x: col * HORIZONTAL_GAP,
     y: row * VERTICAL_GAP,
     ...(inputSide ? { inputSide } : {}),
     ...(outputSide ? { outputSide } : {}),

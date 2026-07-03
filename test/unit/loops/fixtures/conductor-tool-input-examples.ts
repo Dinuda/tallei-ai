@@ -52,6 +52,14 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
       { id: "change", label: "Change", message: "Make a change." },
     ],
   },
+  presentAgentTeam: {
+    groups: [
+      { outcomeIds: ["trigger"], ownershipSummary: "Starts when a new message arrives" },
+      { outcomeIds: ["transform"], ownershipSummary: "Processes the incoming request" },
+      { outcomeIds: ["result"] },
+    ],
+    reviewerBeforeSpecialistIndex: 1,
+  },
   listTriggers: { toolkit: "example" },
   listActions: { toolkit: "example" },
   discoverBindings: {
@@ -65,7 +73,7 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
     question: "Does this configuration look right?",
     options: [
       { id: "confirm", label: "Looks good", value: "confirm" },
-      { id: "change", label: "Change it", value: "other" },
+      { id: "other", label: "Change it", value: "other" },
     ],
   },
   compileLoop: {},

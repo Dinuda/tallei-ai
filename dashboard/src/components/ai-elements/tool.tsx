@@ -14,7 +14,6 @@ import {
   ChevronDownIcon,
   CircleIcon,
   ClockIcon,
-  WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
@@ -27,8 +26,9 @@ export type ToolProps = ComponentProps<typeof Collapsible>;
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
     data-tool-call=""
+    data-transcript-block=""
     className={cn(
-      "group not-prose mb-4 w-full max-w-full min-w-0 overflow-hidden rounded-lg border border-[#d1d5db] bg-white",
+      "group not-prose w-full max-w-full min-w-0 overflow-hidden border border-[#d1d5db] bg-white",
       className,
     )}
     {...props}
@@ -121,7 +121,6 @@ export const ToolHeader = ({
       {...props}
     >
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <WrenchIcon className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate font-medium text-sm">{title ?? derivedName}</span>
         {getStatusBadge(state)}
       </div>

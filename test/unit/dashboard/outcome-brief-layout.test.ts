@@ -5,11 +5,11 @@ const { routeNodePosition, buildCanvasModel, routeCanvasHeight } = await import(
   "../../../dashboard/src/components/conductor/outcome-brief-layout.ts"
 );
 
-test("routeNodePosition snakes rows so the second row flows right to left", () => {
+test("routeNodePosition aligns each row under the first column", () => {
   assert.deepEqual(routeNodePosition(0, 6), { x: 0, y: 0, outputSide: "right" });
   assert.deepEqual(routeNodePosition(2, 6), { x: 540, y: 0, inputSide: "left", outputSide: "bottom" });
-  assert.deepEqual(routeNodePosition(3, 6), { x: 540, y: 150, inputSide: "top", outputSide: "left" });
-  assert.deepEqual(routeNodePosition(5, 6), { x: 0, y: 150, inputSide: "right" });
+  assert.deepEqual(routeNodePosition(3, 6), { x: 0, y: 150, inputSide: "top", outputSide: "right" });
+  assert.deepEqual(routeNodePosition(5, 6), { x: 540, y: 150, inputSide: "left" });
 });
 
 test("routeNodePosition keeps short routes on one row", () => {
@@ -17,14 +17,14 @@ test("routeNodePosition keeps short routes on one row", () => {
   assert.deepEqual(routeNodePosition(2, 3), { x: 540, y: 0, inputSide: "left" });
 });
 
-test("routeNodePosition alternates direction every row for nine steps", () => {
+test("routeNodePosition keeps columns aligned for nine steps", () => {
   const positions = Array.from({ length: 9 }, (_, index) => routeNodePosition(index, 9));
 
-  assert.deepEqual(positions.map((position) => position.x), [0, 270, 540, 540, 270, 0, 0, 270, 540]);
+  assert.deepEqual(positions.map((position) => position.x), [0, 270, 540, 0, 270, 540, 0, 270, 540]);
   assert.deepEqual(positions.map((position) => position.y), [0, 0, 0, 150, 150, 150, 300, 300, 300]);
   assert.equal(positions[2]?.outputSide, "bottom");
   assert.equal(positions[3]?.inputSide, "top");
-  assert.equal(positions[3]?.outputSide, "left");
+  assert.equal(positions[3]?.outputSide, "right");
   assert.equal(positions[5]?.outputSide, "bottom");
   assert.equal(positions[6]?.inputSide, "top");
   assert.equal(positions[6]?.outputSide, "right");
@@ -49,10 +49,10 @@ test("buildCanvasModel assigns wrapped positions and row-wrap handles", () => {
   assert.equal(nodes.length, 6);
   assert.equal(edges.length, 5);
   assert.deepEqual(nodes[2]?.position, { x: 540, y: 0 });
-  assert.deepEqual(nodes[3]?.position, { x: 540, y: 150 });
+  assert.deepEqual(nodes[3]?.position, { x: 0, y: 150 });
   assert.equal(nodes[2]?.data.outputSide, "bottom");
   assert.equal(nodes[3]?.data.inputSide, "top");
-  assert.equal(nodes[3]?.data.outputSide, "left");
-  assert.equal(nodes[4]?.data.inputSide, "right");
-  assert.equal(nodes[4]?.data.outputSide, "left");
+  assert.equal(nodes[3]?.data.outputSide, "right");
+  assert.equal(nodes[4]?.data.inputSide, "left");
+  assert.equal(nodes[4]?.data.outputSide, "right");
 });

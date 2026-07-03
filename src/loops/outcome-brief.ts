@@ -32,3 +32,46 @@ export function isOutcomeBriefConfirmed(spec: LoopSpec): boolean {
   return spec.intentDiscovery.status === "confirmed"
     && spec.intentDiscovery.confirmedBriefHash === computeOutcomeBriefHash(spec);
 }
+
+function reviewMaterial(spec: LoopSpec) {
+  return {
+    intent: {
+      goal: spec.intent.goal,
+      outcome: spec.intent.outcome,
+      successCriteria: spec.intent.successCriteria,
+    },
+    outcomes: (spec.taskBlueprint?.outcomes ?? []).map((outcome) => ({
+      id: outcome.id,
+      role: outcome.role,
+      description: outcome.description,
+      selectedConnector: outcome.selectedConnector,
+    })),
+    trigger: spec.trigger.kind === "event"
+      ? { kind: spec.trigger.kind, source: spec.trigger.source }
+      : spec.trigger.kind === "schedule"
+        ? { kind: spec.trigger.kind, cron: spec.trigger.cron, timezone: spec.trigger.timezone }
+        : { kind: spec.trigger.kind },
+    bindings: spec.bindings.map((binding) => ({
+      capability: binding.capability,
+      connector: binding.connector,
+      role: binding.role,
+    })),
+    output: spec.output,
+    approval: {
+      mode: spec.approval.mode,
+      sensitiveRoles: spec.approval.sensitiveRoles,
+      sensitiveCapabilities: spec.approval.sensitiveCapabilities,
+    },
+  };
+}
+
+/** Fingerprint of user-visible review content (excludes technical slugs and schemas). */
+export function computeOutcomeReviewFingerprint(spec: LoopSpec): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalize(reviewMaterial(spec))))
+    .digest("hex");
+}
+
+export function isUserVisibleReviewUnchanged(before: LoopSpec, after: LoopSpec): boolean {
+  return computeOutcomeReviewFingerprint(before) === computeOutcomeReviewFingerprint(after);
+}

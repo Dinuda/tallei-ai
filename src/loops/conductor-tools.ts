@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import {
+  confirmOutcomeBriefActionSchema,
+  type ConfirmOutcomeBriefAction,
+} from "./confirm-outcome-brief-action.js";
 import { intentAnalysisSchema } from "./intent-discovery.js";
 
 export const askQuestionOptionSchema = z.object({
@@ -66,21 +70,19 @@ export const connectToolkitInputSchema = z.object({
 
 export const listWorkspaceConnectorsInputSchema = z.object({});
 
-export const confirmOutcomeBriefActionSchema = z.enum([
-  "confirm",
-  "change_outcome",
-  "change_trigger",
-  "change_connectors",
-  "change_approvals",
-  "other",
-]);
+export { confirmOutcomeBriefActionSchema, type ConfirmOutcomeBriefAction };
+
+const confirmOutcomeBriefOptionSchema = askQuestionOptionSchema.extend({
+  id: confirmOutcomeBriefActionSchema,
+  value: confirmOutcomeBriefActionSchema,
+});
 
 const outcomeBriefHashSchema = z.string().regex(/^[a-f0-9]{64}$/, "Expected a SHA-256 confirmation hash");
 
 export const confirmOutcomeBriefInputSchema = z.object({
   briefHash: outcomeBriefHashSchema,
   question: z.string().min(1),
-  options: z.array(askQuestionOptionSchema).min(2).max(5),
+  options: z.array(confirmOutcomeBriefOptionSchema).min(2).max(5),
   recommendedOptionIds: z.array(z.string()).optional(),
   allowOther: z.boolean().optional(),
 });
@@ -96,10 +98,12 @@ export const confirmOutcomeBriefOutputSchema = z.object({
 
 export function resolveConfirmOutcomeBriefAction(
   selectedValue: string,
-): z.infer<typeof confirmOutcomeBriefActionSchema> {
+): ConfirmOutcomeBriefAction {
   const parsed = confirmOutcomeBriefActionSchema.safeParse(selectedValue);
   return parsed.success ? parsed.data : "other";
 }
+
+export { resolveConfirmOutcomeBriefActionFromSelection } from "./confirm-outcome-brief-action.js";
 
 export type ConfirmOutcomeBriefInput = z.infer<typeof confirmOutcomeBriefInputSchema>;
 export type ConfirmOutcomeBriefOutput = z.infer<typeof confirmOutcomeBriefOutputSchema>;
@@ -164,3 +168,11 @@ export const testRunLoopInputSchema = z.object({
 
 export type TestRunScenario = z.infer<typeof testRunScenarioSchema>;
 export type TestRunLoopInput = z.infer<typeof testRunLoopInputSchema>;
+
+export {
+  presentAgentTeamInputSchema,
+  presentAgentTeamOutputSchema,
+  type PresentAgentTeamInput,
+  type PresentAgentTeamOutput,
+  type AgentTeamSpecialist,
+} from "./present-agent-team.js";

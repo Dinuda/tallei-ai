@@ -24,10 +24,12 @@ import {
   listTriggersInputSchema,
   listWorkspaceConnectorsInputSchema,
   pickConnectorAppInputSchema,
+  presentAgentTeamInputSchema,
   presentReplyOptionsInputSchema,
   testRunLoopInputSchema,
 } from "../../../loops/conductor-tools.js";
 import { computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
+import { normalizeAgentTeam } from "../../../loops/present-agent-team.js";
 import { discoverOutcomeBindings } from "../../../loops/binding-discovery.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
 import { validateConnectorChoicesBeforeSpecPatch } from "../../../loops/task-decomposition.js";
@@ -528,6 +530,11 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         askQuestion: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.askQuestion,
           inputSchema: askQuestionInputSchema,
+        }),
+        presentAgentTeam: tool({
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.presentAgentTeam,
+          inputSchema: presentAgentTeamInputSchema,
+          execute: async (input) => normalizeAgentTeam(input, currentSpec!),
         }),
         confirmOutcomeBrief: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.confirmOutcomeBrief,

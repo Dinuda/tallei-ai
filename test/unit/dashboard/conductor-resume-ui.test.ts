@@ -158,7 +158,7 @@ test("findPendingOutcomeBrief still resumes legacy review plus confirmation tran
   assert.equal(findPendingOutcomeBrief(messages)?.toolCallId, "confirm-legacy");
 });
 
-test("confirmation UI renders a config-driven review card", async () => {
+test("confirmation UI keeps legacy workflow chart and skips card for new confirmOutcomeBrief flow", async () => {
   const fs = await import("node:fs/promises");
   const [card, toolPart] = await Promise.all([
     fs.readFile(new URL("../../../dashboard/src/components/conductor/outcome-brief-card.tsx", import.meta.url), "utf8"),
@@ -179,8 +179,9 @@ test("confirmation UI renders a config-driven review card", async () => {
   assert.doesNotMatch(card, /rounded-2xl|rounded-xl/);
   assert.doesNotMatch(card, />Starts when</);
   assert.doesNotMatch(card, />Safety gate</);
-  assert.match(toolPart, /buildOutcomeReviewViewModel\(spec/);
-  assert.match(toolPart, /part\.state === "input-streaming"/);
+  assert.match(toolPart, /input\?\.summary/);
   assert.match(toolPart, /OutcomeBriefCard/);
+  assert.match(toolPart, /presentAgentTeam/);
+  assert.match(toolPart, /return null/);
   assert.doesNotMatch(toolPart, /manifestRef/);
 });

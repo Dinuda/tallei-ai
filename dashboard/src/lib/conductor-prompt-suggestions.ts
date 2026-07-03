@@ -145,7 +145,7 @@ export function findPendingPresentReplyOptions(
         toolPart.output == null
         && (toolPart.state === "input-available" || toolPart.state === "input-streaming")
         && (toolPart.input?.options?.length ?? 0) >= 2;
-      if (resumable) {
+      if (resumable && toolPart.input) {
         return { toolCallId: toolPart.toolCallId, input: toolPart.input };
       }
     }

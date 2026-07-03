@@ -64,7 +64,7 @@ test("confirmOutcomeBriefInputSchema requires LLM-provided question and options"
     question: "Ready to build this?",
     options: [
       { id: "confirm", label: "Looks good", value: "confirm" },
-      { id: "changes", label: "Change something", value: "other" },
+      { id: "other", label: "Change something", value: "other" },
     ],
     recommendedOptionIds: ["confirm"],
   });
@@ -84,7 +84,7 @@ test("confirmOutcomeBriefInputSchema rejects non-SHA-256 hashes", () => {
     question: "Ready to build this?",
     options: [
       { id: "confirm", label: "Looks good", value: "confirm" },
-      { id: "changes", label: "Change something", value: "other" },
+      { id: "other", label: "Change something", value: "other" },
     ],
   }));
 });

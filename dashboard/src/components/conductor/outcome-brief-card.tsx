@@ -82,7 +82,7 @@ const nodeTypes = { route: RouteNode };
 export function OutcomeBriefCard({ viewModel, streaming, status }: {
   viewModel: OutcomeReviewViewModel;
   streaming: boolean;
-  status?: "confirmed" | "change-requested";
+  status?: "pending" | "confirmed" | "change-requested";
 }) {
   const { data: session } = useSession();
   const { nodes, edges } = useMemo(
@@ -96,7 +96,7 @@ export function OutcomeBriefCard({ viewModel, streaming, status }: {
   const selectedStage = selectedId ? nodes.find((node) => node.id === selectedId)?.data : null;
 
   return (
-    <section aria-busy={streaming} aria-label="Routing manifest" className="mb-3 overflow-hidden border border-[var(--ed-border)] bg-white">
+    <section aria-busy={streaming} aria-label="Routing manifest" className="overflow-hidden border border-[var(--ed-border)] bg-white" data-transcript-block>
       <div className="border-b border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-4 py-4 sm:px-5">
         <h3 className="text-base font-semibold leading-6 text-[var(--ed-text)]">{viewModel.title}</h3>
       </div>
@@ -141,9 +141,13 @@ export function OutcomeBriefCard({ viewModel, streaming, status }: {
       </div>
 
       <p className="sr-only">Starts when: {viewModel.runsWhen}. What it does: {viewModel.does}. Approval: {viewModel.approval}. Result: {viewModel.result}</p>
-      {streaming || status ? (
+      {streaming || status === "confirmed" || status === "change-requested" ? (
         <footer className="border-t border-slate-100 px-4 py-2 text-right text-[11px] font-medium text-slate-500">
-          {streaming ? "Preparing route…" : status === "confirmed" ? "Route confirmed" : "Changes requested"}
+          {streaming
+            ? "Preparing route…"
+            : status === "confirmed"
+              ? "Route confirmed"
+              : "Changes requested"}
         </footer>
       ) : null}
     </section>

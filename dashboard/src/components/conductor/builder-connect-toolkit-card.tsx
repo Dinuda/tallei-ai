@@ -114,7 +114,7 @@ export function BuilderConnectToolkitCard({
   }
 
   return (
-    <div className="my-3 w-full border border-[var(--builder-indigo-border)] bg-[var(--builder-indigo-bg)]">
+    <div className="w-full border border-[var(--builder-indigo-border)] bg-[var(--builder-indigo-bg)]" data-transcript-block>
       <div className="border-b border-[var(--builder-indigo-border-light)] bg-white px-4 py-3">
         <div className="flex items-start gap-3">
           <span className="flex size-8 shrink-0 items-center justify-center bg-[var(--builder-indigo-bg-solid)] text-[var(--builder-indigo-accent)]">

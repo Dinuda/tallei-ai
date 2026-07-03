@@ -57,7 +57,7 @@ export function BuilderCompletedCard({
   const styles = variantStyles[variant];
 
   return (
-    <div className={cn("my-3 border px-4 py-3", styles.border, styles.bg, className)}>
+    <div className={cn("border px-4 py-3", styles.border, styles.bg, className)} data-transcript-block>
       <div className="flex items-center gap-3">
         <span className={cn("flex size-8 shrink-0 items-center justify-center text-white", styles.icon)}>
           <Icon className="size-4" />

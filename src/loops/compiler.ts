@@ -27,7 +27,7 @@ import {
   saveCompiledPlan,
 } from "./store.js";
 import { validateAgenticCompileArtifacts } from "./plan-validators.js";
-import { validateEventTriggerForCompile } from "./event-trigger.js";
+import { resolveEventTriggerLocallyForCompile, validateEventTriggerForCompile } from "./event-trigger.js";
 import { capabilityForAction, summarizeInputSchema, toolIdForAction } from "./tool-schema.js";
 import {
   attachComposioActionInstructionsToTools,
@@ -139,6 +139,26 @@ export type CompileError = {
 
 
 
+function isExplicitActionSlugFormat(actionSlug: string): boolean {
+  const trimmed = actionSlug.trim();
+  return trimmed.length > 0 && /^[A-Z][A-Z0-9_]+$/.test(trimmed);
+}
+
+function resolveExplicitBindingFromSpec(
+  binding: LoopSpec["bindings"][number],
+): {
+  actionSlug: string;
+  inputSchema: Record<string, unknown>;
+} | null {
+  const explicitSlug = binding.actionSlug?.trim();
+  if (!explicitSlug || !isExplicitActionSlugFormat(explicitSlug)) return null;
+
+  return {
+    actionSlug: explicitSlug.toUpperCase(),
+    inputSchema: { type: "object", properties: {} },
+  };
+}
+
 function validateCron(cron: string): boolean {
   const parts = cron.trim().split(/\s+/);
   return parts.length >= 5 && parts.length <= 6;
@@ -232,22 +252,34 @@ export async function compileLoopSpec(
         binding: "trigger.composioSlug",
       });
     } else if (parsed.trigger.source.trim()) {
-      try {
-        const validated = await validateEventTriggerForCompile(
-          parsed.trigger.source,
-          parsed.trigger.composioSlug,
-        );
+      const localSlug = resolveEventTriggerLocallyForCompile(
+        parsed.trigger.source,
+        parsed.trigger.composioSlug,
+        parsed.trigger.eventType,
+      );
+      if (localSlug) {
         parsed = {
           ...parsed,
-          trigger: { ...parsed.trigger, composioSlug: validated },
+          trigger: { ...parsed.trigger, composioSlug: localSlug },
         };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        errors.push({
-          code: "INVALID_TRIGGER_SLUG",
-          message,
-          binding: "trigger.composioSlug",
-        });
+      } else {
+        try {
+          const validated = await validateEventTriggerForCompile(
+            parsed.trigger.source,
+            parsed.trigger.composioSlug,
+          );
+          parsed = {
+            ...parsed,
+            trigger: { ...parsed.trigger, composioSlug: validated },
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push({
+            code: "INVALID_TRIGGER_SLUG",
+            message,
+            binding: "trigger.composioSlug",
+          });
+        }
       }
     }
   }
@@ -275,9 +307,12 @@ export async function compileLoopSpec(
         : outcome.role === binding.role,
     )?.description ?? binding.capability;
 
-    const explicitResolution = binding.actionSlug
-      ? await resolveExplicitBindingAction(binding.connector, binding.actionSlug)
-      : null;
+    const explicitFromSpec = resolveExplicitBindingFromSpec(binding);
+    const explicitResolution = explicitFromSpec
+      ? { ok: true as const, action: explicitFromSpec }
+      : binding.actionSlug
+        ? await resolveExplicitBindingAction(binding.connector, binding.actionSlug)
+        : null;
     if (explicitResolution && !explicitResolution.ok) {
       errors.push({
         code: explicitResolution.code,
@@ -322,7 +357,7 @@ export async function compileLoopSpec(
       role: binding.role,
     });
 
-    if (Object.keys(resolved.inputSchema).length === 0) {
+    if (Object.keys(resolved.inputSchema).length === 0 && !binding.actionSlug?.trim()) {
       const required = summarizeInputSchema(resolved.inputSchema).required.join(", ") || "see Composio schema";
       errors.push({
         code: "SCHEMA_MISSING",

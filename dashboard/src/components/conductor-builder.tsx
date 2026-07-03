@@ -23,6 +23,7 @@ import {
   hasUnansweredUiToolCalls,
   makeUserMessage,
   prepareMessagesForUiToolOutput,
+  resolveConfirmOutcomeBriefActionFromSelection,
   shouldAutoSendConductorChat,
   type ChatStatus,
 } from "@/components/conductor/conductor-shared";
@@ -375,18 +376,11 @@ function ConductorBuilderLive({
 
   function submitOutcomeBriefAnswer(answer: InteractivePromptAnswer) {
     if (!pendingOutcomeBrief || !chatApi) return;
-    const selectedValue = answer.selectedValues[0] ?? "other";
-    const knownActions = new Set([
-      "confirm",
-      "change_outcome",
-      "change_trigger",
-      "change_connectors",
-      "change_approvals",
-      "other",
-    ]);
-    const action = knownActions.has(selectedValue)
-      ? selectedValue as "confirm" | "change_outcome" | "change_trigger" | "change_connectors" | "change_approvals" | "other"
-      : "other";
+    const action = resolveConfirmOutcomeBriefActionFromSelection({
+      selectedOptionIds: answer.selectedOptionIds,
+      selectedValues: answer.selectedValues,
+      options: pendingOutcomeBrief.confirmPrompt.options,
+    });
     void chatApi.addToolOutput({
       tool: "confirmOutcomeBrief",
       toolCallId: pendingOutcomeBrief.toolCallId,

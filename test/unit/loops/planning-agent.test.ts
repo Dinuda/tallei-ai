@@ -53,7 +53,7 @@ test("buildConductorSystemPrompt reports ready when slots filled", () => {
   assert.match(prompt, /Next:.*compileLoop/);
 });
 
-test("buildConductorSystemPrompt requests config-driven confirmation without model summary fields", () => {
+test("buildConductorSystemPrompt requests specialist roster confirmation without model summary fields", () => {
   const spec = seedSpecFromTemplate(workspaceId, "research_digest");
   spec.taskBlueprint = {
     version: 1,
@@ -77,8 +77,8 @@ test("buildConductorSystemPrompt requests config-driven confirmation without mod
     connectedToolkits: [],
   });
 
-  assert.match(prompt, /UI derives the review card entirely from the current LoopSpec/i);
-  assert.match(prompt, /Do not generate, restate, or pass title, stages/i);
+  assert.match(prompt, /presentAgentTeam/);
+  assert.match(prompt, /Do not generate or pass review summary fields to confirmOutcomeBrief/i);
   assert.doesNotMatch(prompt, /summary\.runsWhen|summary\.steps|summary\.approval|summary\.result/);
   assert.match(prompt, new RegExp(confirmationHash));
   assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
@@ -239,6 +239,7 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
   assert.match(prompt, /pickConnectorApp/);
   assert.match(prompt, /analyzeIntent/);
   assert.match(prompt, /confirmOutcomeBrief/);
+  assert.match(prompt, /presentAgentTeam/);
   assert.match(prompt, /presentReplyOptions/);
   assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
 });
@@ -273,5 +274,6 @@ test("Conductor refreshes confirmation state per step without a nested summary m
 
   assert.match(source, /prepareStep:\s*\(\) => \(\{ system: buildCurrentSystemPrompt\(\) \}\)/);
   assert.match(source, /confirmationHash:\s*computeOutcomeBriefHash\(currentSpec!\)/);
+  assert.match(source, /presentAgentTeam:\s*tool/);
   assert.doesNotMatch(source, /summarizeOutcomeBriefForUser|reviewOutcomeBrief:\s*tool/);
 });

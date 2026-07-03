@@ -15,7 +15,123 @@ import {
   ConductorReasoningPart,
   ConductorToolPart,
 } from "@/components/conductor/conductor-tool-part";
+import { buildTranscriptSegments } from "@/components/conductor/transcript-stream-order";
 import { cn } from "@/lib/utils";
+
+function renderTranscriptPart(
+  part: NonNullable<UIMessage["parts"]>[number],
+  key: string,
+  options: {
+    chatStatus: ChatStatus;
+    messageId: string;
+    lastMessageId: string | undefined;
+    isStreamingPart: boolean;
+    pendingQuestionCallId: string | null;
+    pendingReplyOptionsCallId: string | null;
+    spec: Record<string, unknown> | null;
+  },
+) {
+  if (part.type === "reasoning") {
+    return (
+      <ConductorReasoningPart
+        key={key}
+        part={part as ReasoningUIPart}
+      />
+    );
+  }
+  if (part.type === "text") {
+    return (
+      <div key={key} data-transcript-text>
+        <MessageResponse isAnimating={options.isStreamingPart}>
+          {part.text}
+        </MessageResponse>
+      </div>
+    );
+  }
+  if (isToolPart(part.type)) {
+    return (
+      <ConductorToolPart
+        key={key}
+        part={part as DynamicToolUIPart}
+        pendingQuestionCallId={options.pendingQuestionCallId}
+        pendingReplyOptionsCallId={options.pendingReplyOptionsCallId}
+        spec={options.spec}
+      />
+    );
+  }
+  return null;
+}
+
+function AssistantTranscriptTurn({
+  message,
+  chatStatus,
+  lastMessageId,
+  pendingQuestionCallId,
+  pendingReplyOptionsCallId,
+  spec,
+}: {
+  message: UIMessage;
+  chatStatus: ChatStatus;
+  lastMessageId: string | undefined;
+  pendingQuestionCallId: string | null;
+  pendingReplyOptionsCallId: string | null;
+  spec: Record<string, unknown> | null;
+}) {
+  const segments = buildTranscriptSegments(message.parts ?? []);
+  const lastPart = segments.at(-1)?.type === "patch-beat"
+    ? segments.at(-1)?.parts.at(-1)
+    : segments.at(-1)?.type === "part"
+      ? segments.at(-1)?.part
+      : undefined;
+
+  const renderOptions = {
+    chatStatus,
+    messageId: message.id,
+    lastMessageId,
+    isStreamingPart: false,
+    pendingQuestionCallId,
+    pendingReplyOptionsCallId,
+    spec,
+  };
+
+  return (
+    <div className="conductor-transcript-stream max-w-full min-w-0">
+      {segments.map((segment, segmentIndex) => {
+        if (segment.type === "patch-beat") {
+          return (
+            <div key={`patch-beat-${segmentIndex}`} className="conductor-transcript-cluster">
+              {segment.parts.map((part, partIndex) =>
+                renderTranscriptPart(
+                  part,
+                  `patch-beat-${segmentIndex}-${partIndex}`,
+                  {
+                    ...renderOptions,
+                    isStreamingPart:
+                      chatStatus === "streaming"
+                      && message.id === lastMessageId
+                      && part === lastPart,
+                  },
+                ),
+              )}
+            </div>
+          );
+        }
+
+        return renderTranscriptPart(
+          segment.part,
+          `part-${segmentIndex}`,
+          {
+            ...renderOptions,
+            isStreamingPart:
+              chatStatus === "streaming"
+              && message.id === lastMessageId
+              && segment.part === lastPart,
+          },
+        );
+      })}
+    </div>
+  );
+}
 
 export function ConductorBuilderChat({
   messages,
@@ -42,7 +158,7 @@ export function ConductorBuilderChat({
 
   return (
     <Conversation className={cn("conductor-builder-chat flex-1 min-h-0", className)}>
-      <ConversationContent className="mx-auto max-w-3xl gap-8 p-4">
+      <ConversationContent className="mx-auto max-w-3xl gap-6 p-4">
         {messages.length === 0 && emptyState ? emptyState : null}
 
         {messages.map((message) => (
@@ -53,41 +169,14 @@ export function ConductorBuilderChat({
                   part.type === "text" ? <span key={i}>{part.text}</span> : null,
                 )
               ) : (
-                <div className="max-w-full min-w-0 space-y-2">
-                  {message.parts?.map((part, i) => {
-                    if (part.type === "reasoning") {
-                      return (
-                        <ConductorReasoningPart
-                          key={i}
-                          part={part as ReasoningUIPart}
-                        />
-                      );
-                    }
-                    if (part.type === "text") {
-                      const isStreaming =
-                        chatStatus === "streaming"
-                        && message.id === lastMessageId
-                        && i === (message.parts?.length ?? 0) - 1;
-                      return (
-                        <MessageResponse key={i} isAnimating={isStreaming}>
-                          {part.text}
-                        </MessageResponse>
-                      );
-                    }
-                    if (isToolPart(part.type)) {
-                      return (
-                        <ConductorToolPart
-                          key={i}
-                          part={part as DynamicToolUIPart}
-                          pendingQuestionCallId={pendingQuestionCallId}
-                          pendingReplyOptionsCallId={pendingReplyOptionsCallId}
-                          spec={spec}
-                        />
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
+                <AssistantTranscriptTurn
+                  chatStatus={chatStatus}
+                  lastMessageId={lastMessageId}
+                  message={message}
+                  pendingQuestionCallId={pendingQuestionCallId}
+                  pendingReplyOptionsCallId={pendingReplyOptionsCallId}
+                  spec={spec}
+                />
               )}
             </MessageContent>
           </Message>

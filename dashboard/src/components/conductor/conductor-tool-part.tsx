@@ -12,6 +12,10 @@ import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/componen
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { BuilderConnectToolkitCard } from "@/components/conductor/builder-connect-toolkit-card";
 import {
+  AgentTeamRoster,
+  AgentTeamRosterPlaceholder,
+} from "@/components/conductor/agent-team-roster";
+import {
   OutcomeBriefCard,
 } from "@/components/conductor/outcome-brief-card";
 import {
@@ -30,9 +34,11 @@ import type {
   AskQuestionInput,
   AskQuestionOutput,
   AskQuestionToolPart,
+  ConfirmOutcomeBriefOutput,
+  PresentAgentTeamOutput,
   PresentReplyOptionsToolPart,
 } from "@/components/conductor/conductor-shared";
-import { resolveToolPartName } from "@/components/conductor/conductor-shared";
+import { resolveOutcomeBriefCardStatus, resolveToolPartName } from "@/components/conductor/conductor-shared";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
@@ -47,29 +53,30 @@ export function ConductorReasoningPart({
   const text = part.text;
 
   return (
-    <Reasoning
-      autoCloseDelay={CONDUCTOR_REASONING_COLLAPSE_MS + 180}
-      className="mb-2"
-      isStreaming={isStreaming}
-    >
-      <ReasoningTrigger />
-      <CollapsibleContent className="conductor-reasoning-collapsible mt-2 text-sm outline-none">
-        <ConductorReasoningStream
-          isStreaming={isStreaming}
-          textLength={text.length}
-          liveContent={
-            <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
-              {text}
-            </p>
-          }
-          settledContent={
-            <div className="text-muted-foreground">
-              <Streamdown plugins={reasoningStreamdownPlugins}>{text}</Streamdown>
-            </div>
-          }
-        />
-      </CollapsibleContent>
-    </Reasoning>
+    <div data-transcript-thought>
+      <Reasoning
+        autoCloseDelay={CONDUCTOR_REASONING_COLLAPSE_MS + 180}
+        isStreaming={isStreaming}
+      >
+        <ReasoningTrigger />
+        <CollapsibleContent className="conductor-reasoning-collapsible mt-2 text-sm outline-none">
+          <ConductorReasoningStream
+            isStreaming={isStreaming}
+            textLength={text.length}
+            liveContent={
+              <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
+                {text}
+              </p>
+            }
+            settledContent={
+              <div className="text-muted-foreground">
+                <Streamdown plugins={reasoningStreamdownPlugins}>{text}</Streamdown>
+              </div>
+            }
+          />
+        </CollapsibleContent>
+      </Reasoning>
+    </div>
   );
 }
 
@@ -152,19 +159,45 @@ export function ConductorToolPart({
     return null;
   }
 
+  if (toolName === "presentAgentTeam") {
+    const output = part.output as PresentAgentTeamOutput | undefined;
+    if (output?.specialists?.length) {
+      return (
+        <AgentTeamRoster
+          streaming={part.state === "input-streaming"}
+          team={output}
+        />
+      );
+    }
+    return <AgentTeamRosterPlaceholder />;
+  }
+
   if (toolName === "confirmOutcomeBrief") {
-    const input = part.input as { summary?: LegacyOutcomeReviewSummary } | undefined;
-    const output = part.output as { action?: string; otherText?: string } | undefined;
-    const status = output?.action
-      ? output.action === "confirm" ? "confirmed" as const : "change-requested" as const
-      : undefined;
-    return (
-      <OutcomeBriefCard
-        status={status}
-        streaming={part.state === "input-streaming"}
-        viewModel={buildOutcomeReviewViewModel(spec, input?.summary)}
-      />
-    );
+    const input = part.input as {
+      summary?: LegacyOutcomeReviewSummary;
+      options?: Array<{ id: string; value: string; label: string }>;
+    } | undefined;
+    const output = part.output as ConfirmOutcomeBriefOutput | undefined;
+
+    // Legacy transcripts may still carry a model-generated summary on confirmOutcomeBrief.
+    if (input?.summary) {
+      const status = resolveOutcomeBriefCardStatus({
+        output,
+        options: input?.options,
+        streaming: part.state === "input-streaming",
+        awaitingInput: part.state === "input-available",
+      });
+      return (
+        <OutcomeBriefCard
+          status={status}
+          streaming={part.state === "input-streaming"}
+          viewModel={buildOutcomeReviewViewModel(spec, input.summary)}
+        />
+      );
+    }
+
+    // New flow: roster comes from presentAgentTeam; confirmOutcomeBrief renders no card.
+    return null;
   }
 
   if (toolName === "presentReplyOptions") {
@@ -216,6 +249,8 @@ export function ConductorToolPart({
                       ? "Activate loop"
                       : toolName === "reviewOutcomeBrief"
                         ? "The loop"
+                        : toolName === "presentAgentTeam"
+                          ? "Agent team"
                       : toolName;
 
   const summary =
@@ -225,6 +260,8 @@ export function ConductorToolPart({
         ? formatDiscoverConnectorsSummary(part.output)
         : toolName === "reviewOutcomeBrief"
           ? "Prepared your automation summary for review"
+          : toolName === "presentAgentTeam"
+            ? "Assembled your specialist team"
           : toolName === "compileLoop"
             ? formatCompileSummary(part.output)
             : toolName === "testRunLoop"
@@ -235,7 +272,7 @@ export function ConductorToolPart({
   const collapsedPreview = summary ?? formatToolInputPreview(toolName, part.input);
 
   return (
-    <Tool open={open} onOpenChange={setOpen} className="mb-2">
+    <Tool open={open} onOpenChange={setOpen}>
       <ToolHeader type="dynamic-tool" toolName={toolName} state={part.state} title={title} />
       {!open && collapsedPreview ? (
         <p className="border-t border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-3 py-2 text-xs leading-relaxed text-[var(--ed-text-2)] line-clamp-3 break-words">

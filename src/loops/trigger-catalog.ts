@@ -40,3 +40,20 @@ export function lookupStaticTriggerSlug(source: string, eventType: string): stri
   if (/^[A-Z][A-Z0-9_]+$/.test(normalizedEvent)) return normalizedEvent;
   return null;
 }
+
+/** Known trigger slugs for a connector from the static catalogue (no live Composio call). */
+export function listKnownTriggerSlugsForSource(source: string): string[] {
+  const normalizedSource = normalizeToolkitSlug(source);
+  return [...new Set(
+    TRIGGER_MAPPINGS
+      .filter((row) => normalizeToolkitSlug(row.source) === normalizedSource)
+      .map((row) => row.composioSlug),
+  )];
+}
+
+/** True when the slug is a known event trigger for the connector in the static catalogue. */
+export function isKnownTriggerSlugForSource(source: string, composioSlug: string): boolean {
+  const normalized = composioSlug.trim().toUpperCase();
+  if (!normalized) return false;
+  return listKnownTriggerSlugsForSource(source).includes(normalized);
+}

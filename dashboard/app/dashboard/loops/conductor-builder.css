@@ -102,6 +102,43 @@
   background: transparent;
 }
 
+/*
+ * Transcript stream rhythm:
+ * - 20px between major steps (tool calls, clusters)
+ * - Patch beats cluster thought + prose + Making changes… tightly
+ */
+.conductor-builder-chat .conductor-transcript-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.conductor-builder-chat .conductor-transcript-stream > * {
+  margin-bottom: 0;
+  margin-top: 0;
+}
+
+.conductor-builder-chat .conductor-transcript-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.conductor-builder-chat .conductor-transcript-cluster > * {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+/* Investigation steps: tool card then reflection */
+.conductor-builder-chat .conductor-transcript-stream > [data-transcript-block] + [data-transcript-thought] {
+  margin-top: 0.75rem;
+}
+
+/* Prose introduces a standalone tool card or answered prompt */
+.conductor-builder-chat .conductor-transcript-stream > [data-transcript-text] + [data-transcript-block] {
+  margin-top: 0.75rem;
+}
+
 /* Reasoning stream — clamped height while thinking, optional expand */
 .conductor-reasoning-stream {
   position: relative;

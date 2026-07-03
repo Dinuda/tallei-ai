@@ -5,6 +5,7 @@ import {
   type SpecPatch,
 } from "./spec.js";
 import { isEventTriggerReadyForCompile } from "./event-trigger.js";
+import { computeOutcomeBriefHash, isUserVisibleReviewUnchanged } from "./outcome-brief.js";
 import { normalizeTaskBlueprint } from "./task-decomposition.js";
 
 function resolveExecutionOrder(current: LoopSpec, patch: SpecPatch) {
@@ -60,7 +61,7 @@ export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
     ? { ...current.intentDiscovery, ...patch.intentDiscovery }
     : current.intentDiscovery;
 
-  const merged: LoopSpec = {
+  const provisional: LoopSpec = loopSpecSchema.parse({
     ...current,
     intent: patch.intent ? { ...current.intent, ...patch.intent } : current.intent,
     trigger: patch.trigger
@@ -69,13 +70,7 @@ export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
     bindings: patch.bindings ?? retainedBindings,
     composioActions: patch.composioActions ?? retainedComposioActions,
     taskBlueprint: nextBlueprint,
-    intentDiscovery: materialPatch
-      ? {
-          ...mergedIntentDiscovery,
-          status: mergedIntentDiscovery.status === "confirmed" ? "ready" : mergedIntentDiscovery.status,
-          confirmedBriefHash: undefined,
-        }
-      : mergedIntentDiscovery,
+    intentDiscovery: mergedIntentDiscovery,
     agent: patch.agent
       ? { ...(current.agent ?? { instructions: "", maxSteps: 12, maxTokens: 8_000 }), ...patch.agent }
       : current.agent,
@@ -88,8 +83,28 @@ export function applySpecPatch(current: LoopSpec, patch: SpecPatch): LoopSpec {
         : current.output,
     approval: patch.approval ? { ...current.approval, ...patch.approval } : current.approval,
     guardrails: patch.guardrails ? { ...current.guardrails, ...patch.guardrails } : current.guardrails,
-  };
-  return loopSpecSchema.parse(merged);
+  });
+
+  let intentDiscovery = mergedIntentDiscovery;
+  if (materialPatch) {
+    const preserveConfirmation = current.intentDiscovery.status === "confirmed"
+      && Boolean(current.intentDiscovery.confirmedBriefHash)
+      && isUserVisibleReviewUnchanged(current, provisional);
+
+    intentDiscovery = preserveConfirmation
+      ? {
+          ...mergedIntentDiscovery,
+          status: "confirmed" as const,
+          confirmedBriefHash: computeOutcomeBriefHash(provisional),
+        }
+      : {
+          ...mergedIntentDiscovery,
+          status: mergedIntentDiscovery.status === "confirmed" ? "ready" : mergedIntentDiscovery.status,
+          confirmedBriefHash: undefined,
+        };
+  }
+
+  return loopSpecSchema.parse({ ...provisional, intentDiscovery });
 }
 
 export function getMissingSlots(spec: LoopSpec): string[] {

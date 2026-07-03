@@ -6,6 +6,10 @@ import {
 } from "ai";
 
 import type { InteractivePromptOption } from "@/components/ai-elements/interactive-prompt-menu";
+import {
+  resolveConfirmOutcomeBriefActionFromSelection,
+  type ConfirmOutcomeBriefAction,
+} from "@/lib/confirm-outcome-brief-action";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
@@ -116,7 +120,7 @@ export type ConfirmOutcomeBriefInput = {
 };
 
 export type ConfirmOutcomeBriefOutput = {
-  action: "confirm" | "change_outcome" | "change_trigger" | "change_connectors" | "change_approvals" | "other";
+  action: ConfirmOutcomeBriefAction;
   briefHash: string;
   answerText: string;
   selectedOptionIds: string[];
@@ -144,6 +148,51 @@ export type PresentReplyOptionsToolPart = {
   state: DynamicToolUIPart["state"];
   input?: PresentReplyOptionsInput;
   output?: PresentReplyOptionsOutput;
+};
+
+export type AgentTeamSpecialistStep = {
+  outcomeId: string;
+  role: "trigger" | "source" | "transform" | "destination";
+  description: string;
+  connector?: string;
+};
+
+export type AgentTeamSpecialist = {
+  id: string;
+  name: string;
+  roleTitle: string;
+  description: string;
+  avatarSeed: string;
+  ownershipSummary: string;
+  steps: AgentTeamSpecialistStep[];
+};
+
+export type AgentTeamReviewer = {
+  roleTitle: string;
+  description: string;
+};
+
+export type AgentTeamTrigger = {
+  outcomeId: string;
+  description: string;
+  connector?: string;
+};
+
+export type PresentAgentTeamOutput = {
+  title: string;
+  triggers?: AgentTeamTrigger[];
+  specialists: AgentTeamSpecialist[];
+  reviewer?: AgentTeamReviewer;
+  reviewerInsertIndex?: number;
+  fallbackApplied?: boolean;
+};
+
+export type PresentAgentTeamToolPart = {
+  type: string;
+  toolCallId: string;
+  state: DynamicToolUIPart["state"];
+  input?: { groups?: Array<{ outcomeIds: string[]; roleTitle?: string; ownershipSummary?: string }> };
+  output?: PresentAgentTeamOutput;
 };
 
 export type AskQuestionToolPart = {
@@ -181,6 +230,10 @@ export function isPickConnectorAppPart(part: { type: string; toolName?: string }
 
 export function isPresentReplyOptionsPart(part: { type: string; toolName?: string }): part is PresentReplyOptionsToolPart {
   return resolveToolPartName(part) === "presentReplyOptions";
+}
+
+export function isPresentAgentTeamPart(part: { type: string; toolName?: string }): part is PresentAgentTeamToolPart {
+  return resolveToolPartName(part) === "presentAgentTeam";
 }
 
 export function isConfirmOutcomeBriefPart(part: { type: string; toolName?: string }): part is ConfirmOutcomeBriefToolPart {
@@ -531,4 +584,27 @@ export function promptVariantForQuestion(questionId: string): "connector" | "vio
   if (questionId === "knowledge-sources") return "violet";
   if (questionId === "review-gates") return "amber";
   return "neutral";
+}
+
+export { resolveConfirmOutcomeBriefActionFromSelection };
+
+export function resolveOutcomeBriefCardStatus(input: {
+  output?: ConfirmOutcomeBriefOutput;
+  options?: InteractivePromptOption[];
+  streaming?: boolean;
+  awaitingInput?: boolean;
+}): "pending" | "confirmed" | "change-requested" | undefined {
+  if (input.streaming) return "pending";
+  if (input.awaitingInput) return "pending";
+
+  const action = input.output
+    ? resolveConfirmOutcomeBriefActionFromSelection({
+        selectedOptionIds: input.output.selectedOptionIds,
+        selectedValues: input.output.selectedValues,
+        options: input.options ?? [],
+      })
+    : null;
+
+  if (!action) return undefined;
+  return action === "confirm" ? "confirmed" : "change-requested";
 }
