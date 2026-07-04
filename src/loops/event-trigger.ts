@@ -7,7 +7,7 @@ import {
 import { isKnownTriggerSlugForSource, lookupStaticTriggerSlug } from "./trigger-catalog.js";
 import type { LoopSpec, SpecPatch, TriggerConfig } from "./spec.js";
 
-/** Composio trigger type slugs are uppercase identifiers, not toolkit names like `gmail`. */
+/** Composio trigger type slugs are uppercase identifiers, not toolkit names. */
 export const COMPOSIO_TRIGGER_SLUG_PATTERN = /^[A-Z][A-Z0-9_]+$/;
 
 export type EventTriggerConfig = Extract<TriggerConfig, { kind: "event" }>;
@@ -24,7 +24,7 @@ export function isToolkitSlugMasqueradingAsTrigger(source: string, composioSlug:
 }
 
 export function eventTriggerResolutionHint(source: string): string {
-  return `Call listTriggers({ toolkit: "${source}" }) and set composioSlug to the exact slug (e.g. GMAIL_NEW_GMAIL_MESSAGE). source is the connector; composioSlug is the Composio trigger type.`;
+  return `Call listTriggers({ toolkit: "${source}" }) and set composioSlug to an exact returned slug. source is the connector; composioSlug is the Composio trigger type.`;
 }
 
 export function validateEventTriggerShape(source: string, composioSlug: string): string | null {
@@ -34,7 +34,7 @@ export function validateEventTriggerShape(source: string, composioSlug: string):
     return `composioSlug "${slug}" is the connector toolkit, not a Composio trigger slug. ${eventTriggerResolutionHint(source)}`;
   }
   if (!isComposioTriggerSlugFormat(slug)) {
-    return `composioSlug must be an uppercase Composio trigger slug (e.g. GMAIL_NEW_GMAIL_MESSAGE). ${eventTriggerResolutionHint(source)}`;
+    return `composioSlug must be an uppercase Composio trigger slug. ${eventTriggerResolutionHint(source)}`;
   }
   return null;
 }

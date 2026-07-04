@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import type { UIMessage } from "ai";
 
+import {
+  isRecoverableConductorExecution,
+  readConductorExecutionMetadata,
+  type ConductorExecutionMetadata,
+} from "./conductor-tools.js";
+
 export const LOOP_BUILD_EVENT_TYPES = [
   "message.appended",
   "tool_call.requested",
@@ -10,6 +16,8 @@ export const LOOP_BUILD_EVENT_TYPES = [
   "artifact.committed",
   "connector.auto_resolved",
   "binding.config_set",
+  "binding.resolved",
+  "binding.diagnostic",
 ] as const;
 
 export type LoopBuildEventType = (typeof LOOP_BUILD_EVENT_TYPES)[number];
@@ -25,6 +33,11 @@ export type LoopBuildEvent = {
   payload: Record<string, unknown>;
   toolCallId: string | null;
   createdAt: string;
+};
+
+export type ConductorOperationLookup = {
+  operationKey: string;
+  parentArtifactHash?: string | null;
 };
 
 export type NewLoopBuildEvent = Pick<LoopBuildEvent, "eventKey" | "type" | "payload"> & {
@@ -106,6 +119,7 @@ export function eventsFromUiMessages(messages: UIMessage[]): NewLoopBuildEvent[]
         input: part.input,
         output: part.output,
         errorText: part.errorText,
+        ...readConductorExecutionMetadata(part.output),
       };
       events.push({
         eventKey: `tool:${part.toolCallId}:${lifecycle}:${eventPayloadHash(payload)}`,
@@ -134,6 +148,41 @@ export function interruptionEventsFromUiMessages(messages: UIMessage[]): NewLoop
     };
     return [{
       eventKey: `tool:${part.toolCallId}:aborted:${eventPayloadHash(payload)}`,
+      type: "tool_call.interrupted" as const,
+      toolCallId: part.toolCallId,
+      payload,
+    }];
+  }));
+}
+
+/** Persist interruption facts for tool calls superseded before completion. */
+export function interruptionEventsForToolCallIds(
+  messages: UIMessage[],
+  toolCallIds: string[],
+): NewLoopBuildEvent[] {
+  if (toolCallIds.length === 0) return [];
+  const idSet = new Set(toolCallIds);
+  return messages.flatMap((message) => (message.parts ?? []).flatMap((rawPart) => {
+    const part = rawPart as {
+      type: string;
+      toolName?: string;
+      toolCallId?: string;
+      state?: string;
+      input?: unknown;
+    };
+    if (!part.toolCallId || !idSet.has(part.toolCallId)) return [];
+    const name = toolName(part);
+    const resumable = HUMAN_INPUT_TOOLS.has(name) && part.input !== undefined;
+    const payload = {
+      messageId: message.id,
+      toolName: name,
+      desiredState: "output-error" as const,
+      errorText: resumable
+        ? "Superseded by a later user message before this prompt was answered."
+        : "Tool execution was interrupted before completion",
+    };
+    return [{
+      eventKey: `tool:${part.toolCallId}:superseded:${eventPayloadHash(payload)}`,
       type: "tool_call.interrupted" as const,
       toolCallId: part.toolCallId,
       payload,
@@ -260,6 +309,67 @@ export async function getLatestArtifactEvent(
     [loopId],
   );
   return result.rows[0] ? fromRow(result.rows[0]) : null;
+}
+
+export function getConductorExecutionMetadata(
+  event: Pick<LoopBuildEvent, "type" | "payload">,
+): ConductorExecutionMetadata | null {
+  if (event.type !== "tool_call.completed" && event.type !== "tool_call.errored") return null;
+  return readConductorExecutionMetadata(event.payload);
+}
+
+function matchesOperationLookup(
+  metadata: ConductorExecutionMetadata,
+  lookup: ConductorOperationLookup,
+): boolean {
+  return metadata.operationKey === lookup.operationKey
+    && (lookup.parentArtifactHash == null || metadata.parentArtifactHash === lookup.parentArtifactHash);
+}
+
+export function findConductorOperationEvents(
+  events: LoopBuildEvent[],
+  lookup: ConductorOperationLookup,
+): Array<LoopBuildEvent & { metadata: ConductorExecutionMetadata }> {
+  return events.flatMap((event) => {
+    const metadata = getConductorExecutionMetadata(event);
+    if (!metadata || !matchesOperationLookup(metadata, lookup)) return [];
+    return [{ ...event, metadata }];
+  });
+}
+
+export function getLatestConductorOperationAttempt(
+  events: LoopBuildEvent[],
+  lookup: ConductorOperationLookup,
+): (LoopBuildEvent & { metadata: ConductorExecutionMetadata }) | null {
+  const matches = findConductorOperationEvents(events, lookup);
+  return matches.at(-1) ?? null;
+}
+
+export function hasCompletedConductorOperation(
+  events: LoopBuildEvent[],
+  lookup: ConductorOperationLookup,
+): boolean {
+  return findConductorOperationEvents(events, lookup).length > 0;
+}
+
+export function isTerminalConductorExecution(metadata: ConductorExecutionMetadata): boolean {
+  if (isRecoverableConductorExecution(metadata)) return false;
+  return metadata.requiresUserInput
+    || metadata.phaseCompleted
+    || (metadata.ok === false && metadata.retryAllowed === false);
+}
+
+export function hasTerminalConductorPhaseResult(
+  events: LoopBuildEvent[],
+  input: { phase: ConductorExecutionMetadata["phaseBefore"]; parentArtifactHash: string },
+): boolean {
+  return events.some((event) => {
+    const metadata = getConductorExecutionMetadata(event);
+    return Boolean(metadata
+      && metadata.phaseBefore === input.phase
+      && metadata.parentArtifactHash === input.parentArtifactHash
+      && isTerminalConductorExecution(metadata));
+  });
 }
 
 /** Rebuild the persisted transcript without mutating or repairing stored message state. */

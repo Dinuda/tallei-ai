@@ -19,6 +19,23 @@ test("loadConfig resolves OpenCode provider settings", async () => {
   assert.equal(cfg.opencodeApiKey, "oc-test-key");
   assert.equal(cfg.opencodeBaseUrl, "https://opencode.ai/zen/v1");
   assert.equal(cfg.openaiModel, "deepseek-v4-flash");
+  assert.equal(cfg.bindingResolverModel, cfg.conductorModel);
+});
+
+test("loadConfig allows a dedicated binding resolver model", async () => {
+  const { loadConfig } = await import("../../../src/config/load.js");
+  const cfg = loadConfig({
+    NODE_ENV: "test",
+    TALLEI_HTTP__INTERNAL_API_SECRET: "test-secret",
+    TALLEI_DB__URL: "postgresql://tallei:tallei@localhost:5432/tallei",
+    TALLEI_AUTH__JWT_SECRET: "jwt-secret",
+    TALLEI_LLM__LOCAL_MODEL_MODE: "false",
+    TALLEI_LLM__PROVIDER: "opencode",
+    TALLEI_LLM__OPENCODE_API_KEY: "oc-test-key",
+    TALLEI_CONDUCTOR__MODEL: "big-pickle",
+    TALLEI_BINDING_RESOLVER__MODEL: "deepseek-v4-flash",
+  });
+  assert.equal(cfg.bindingResolverModel, "deepseek-v4-flash");
 });
 
 test("resolveLoopChatLanguageModel uses openai-compatible for OpenCode Zen chat models", async () => {

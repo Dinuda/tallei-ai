@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   pickRecommendedBinding,
+  resolveBindingActionOverrides,
   scoreOutcomeRelevance,
   selectExplicitBindingAction,
   extractConfigurableFields,
@@ -61,6 +62,47 @@ test("selectExplicitBindingAction distinguishes toolkit mismatch from missing ac
 
   assert.deepEqual(mismatch, { ok: false, code: "ACTION_TOOLKIT_MISMATCH", actualToolkit: "other" });
   assert.deepEqual(missing, { ok: false, code: "ACTION_NOT_FOUND" });
+});
+
+test("resolveBindingActionOverrides rejects unknown, missing, and cross-toolkit actions", async () => {
+  const result = await resolveBindingActionOverrides(
+    "gmail",
+    [{ id: "read" }, { id: "send" }],
+    [
+      { outcomeId: "transform", actionSlug: "GMAIL_SEND_EMAIL" },
+      { outcomeId: "read", actionSlug: "GMAIL_MISSING" },
+      { outcomeId: "send", actionSlug: "SLACK_SEND_MESSAGE" },
+    ],
+    async (_connector, actionSlug) => {
+      if (actionSlug === "GMAIL_MISSING") return { ok: false, code: "ACTION_NOT_FOUND" } as const;
+      if (actionSlug === "SLACK_SEND_MESSAGE") {
+        return { ok: false, code: "ACTION_TOOLKIT_MISMATCH", actualToolkit: "slack" } as const;
+      }
+      return { ok: true, action: { actionSlug, inputSchema: {} } } as const;
+    },
+  );
+
+  assert.equal(result.resolved.size, 0);
+  assert.deepEqual(result.invalid, [
+    { outcomeId: "transform", actionSlug: "GMAIL_SEND_EMAIL", code: "UNKNOWN_OUTCOME" },
+    { outcomeId: "read", actionSlug: "GMAIL_MISSING", code: "ACTION_NOT_FOUND" },
+    { outcomeId: "send", actionSlug: "SLACK_SEND_MESSAGE", code: "ACTION_TOOLKIT_MISMATCH", actualToolkit: "slack" },
+  ]);
+});
+
+test("resolveBindingActionOverrides preserves validated provider action slugs", async () => {
+  const result = await resolveBindingActionOverrides(
+    "gmail",
+    [{ id: "send" }],
+    [{ outcomeId: "send", actionSlug: "GMAIL_REPLY_TO_THREAD" }],
+    async () => ({
+      ok: true,
+      action: { actionSlug: "GMAIL_REPLY_TO_THREAD", inputSchema: {} },
+    }),
+  );
+
+  assert.deepEqual([...result.resolved], [["send", "GMAIL_REPLY_TO_THREAD"]]);
+  assert.deepEqual(result.invalid, []);
 });
 
 function candidate(overrides: Partial<BindingCandidate> & Pick<BindingCandidate, "actionSlug" | "score">): BindingCandidate {

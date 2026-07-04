@@ -4,7 +4,7 @@
 
 The UI lives at `/dashboard/loops/:loopId/conductor`. Backend domain code is in `src/loops/`; connectors in `src/integrations/composio/`; durable execution in `src/temporal/`.
 
-> **Note:** `src/services/conductor/` is a legacy stub from the pre–loop-engine spec-run stack. The active Conductor flow uses `src/loops/` + `/api/loops/*`, not `/api/conductor/*`.
+> **Note:** `src/services/conductor/` is a legacy stub from the pre–loop-engine spec-run stack. The active Conductor flow uses `src/loops/` + `/api/loops/`*, not `/api/conductor/`*.
 
 ---
 
@@ -35,13 +35,17 @@ flowchart TD
   P --> Q
 ```
 
-| Phase | What happens | Key tables |
-|-------|----------------|------------|
-| **Create** | Loop row + spec draft from template | `loops`, `loop_specs` |
-| **Conductor chat** | LLM patches spec via tools | `loop_specs` (revision++), `loop_chat_threads` (`kind=build`) |
-| **Compile** | Bind capabilities → Composio actions; freeze trigger slug on plan | `compiled_plans` (no Composio side effects) |
-| **Activate** | Provision Composio trigger + subscribe loop; mark plan active | `loops`, `workspace_trigger_channels`, `loop_trigger_subscriptions` |
-| **Run** | Planner loop + tools + optional approval | `loop_runs`, `loop_run_steps`, `loop_chat_threads` (`kind=run`), `approval_requests` |
+
+
+
+| Phase              | What happens                                                      | Key tables                                                                           |
+| ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **Create**         | Loop row + spec draft from template                               | `loops`, `loop_specs`                                                                |
+| **Conductor chat** | LLM patches spec via tools                                        | `loop_specs` (revision++), `loop_chat_threads` (`kind=build`)                        |
+| **Compile**        | Bind capabilities → Composio actions; freeze trigger slug on plan | `compiled_plans` (no Composio side effects)                                          |
+| **Activate**       | Provision Composio trigger + subscribe loop; mark plan active     | `loops`, `workspace_trigger_channels`, `loop_trigger_subscriptions`                  |
+| **Run**            | Planner loop + tools + optional approval                          | `loop_runs`, `loop_run_steps`, `loop_chat_threads` (`kind=run`), `approval_requests` |
+
 
 ---
 
@@ -55,19 +59,22 @@ flowchart TD
 
 **Tools exposed to the LLM:**
 
-| Tool | Server execute? | Purpose |
-|------|-----------------|--------|
-| `patchLoopSpec` | yes | Apply a partial spec patch (`intent`, `taskBlueprint`, bindings, trigger, output, agent, approval). Gated: bindings/triggers/output.connector blocked until blueprint connectors are chosen. |
-| `discoverConnectorsForBlueprint` | yes | Rank apps for the whole blueprint (each app once). Returns `askOptions`, `recommendedOptionIds`, `defaultQuestion`. Connected apps get a ranking boost only — user always picks via `pickConnectorApp`. |
-| `pickConnectorApp` | **no** (UI-only) | Present app picker; optional `question` text only — options come from the last discovery output in the transcript. |
-| `discoverBindings` | yes | Search + rank Composio **actions** within a **chosen** connector. Returns `suggestedBindings` only. |
-| `listTriggers` | yes | List Composio event triggers for a toolkit |
-| `listActions` | yes | Full action dump for one toolkit |
-| `connectToolkit` | yes | Start OAuth for a toolkit |
-| `askQuestion` | **no** (UI-only) | **Business forks only** — delivery mode, approval, schedule, ambiguous destination. **Forbidden:** connector app choice, Yes/No to confirm a connected app, Composio/API details. |
-| `confirmOutcomeBrief` | **no** (UI-only) | Display Confirm/Change buttons for the config-driven review card. Receives the server-computed current-spec hash as an internal value. |
-| `presentReplyOptions` | **no** (UI-only) | Clickable chips for compile / test / activate confirmations |
-| `compileLoop` / `testRunLoop` / `activateLoop` | yes | Go-live path after spec is ready |
+
+| Tool                                           | Server execute?  | Purpose                                                                                                                                                                                                 |
+| ---------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `patchLoopSpec`                                | yes              | Apply a partial spec patch (`intent`, `taskBlueprint`, bindings, trigger, output, agent, approval). Gated: bindings/triggers/output.connector blocked until blueprint connectors are chosen.            |
+| `discoverConnectorsForBlueprint`               | yes              | Rank apps for the whole blueprint (each app once). Returns `askOptions`, `recommendedOptionIds`, `defaultQuestion`. Connected apps get a ranking boost only — user always picks via `pickConnectorApp`. |
+| `pickConnectorApp`                             | **no** (UI-only) | Present app picker; optional `question` text only — options come from the last discovery output in the transcript.                                                                                      |
+| `discoverBindings`                             | yes              | Search + rank Composio **action candidates** within a **chosen** connector.                                                                                                                             |
+| `resolveBindings`                              | yes              | Resolve the complete trigger/action artifact in one strict, server-schema-constrained model call. Input is an empty object.                                                                             |
+| `listTriggers`                                 | yes              | List Composio event triggers for a toolkit                                                                                                                                                              |
+| `listActions`                                  | yes              | Full action dump for one toolkit                                                                                                                                                                        |
+| `connectToolkit`                               | yes              | Start OAuth for a toolkit                                                                                                                                                                               |
+| `askQuestion`                                  | **no** (UI-only) | **Business forks only** — delivery mode, approval, schedule, ambiguous destination. **Forbidden:** connector app choice, Yes/No to confirm a connected app, Composio/API details.                       |
+| `confirmOutcomeBrief`                          | **no** (UI-only) | Display Confirm/Change buttons for the config-driven review card. Receives the server-computed current-spec hash as an internal value.                                                                  |
+| `presentReplyOptions`                          | **no** (UI-only) | Clickable chips for compile / test / activate confirmations                                                                                                                                             |
+| `compileLoop` / `testRunLoop` / `activateLoop` | yes              | Go-live path after spec is ready                                                                                                                                                                        |
+
 
 The dashboard shows a **Loop spec** sheet (`ConductorSpecSheet`) when `spec.taskBlueprint` is set — outcome roles, connector choices, missing slots, compile/run actions.
 
@@ -111,21 +118,25 @@ flowchart TB
   Tools --> Decomp
 ```
 
+
+
 ### Key UI files
 
-| File | Role |
-|------|------|
-| `dashboard/src/components/conductor-builder.tsx` | `useChat` transport, spec meta sync |
-| `dashboard/src/components/conductor/conductor-builder-layout.tsx` | Composer: pending question vs free-text vs thinking indicator |
-| `dashboard/src/components/conductor/conductor-builder-chat.tsx` | Transcript + tool part rendering |
-| `dashboard/src/components/conductor/conductor-shared.ts` | `findPendingInteractivePrompt`, `findLatestConnectorDiscovery`, blueprint connector checks, Yes/No → app picker remap |
-| `dashboard/src/components/conductor/builder-connector-prompt.tsx` | App card picker (`questionId: connector-app`) |
-| `dashboard/src/components/ai-elements/interactive-prompt-menu.tsx` | Generic `askQuestion` / `pickConnectorApp` answer UI |
-| `dashboard/src/lib/conductor-prompt-suggestions.ts` | Heuristic Yes/compile/test chips when no pending tool prompt |
+
+| File                                                               | Role                                                                                                                  |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, spec meta sync                                                                                   |
+| `dashboard/src/components/conductor/conductor-builder-layout.tsx`  | Composer: pending question vs free-text vs thinking indicator                                                         |
+| `dashboard/src/components/conductor/conductor-builder-chat.tsx`    | Transcript + tool part rendering                                                                                      |
+| `dashboard/src/components/conductor/conductor-shared.ts`           | `findPendingInteractivePrompt`, `findLatestConnectorDiscovery`, blueprint connector checks, Yes/No → app picker remap |
+| `dashboard/src/components/conductor/builder-connector-prompt.tsx`  | App card picker (`questionId: connector-app`)                                                                         |
+| `dashboard/src/components/ai-elements/interactive-prompt-menu.tsx` | Generic `askQuestion` / `pickConnectorApp` answer UI                                                                  |
+| `dashboard/src/lib/conductor-prompt-suggestions.ts`                | Heuristic Yes/compile/test chips when no pending tool prompt                                                          |
+
 
 ### Chat transport behavior
 
-- **`sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls`** — after the user answers a UI tool (`pickConnectorApp`, `askQuestion`, `presentReplyOptions`), the stream continues without an extra user message.
+- `**sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls**` — after the user answers a UI tool (`pickConnectorApp`, `askQuestion`, `presentReplyOptions`), the stream continues without an extra user message.
 - **PUT `/api/loops/:id/chat`** — debounced transcript persistence (500ms).
 - **GET `/api/loops/:id`** — hydrates `chatMessages` + latest spec on load.
 
@@ -177,13 +188,15 @@ sequenceDiagram
   C->>S: patch confirmation hash, or patch the requested change
 ```
 
+
+
 ### Outcome-first planning (unified Conductor)
 
-1. **`patchLoopSpec`** → `intent` (`goal`, `outcome`, `successCriteria`) + `taskBlueprint` outcome roles on the first turn. Conductor derives these directly — no `decomposeTask` / nested analyst.
-2. **`askQuestion`** only when a **business fork** is unresolved — chiefly **draft vs send** when both appear in the user message without clear sequencing.
-3. **`discoverConnectorsForBlueprint`** once → **`pickConnectorApp`** always (user chooses; connected `*` is ranking hint only).
-4. **`discoverBindings`** per chosen connector → `bindings[]` with optional `role`.
-5. **`listTriggers`** + patch event trigger when the loop is event-driven.
+1. `**patchLoopSpec**` → `intent` (`goal`, `outcome`, `successCriteria`) + `taskBlueprint` outcome roles on the first turn. Conductor derives these directly — no `decomposeTask` / nested analyst.
+2. `**askQuestion**` only when a **business fork** is unresolved — chiefly **draft vs send** when both appear in the user message without clear sequencing.
+3. `**discoverConnectorsForBlueprint`** once → `**pickConnectorApp`** always (user chooses; connected `*` is ranking hint only).
+4. `**discoverBindings**` per chosen connector + `**listTriggers**` gather current provider candidates.
+5. `**resolveBindings**` returns server-owned questions when choices are missing, then atomically commits the validated binding artifact after answers are available.
 6. **Confirmation:** the dashboard renders the current `LoopSpec`, and Conductor calls `confirmOutcomeBrief` only for interaction; there is no review tool, duplicated summary payload, Markdown parsing, or nested summarizer model.
 7. **Compile path:** after confirmation, `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop`.
 
@@ -216,50 +229,56 @@ The old flow called `reviewOutcomeBrief`, waited for a separate planner-model JS
 
 Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` parts remain readable, unanswered legacy `confirmOutcomeBrief` calls remain resumable, and the dashboard no longer requires a review result before showing confirmation buttons. New transcripts never call `reviewOutcomeBrief`.
 
-| Block | Purpose |
-|-------|---------|
-| **First principles** | Outcome-first, intent/blueprint, draft vs send fork |
-| **Ownership** | Autonomous config, agent.instructions, bindings auto-apply |
-| **Sequence** | 5-step build order |
-| **Connectors & auto-apply** | `autoApplyConnector` fast path vs `pickConnectorApp` |
-| **Tool playbook** | One-line tool index (UI tools included) |
-| **Technical defaults** | Triggers, email.read |
-| **Dynamic tail** | Workspace, connected `*`, blockers, **Next** hint, **Spec JSON once** |
+
+| Block                       | Purpose                                                               |
+| --------------------------- | --------------------------------------------------------------------- |
+| **First principles**        | Outcome-first, intent/blueprint, draft vs send fork                   |
+| **Ownership**               | Autonomous config, agent.instructions, bindings auto-apply            |
+| **Sequence**                | 5-step build order                                                    |
+| **Connectors & auto-apply** | `autoApplyConnector` fast path vs `pickConnectorApp`                  |
+| **Tool playbook**           | One-line tool index (UI tools included)                               |
+| **Technical defaults**      | Triggers, email.read                                                  |
+| **Dynamic tail**            | Workspace, connected `*`, blockers, **Next** hint, **Spec JSON once** |
+
 
 **Why not spec twice?** An older prompt dumped `taskBlueprint` as its own JSON block *and* the full `LoopSpec` — duplicate tokens with no extra signal. Current prompt includes **one** `Spec JSON:` line (full spec, compact stringify).
 
 **UI tools are not in the prompt as replacements for tool calls** — the prompt tells Conductor to invoke `pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, and `presentReplyOptions` as tools. The dashboard renders those tools:
 
-- **`pickConnectorApp`** → `BuilderConnectorPrompt` app cards
-- **`askQuestion`** → `InteractivePromptMenu`
-- **`confirmOutcomeBrief`** → streamable review card in the transcript plus confirmation/change buttons in the composer
-- **`presentReplyOptions`** + **`deriveConductorPromptSuggestions`** → suggestion chips above the composer when no pending tool prompt
+- `**pickConnectorApp`** → `BuilderConnectorPrompt` app cards
+- `**askQuestion`** → `InteractivePromptMenu`
+- `**confirmOutcomeBrief**` → streamable review card in the transcript plus confirmation/change buttons in the composer
+- `**presentReplyOptions**` + `**deriveConductorPromptSuggestions**` → suggestion chips above the composer when no pending tool prompt
 
 **Auto-apply:** when `discoverConnectorsForBlueprint` returns `autoApplyConnector`, Conductor patches immediately; client may also auto-submit `pickConnectorApp` if the model called it anyway (`findAutoConnectorPromptTarget`).
 
 ### When Conductor **should** interrupt the user
 
-| Situation | Tool | Example |
-|-----------|------|---------|
-| Draft vs send ambiguous | `askQuestion` | User said “draft and send replies” with no ordering |
-| Connector choice (always) | `pickConnectorApp` | After discovery — show ranked app cards; user picks even if Gmail is connected |
-| User picked unconnected app | `connectToolkit` + wait | Picker choice has “Needs connection” |
-| Binding fork (rare) | `askQuestion` with discovery `askOptions` | Send immediately vs save draft — plain-language labels only |
-| Ready to go live | `presentReplyOptions` | “Compile and test?” chips |
-| Approval / schedule / unclear output destination | `askQuestion` | “Run daily at 9am?” |
+
+| Situation                                        | Tool                                      | Example                                                                        |
+| ------------------------------------------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
+| Draft vs send ambiguous                          | `askQuestion`                             | User said “draft and send replies” with no ordering                            |
+| Connector choice (always)                        | `pickConnectorApp`                        | After discovery — show ranked app cards; user picks even if Gmail is connected |
+| User picked unconnected app                      | `connectToolkit` + wait                   | Picker choice has “Needs connection”                                           |
+| Binding fork (rare)                              | `askQuestion` with discovery `askOptions` | Send immediately vs save draft — plain-language labels only                    |
+| Ready to go live                                 | `presentReplyOptions`                     | “Compile and test?” chips                                                      |
+| Approval / schedule / unclear output destination | `askQuestion`                             | “Run daily at 9am?”                                                            |
+
 
 ### When Conductor **should not** interrupt (resolve autonomously)
 
-| Situation | What to do instead |
-|-----------|-------------------|
-| Trigger type, Composio slug, fetch strategy | `listTriggers` + `discoverBindings` → patch |
-| Agent instructions | Write operational brief from outcome + success criteria |
-| Capability bundles (“Read & Send”) | Infer from intent; `discoverBindings` |
-| Connected app is top-ranked | **Still show `pickConnectorApp`** — connected boosts rank, does not auto-select |
+
+| Situation                                   | What to do instead                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------- |
+| Trigger type, Composio slug, fetch strategy | `listTriggers` + `discoverBindings` → patch                                     |
+| Agent instructions                          | Write operational brief from outcome + success criteria                         |
+| Capability bundles (“Read & Send”)          | Infer from intent; `discoverBindings`                                           |
+| Connected app is top-ranked                 | **Still show `pickConnectorApp`** — connected boosts rank, does not auto-select |
+
 
 ### Anti-patterns (do not do)
 
-- **`askQuestion` with Yes/No to confirm a connected app** — use `pickConnectorApp`; UI remaps if model misbehaves.
+- `**askQuestion` with Yes/No to confirm a connected app** — use `pickConnectorApp`; UI remaps if model misbehaves.
 - **Auto-selecting Gmail because it is connected** — user must always confirm via picker.
 - **Per-role connector options** (Trigger: Gmail, Send: Gmail) — one app per loop in the picker.
 - **Hand-built connector option lists** — always use `discoverConnectorsForBlueprint` output.
@@ -273,18 +292,19 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` p
 
 ### `discoverConnectorsForBlueprint`
 
-1. For each pending non-`transform` outcome, run `discoverConnectorsForOutcome` (Composio tool search + catalogue hints + `CONNECTED_TOOLKIT_BOOST = 4` for connected apps).
+1. For each pending non-`transform` outcome, run `discoverConnectorsForOutcome` using Composio tool search and catalogue hints.
 2. Merge candidates **by connector slug** (each app appears once).
-3. Sort by score → `askOptions` + top-5 `recommendedOptionIds`.
-4. **Always** follow with `pickConnectorApp` — connected status affects ranking only; the user chooses the app.
+3. Sort by capability score, use connection state as a tie-breaker, and ensure viable connected apps are represented in the top-five `recommendedOptionIds`.
+4. Keep the full connectable catalogue in `askOptions`; compatibility and connection state affect ranking, never visibility or selectability.
+5. **Always** follow with `pickConnectorApp` — connected status affects ranking only; the user chooses the app.
 
 ### Default picker question
 
-Hardcoded constant `DEFAULT_CONNECTOR_PICK_QUESTION`:
+`connectorQuestionForOutcome()` derives the picker wording from the actual blueprint outcome. For example, `Detects when a new support ticket is submitted` becomes:
 
-> Which app should power this loop? Triggers and actions are configured automatically after you pick.
+> Where should a new support ticket come from?
 
-Conductor may pass a custom `question` string to `pickConnectorApp`. The UI injects options from the **last** `discoverConnectorsForBlueprint` output in the transcript (`findLatestConnectorDiscovery`).
+`DEFAULT_CONNECTOR_PICK_QUESTION` is used only as a missing-discovery fallback. The UI injects the outcome-specific question and full option catalogue from the **last** `discoverConnectorsForBlueprint` output in the transcript (`findLatestConnectorDiscovery`).
 
 ### Client-side prompt handling
 
@@ -336,32 +356,40 @@ After connector pick, pending outcomes get `selectedConnector` + `status: "chose
 
 **User:** “Automatically classify incoming support tickets by priority and draft personalized replies for review.”
 
-| Step | Conductor action |
-|------|------------------|
-| 1 | `analyzeIntent` — `intent.outcome`, `executionOrder` (trigger → source → transform → destination), approval |
-| 2 | `patchLoopSpec` — `taskBlueprint.outcomes` derived from `executionOrder` in same order; `agent.instructions` operational brief |
-| 2 | No `askQuestion` — “draft for review” is clear (not send-immediately) |
-| 3 | `discoverConnectorsForBlueprint` — Gmail connected, top ranked |
-| 4 | `pickConnectorApp` — user confirms Gmail (or picks another app) |
-| 5 | `patchLoopSpec` — `selectedConnector: "gmail"` on trigger/source/destination outcomes |
-| 6 | `listTriggers` + `discoverBindings` → patch bindings, event trigger, output, approval |
-| 7 | Render the review card from `LoopSpec`; call `confirmOutcomeBrief` for the interaction |
-| 8 | After confirmation, patch the current hash and continue to compile/test |
+
+| Step | Conductor action                                                                                                               |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | `analyzeIntent` — `intent.outcome`, `executionOrder` (trigger → source → transform → destination), approval                    |
+| 2    | `patchLoopSpec` — `taskBlueprint.outcomes` derived from `executionOrder` in same order; `agent.instructions` operational brief |
+| 2    | No `askQuestion` — “draft for review” is clear (not send-immediately)                                                          |
+| 3    | `discoverConnectorsForBlueprint` — Gmail connected, top ranked                                                                 |
+| 4    | `pickConnectorApp` — user confirms Gmail (or picks another app)                                                                |
+| 5    | `patchLoopSpec` — `selectedConnector: "gmail"` on trigger/source/destination outcomes                                          |
+| 6    | `listTriggers` + `discoverBindings` → patch bindings, event trigger, output, approval                                          |
+| 7    | Render the review card from `LoopSpec`; call `confirmOutcomeBrief` for the interaction                                         |
+| 8    | After confirmation, patch the current hash and continue to compile/test                                                        |
+
 
 **User:** Same prompt but also says “and send the email” without sequencing.
 
-| Step | Conductor action |
-|------|------------------|
-| 1 | `patchLoopSpec` — provisional blueprint |
-| 2 | **`askQuestion`** — “Should replies be sent automatically or saved as drafts for your review first?” |
-| 3 | User answers → patch resolved `intent.outcome` |
-| 4 | Continue connector discovery as above |
+
+| Step | Conductor action                                                                                     |
+| ---- | ---------------------------------------------------------------------------------------------------- |
+| 1    | `patchLoopSpec` — provisional blueprint                                                              |
+| 2    | `**askQuestion`** — “Should replies be sent automatically or saved as drafts for your review first?” |
+| 3    | User answers → patch resolved `intent.outcome`                                                       |
+| 4    | Continue connector discovery as above                                                                |
+
 
 ---
 
 ## Binding discovery
 
-After connectors are chosen, `discoverBindings` resolves Composio actions. Returns `suggestedBindings` only — Conductor should auto-apply them.
+After connectors are chosen, `discoverBindings({ toolkit })` and `listTriggers({ toolkit })` gather deterministic candidates. The Conductor cannot submit workflow outcomes, action overrides, trigger slugs, or provider configuration.
+
+`resolveBindings({})` derives canonical outcomes and catalogues from build state. If a business choice is missing, it returns server-authored `pendingQuestions` without invoking the resolver model. Once answers exist, the server constructs a strict runtime schema with fixed outcome properties, catalogue-limited action and trigger values, and only surfaced trigger fields such as `labelIds`. One dedicated structured-output call produces the complete artifact; the server validates it again and persists one `binding.resolved` event. Invalid output persists no binding evidence and returns `BINDING_RESOLUTION_FAILED`.
+
+Historical `discoverBindings` and `setBindingConfig` evidence remains readable for existing build histories, but new builds use only the atomic resolver path.
 
 **Connectors in chat only** — the Conductor UI does not poll connectors separately; OAuth is initiated through `connectToolkit` in conversation.
 
@@ -373,10 +401,12 @@ After connectors are chosen, `discoverBindings` resolves Composio actions. Retur
 
 Build and run transcripts share one table with two thread kinds:
 
-| `kind` | Scope | Linked fields | Written by |
-|--------|--------|---------------|------------|
-| `build` | One row per `(loop_id, tenant_id, user_id)` | `spec_revision`, `compiled_plan_id` updated on spec save / compile | Conductor `POST`/`PUT` chat, `saveSpecDraft`, `saveCompiledPlan` |
-| `run` | One row per `run_id` | `compiled_plan_id` | `createLoopRun`, `insertRunStep`, `deliverOutputActivity`, `failRunActivity` |
+
+| `kind`  | Scope                                       | Linked fields                                                      | Written by                                                                   |
+| ------- | ------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `build` | One row per `(loop_id, tenant_id, user_id)` | `spec_revision`, `compiled_plan_id` updated on spec save / compile | Conductor `POST`/`PUT` chat, `saveSpecDraft`, `saveCompiledPlan`             |
+| `run`   | One row per `run_id`                        | `compiled_plan_id`                                                 | `createLoopRun`, `insertRunStep`, `deliverOutputActivity`, `failRunActivity` |
+
 
 - **GET** `/api/loops/:id` returns `chatMessages` + `buildChat: { specRevision, compiledPlanId }`.
 - **GET** `/api/loops/:id/runs/:runId` returns `chatMessages` (run transcript).
@@ -390,16 +420,18 @@ Legacy `loop_conductor_chats` rows migrate into `loop_chat_threads` on schema in
 
 Defined in `src/loops/spec.ts`.
 
-| Area | Fields |
-|------|--------|
-| **Intent** | `goal`, optional `constraints` |
-| **Trigger** | `manual`, `schedule` (cron + timezone), or `event` (`source` + required `composioSlug`, optional `eventType` label) |
-| **Profile** | `agentic` (default), `monitor`, `sync` |
-| **Bindings** | `{ connector, capability, role?, optional? }[]` |
-| **Task blueprint** | `taskBlueprint` — outcome roles, connector candidates, user choices (Conductor working plan) |
-| **Agent** | `instructions`, `maxSteps` |
-| **Approval** | `mode`, `sensitiveCapabilities`, `onTimeout` |
-| **Output** | `kind`, `target` |
+
+| Area               | Fields                                                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| **Intent**         | `goal`, optional `constraints`                                                                                      |
+| **Trigger**        | `manual`, `schedule` (cron + timezone), or `event` (`source` + required `composioSlug`, optional `eventType` label) |
+| **Profile**        | `agentic` (default), `monitor`, `sync`                                                                              |
+| **Bindings**       | `{ connector, capability, role?, optional? }[]`                                                                     |
+| **Task blueprint** | `taskBlueprint` — outcome roles, connector candidates, user choices (Conductor working plan)                        |
+| **Agent**          | `instructions`, `maxSteps`                                                                                          |
+| **Approval**       | `mode`, `sensitiveCapabilities`, `onTimeout`                                                                        |
+| **Output**         | `kind`, `target`                                                                                                    |
+
 
 **Starter templates** (`seedSpecFromTemplate` in `src/loops/patch.ts`): `research_digest`, `newsletter_loop`, `lead_scoring`, `support_auto_reply`, `smart_alerts`, `crm_sync`.
 
@@ -430,10 +462,12 @@ Common errors: `CONNECTOR_NOT_CONNECTED`, `UNSUPPORTED_CAPABILITY`, `INVALID_CRO
 
 Two fields, two meanings — enforced in `src/loops/event-trigger.ts`:
 
-| Field | Meaning | Example |
-|-------|---------|---------|
-| `trigger.source` | Connector / toolkit | `gmail` |
+
+| Field                  | Meaning                    | Example                   |
+| ---------------------- | -------------------------- | ------------------------- |
+| `trigger.source`       | Connector / toolkit        | `gmail`                   |
 | `trigger.composioSlug` | Composio trigger type slug | `GMAIL_NEW_GMAIL_MESSAGE` |
+
 
 **Three layers (defense in depth):**
 
@@ -486,11 +520,13 @@ Table `workspace_trigger_channels` is unique on:
 (workspace_id, connected_account_id, composio_trigger_slug)
 ```
 
-| Layer | Table | Role |
-|-------|--------|------|
-| **Channel** | `workspace_trigger_channels` | One Composio `triggerInstances.upsert` per channel; `ref_count` tracks subscribers |
-| **Subscription** | `loop_trigger_subscriptions` | Each active event loop points at a channel (`loop_id` unique) |
-| **Idempotency** | `webhook_event_deliveries` | Skip duplicate runs for `(external_event_id, loop_id)` on Composio retries |
+
+| Layer            | Table                        | Role                                                                               |
+| ---------------- | ---------------------------- | ---------------------------------------------------------------------------------- |
+| **Channel**      | `workspace_trigger_channels` | One Composio `triggerInstances.upsert` per channel; `ref_count` tracks subscribers |
+| **Subscription** | `loop_trigger_subscriptions` | Each active event loop points at a channel (`loop_id` unique)                      |
+| **Idempotency**  | `webhook_event_deliveries`   | Skip duplicate runs for `(external_event_id, loop_id)` on Composio retries         |
+
 
 **Activate** (`provisionEventTrigger`): creates or reuses a channel. If a channel row exists but `composio_instance_id` is null (e.g. after pause released the instance), Composio `triggerInstances.upsert` runs again. If the channel is healthy, increment `ref_count` only.
 
@@ -521,10 +557,14 @@ sequenceDiagram
   Tallei->>WsB: fan-out to subscribed loops in Work only
 ```
 
-| Workspace | Composio entity suffix | Gmail account | Trigger instance | Webhook `entityId` |
-|-----------|------------------------|---------------|------------------|--------------------|
-| Personal | `…:personal-ws-id` | alice@gmail.com | Instance A | `tallei:…:personal-ws-id` |
-| Work | `…:work-ws-id` | bob@company.com | Instance B | `tallei:…:work-ws-id` |
+
+
+
+| Workspace | Composio entity suffix | Gmail account                             | Trigger instance | Webhook `entityId`        |
+| --------- | ---------------------- | ----------------------------------------- | ---------------- | ------------------------- |
+| Personal  | `…:personal-ws-id`     | [alice@gmail.com](mailto:alice@gmail.com) | Instance A       | `tallei:…:personal-ws-id` |
+| Work      | `…:work-ws-id`         | [bob@company.com](mailto:bob@company.com) | Instance B       | `tallei:…:work-ws-id`     |
+
 
 Both hit the **same** endpoint (`POST /api/webhooks/composio`), but Composio sends **separate events** per trigger instance / connected account. `dispatchComposioTriggerToLoops` resolves the workspace from `entityId` and only starts loops in that workspace.
 
@@ -561,21 +601,25 @@ See [temporal-loops.md](./temporal-loops.md#webhooks) for endpoint URLs, signatu
 
 ### Triggers
 
-| Kind | Source |
-|------|--------|
-| `manual` | Conductor **Run now** or `POST /api/loops/:id/runs` |
-| `schedule` | Temporal Schedule on cron |
-| `event` | Composio webhook → `dispatchComposioTriggerToLoops` (fan-out to subscribed loops in the **same workspace**; deduped via `webhook_event_deliveries`) |
+
+| Kind       | Source                                                                                                                                              |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manual`   | Conductor **Run now** or `POST /api/loops/:id/runs`                                                                                                 |
+| `schedule` | Temporal Schedule on cron                                                                                                                           |
+| `event`    | Composio webhook → `dispatchComposioTriggerToLoops` (fan-out to subscribed loops in the **same workspace**; deduped via `webhook_event_deliveries`) |
+
 
 ### Execution
 
 All profiles share the same entrypoint (`loopRunWorkflow` when Temporal is on, `executeLoopRunHeadless` when off).
 
-| Profile | Runner |
-|---------|--------|
+
+| Profile   | Runner                                                                                                         |
+| --------- | -------------------------------------------------------------------------------------------------------------- |
 | `agentic` | `runAgenticLoop` (`src/loops/agentic-run.ts`) — planner → optional approval (DB poll) → tool execute → deliver |
-| `monitor` | Rule evaluation on metric sample + optional notify |
-| `sync` | Preview read both sides (full sync v2) |
+| `monitor` | Rule evaluation on metric sample + optional notify                                                             |
+| `sync`    | Preview read both sides (full sync v2)                                                                         |
+
 
 **Agentic loop** (single implementation for Temporal and headless):
 
@@ -592,47 +636,53 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 
 ### Profiles
 
-| Profile | Runtime |
-|---------|---------|
-| `agentic` | Planner + tools + approvals |
+
+| Profile   | Runtime                                            |
+| --------- | -------------------------------------------------- |
+| `agentic` | Planner + tools + approvals                        |
 | `monitor` | Rule evaluation on metric sample + optional notify |
-| `sync` | Preview read both sides (full sync v2) |
+| `sync`    | Preview read both sides (full sync v2)             |
+
 
 ---
 
 ## HTTP API summary
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/loops` | List loops |
-| `POST` | `/api/loops` | Create loop |
-| `GET` | `/api/loops/:id` | Loop + latest spec |
-| `POST` | `/api/loops/:id/chat` | **Conductor chat stream** (persists transcript on finish) |
-| `PUT` | `/api/loops/:id/chat` | Save Conductor chat messages |
-| `POST` | `/api/loops/:id/compile` | Compile spec |
-| `POST` | `/api/loops/:id/activate` | Activate plan |
-| `POST` | `/api/loops/:id/pause` / `resume` | Lifecycle |
-| `GET` | `/api/loops/:id/runs` | List runs |
-| `GET` | `/api/loops/:id/runs/:runId` | Run + steps + pending approval |
-| `POST` | `/api/loops/:id/runs` | Manual run |
-| `GET` | `/api/connectors` | Workspace connector status |
-| `GET` | `/api/connectors/:toolkit/triggers` | Composio trigger catalogue for toolkit |
-| `GET` | `/api/connectors/:toolkit/actions` | Composio action catalogue for toolkit |
-| `GET` | `/api/approvals` | Pending approvals |
-| `POST` | `/api/approvals/:id/decide` | Approve / reject / edit |
+
+| Method | Path                                | Purpose                                                   |
+| ------ | ----------------------------------- | --------------------------------------------------------- |
+| `GET`  | `/api/loops`                        | List loops                                                |
+| `POST` | `/api/loops`                        | Create loop                                               |
+| `GET`  | `/api/loops/:id`                    | Loop + latest spec                                        |
+| `POST` | `/api/loops/:id/chat`               | **Conductor chat stream** (persists transcript on finish) |
+| `PUT`  | `/api/loops/:id/chat`               | Save Conductor chat messages                              |
+| `POST` | `/api/loops/:id/compile`            | Compile spec                                              |
+| `POST` | `/api/loops/:id/activate`           | Activate plan                                             |
+| `POST` | `/api/loops/:id/pause` / `resume`   | Lifecycle                                                 |
+| `GET`  | `/api/loops/:id/runs`               | List runs                                                 |
+| `GET`  | `/api/loops/:id/runs/:runId`        | Run + steps + pending approval                            |
+| `POST` | `/api/loops/:id/runs`               | Manual run                                                |
+| `GET`  | `/api/connectors`                   | Workspace connector status                                |
+| `GET`  | `/api/connectors/:toolkit/triggers` | Composio trigger catalogue for toolkit                    |
+| `GET`  | `/api/connectors/:toolkit/actions`  | Composio action catalogue for toolkit                     |
+| `GET`  | `/api/approvals`                    | Pending approvals                                         |
+| `POST` | `/api/approvals/:id/decide`         | Approve / reject / edit                                   |
+
 
 ---
 
 ## Dashboard routes
 
-| Path | Page |
-|------|------|
-| `/dashboard/loops` | Loop list + starter cards |
-| `/dashboard/loops/new` | Blank loop |
-| `/dashboard/loops/:loopId/conductor` | **Conductor** (chat + spec + compile/activate/run) |
-| `/dashboard/loops/:loopId/runs` | Run history |
-| `/dashboard/loops/:loopId/runs/:runId` | Run detail |
-| `/dashboard/approvals` | Approval inbox |
+
+| Path                                   | Page                                               |
+| -------------------------------------- | -------------------------------------------------- |
+| `/dashboard/loops`                     | Loop list + starter cards                          |
+| `/dashboard/loops/new`                 | Blank loop                                         |
+| `/dashboard/loops/:loopId/conductor`   | **Conductor** (chat + spec + compile/activate/run) |
+| `/dashboard/loops/:loopId/runs`        | Run history                                        |
+| `/dashboard/loops/:loopId/runs/:runId` | Run detail                                         |
+| `/dashboard/approvals`                 | Approval inbox                                     |
+
 
 `/dashboard/loops/:loopId/builder` redirects to `conductor` for old bookmarks.
 
@@ -647,10 +697,11 @@ TALLEI_LLM__PROVIDER=opencode
 TALLEI_LLM__OPENCODE_API_KEY=...
 TALLEI_LLM__OPENCODE_BASE_URL=https://opencode.ai/zen/v1
 TALLEI_CONDUCTOR__MODEL=gpt-5.3-codex          # Conductor chat (tools + streaming)
+TALLEI_BINDING_RESOLVER__MODEL=gpt-5.3-codex   # Strict binding structured output; defaults to Conductor
 TALLEI_LLM__OPENCODE_MODEL=deepseek-v4-flash   # Runtime planner
 ```
 
-`TALLEI_CONDUCTOR__MODEL` falls back to legacy `TALLEI_LOOP_BUILDER__OPENAI_MODEL` if set.
+`TALLEI_CONDUCTOR__MODEL` falls back to legacy `TALLEI_LOOP_BUILDER__OPENAI_MODEL` if set. `TALLEI_BINDING_RESOLVER__MODEL` defaults to the resolved Conductor model.
 
 ### Temporal
 
@@ -716,3 +767,4 @@ cd dashboard && npm run dev             # UI :3001
 2. Conductor chat → connect Gmail via `connectToolkit` if needed.
 3. **Compile** → **Activate** → **Run now**.
 4. Watch run at `/dashboard/loops/:id/runs/:runId`; approve sensitive sends inline or in `/dashboard/approvals`.
+

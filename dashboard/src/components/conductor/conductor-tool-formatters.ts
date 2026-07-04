@@ -7,6 +7,7 @@ export function formatCompileSummary(output: unknown): string | null {
   }
   if (row.errors?.length) return `Compile failed — ${row.errors.length} blocker(s)`;
   if (row.error) return row.error;
+  if (row.ok === false) return "Compile could not run for the current build step.";
   return null;
 }
 

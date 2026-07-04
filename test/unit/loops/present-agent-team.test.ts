@@ -61,11 +61,11 @@ test("normalizeAgentTeam groups adjacent retrieval and classification into one p
   assert.equal(team.triggers?.length, 1);
   assert.equal(team.specialists.length, 3);
   assert.deepEqual(team.specialists[0]?.steps.map((step) => step.outcomeId), ["read", "classify"]);
-  assert.equal(team.specialists[0]?.roleTitle, "Support Operations Analyst");
+  assert.equal(team.specialists[0]?.roleTitle, "Business Analyst");
   assert.deepEqual(team.specialists[1]?.steps.map((step) => step.outcomeId), ["draft"]);
-  assert.equal(team.specialists[1]?.roleTitle, "Response Specialist");
+  assert.equal(team.specialists[1]?.roleTitle, "Operations Analyst");
   assert.deepEqual(team.specialists[2]?.steps.map((step) => step.outcomeId), ["send"]);
-  assert.equal(team.specialists[2]?.roleTitle, "Communications Coordinator");
+  assert.equal(team.specialists[2]?.roleTitle, "Delivery Coordinator");
   assert.equal(team.reviewerInsertIndex, 2);
 });
 
@@ -91,12 +91,12 @@ test("normalizeAgentTeam assigns professional job roles instead of model task la
     ],
   }, spec);
 
-  assert.equal(team.specialists[0]?.roleTitle, "Response Specialist");
-  assert.equal(team.specialists[1]?.roleTitle, "Customer Outreach Coordinator");
+  assert.equal(team.specialists[0]?.roleTitle, "Operations Analyst");
+  assert.equal(team.specialists[1]?.roleTitle, "Delivery Coordinator");
   assert.notEqual(team.specialists[1]?.roleTitle, "Reply Sender");
 });
 
-test("normalizeAgentTeam maps support inbox personas to customer-facing job roles", () => {
+test("normalizeAgentTeam derives roles from workflow roles rather than domain vocabulary", () => {
   const spec = buildSpec([
     { id: "trigger", role: "trigger", description: "Detect a new incoming support ticket", selectedConnector: "gmail" },
     { id: "read", role: "source", description: "Read the ticket details (subject, message, customer info)", selectedConnector: "gmail" },
@@ -121,8 +121,8 @@ test("normalizeAgentTeam maps support inbox personas to customer-facing job role
     ],
   }, spec);
 
-  assert.equal(team.specialists[0]?.roleTitle, "Customer Support Analyst");
-  assert.equal(team.specialists[1]?.roleTitle, "Customer Outreach Coordinator");
+  assert.equal(team.specialists[0]?.roleTitle, "Business Analyst");
+  assert.equal(team.specialists[1]?.roleTitle, "Delivery Coordinator");
 });
 
 test("normalizeAgentTeam derives job roles when the model omits suggestions", () => {
@@ -134,7 +134,7 @@ test("normalizeAgentTeam derives job roles when the model omits suggestions", ()
     groups: [{ outcomeIds: ["send"] }],
   }, spec);
 
-  assert.equal(team.specialists[0]?.roleTitle, "Communications Coordinator");
+  assert.equal(team.specialists[0]?.roleTitle, "Delivery Coordinator");
 });
 
 test("normalizeAgentTeam falls back to one persona per outcome on invalid grouping", () => {

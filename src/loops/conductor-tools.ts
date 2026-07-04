@@ -3,6 +3,7 @@ import {
   confirmOutcomeBriefActionSchema,
   type ConfirmOutcomeBriefAction,
 } from "./confirm-outcome-brief-action.js";
+import { BUILD_PHASES, buildPhaseSchema } from "./build-state.js";
 import { intentAnalysisSchema } from "./intent-discovery.js";
 
 export const askQuestionOptionSchema = z.object({
@@ -128,21 +129,12 @@ export type PresentReplyOptionsOutput = z.infer<typeof presentReplyOptionsOutput
 
 export const discoverBindingsInputSchema = z.object({
   toolkit: z.string().min(1),
-  outcomes: z.array(z.object({
-    id: z.string().min(1),
-    description: z.string().min(1),
-    role: z.enum(["trigger", "source", "transform", "destination"]).optional(),
-  })).min(1),
-});
+}).strict();
 
 export type DiscoverBindingsInput = z.infer<typeof discoverBindingsInputSchema>;
 
-export const setBindingConfigInputSchema = z.object({
-  outcomeId: z.string().min(1),
-  connector: z.string().min(1),
-  config: z.record(z.string(), z.unknown()),
-});
-export type SetBindingConfigInput = z.infer<typeof setBindingConfigInputSchema>;
+export const resolveBindingsInputSchema = z.object({}).strict();
+export type ResolveBindingsInput = z.infer<typeof resolveBindingsInputSchema>;
 
 export const discoverConnectorsForBlueprintInputSchema = z.object({
   outcomes: z.array(z.object({
@@ -153,6 +145,60 @@ export const discoverConnectorsForBlueprintInputSchema = z.object({
 });
 
 export type DiscoverConnectorsForBlueprintInput = z.infer<typeof discoverConnectorsForBlueprintInputSchema>;
+
+export const conductorExecutionMetadataSchema = z.object({
+  ok: z.boolean(),
+  operationKey: z.string().min(1),
+  phaseBefore: buildPhaseSchema,
+  phaseAfter: buildPhaseSchema,
+  phaseCompleted: z.boolean(),
+  requiresUserInput: z.boolean(),
+  retryAllowed: z.boolean(),
+  parentArtifactHash: z.string().min(1),
+  invalidatedPhases: z.array(buildPhaseSchema),
+  error: z.string().min(1).optional(),
+  recoverToPhase: buildPhaseSchema.optional(),
+  recoverReason: z.string().min(1).optional(),
+  resumeTool: z.string().min(1).optional(),
+});
+
+export type ConductorExecutionMetadata = z.infer<typeof conductorExecutionMetadataSchema>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function readConductorExecutionMetadata(value: unknown): ConductorExecutionMetadata | null {
+  if (!isRecord(value)) return null;
+  const candidate = {
+    ok: value.ok,
+    operationKey: value.operationKey,
+    phaseBefore: value.phaseBefore,
+    phaseAfter: value.phaseAfter,
+    phaseCompleted: value.phaseCompleted,
+    requiresUserInput: value.requiresUserInput,
+    retryAllowed: value.retryAllowed,
+    parentArtifactHash: value.parentArtifactHash,
+    invalidatedPhases: value.invalidatedPhases,
+    error: value.error,
+    recoverToPhase: value.recoverToPhase,
+    recoverReason: value.recoverReason,
+    resumeTool: value.resumeTool,
+  };
+  const parsed = conductorExecutionMetadataSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Prerequisite miss that redirects Conductor to an earlier phase in the same turn. */
+export function isRecoverableConductorExecution(metadata: ConductorExecutionMetadata): boolean {
+  return metadata.ok === false
+    && metadata.retryAllowed === true
+    && Boolean(metadata.recoverToPhase);
+}
+
+export function isConductorBuildPhase(value: unknown): value is z.infer<typeof buildPhaseSchema> {
+  return typeof value === "string" && (BUILD_PHASES as readonly string[]).includes(value);
+}
 
 export const compileLoopInputSchema = z.object({});
 

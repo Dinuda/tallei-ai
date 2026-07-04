@@ -1,5 +1,11 @@
 import type { UIMessage } from "ai";
 
+import {
+  CONDUCTOR_CONTINUE_SUGGESTIONS,
+  CONDUCTOR_STALL_QUESTION,
+  type ConductorBuildPhase,
+} from "@/lib/conductor-turn-budget";
+
 export type ConductorPromptSuggestion = {
   id: string;
   label: string;
@@ -23,6 +29,8 @@ type DeriveSuggestionsInput = {
   hasPendingReplyOptions: boolean;
   chatBusy: boolean;
   explicitOptions?: ConductorPromptSuggestion[];
+  isStalled?: boolean;
+  buildPhase?: ConductorBuildPhase | null;
 };
 
 function resolveToolPartName(part: { type: string; toolName?: string }): string {
@@ -153,7 +161,11 @@ export function findPendingPresentReplyOptions(
   return null;
 }
 
-export function deriveConductorPromptSuggestionsQuestion(messages: UIMessage[]): string {
+export function deriveConductorPromptSuggestionsQuestion(
+  messages: UIMessage[],
+  isStalled = false,
+): string {
+  if (isStalled) return CONDUCTOR_STALL_QUESTION;
   const text = getLastAssistantText(messages);
   if (!text) return "How would you like to proceed?";
 
@@ -172,6 +184,10 @@ export function deriveConductorPromptSuggestionsQuestion(messages: UIMessage[]):
 
 export function deriveConductorPromptSuggestions(input: DeriveSuggestionsInput): ConductorPromptSuggestion[] {
   if (input.hasPendingQuestion || input.chatBusy) return [];
+
+  if (input.isStalled) {
+    return [...CONDUCTOR_CONTINUE_SUGGESTIONS];
+  }
 
   if (input.explicitOptions?.length) {
     return input.explicitOptions;

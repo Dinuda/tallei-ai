@@ -298,6 +298,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       "TALLEI_CONDUCTOR__MODEL",
       readResolvedChatModel("TALLEI_LOOP_BUILDER__OPENAI_MODEL", defaultOpenCodeModel),
     ),
+    bindingResolverModel: readResolvedChatModel(
+      "TALLEI_BINDING_RESOLVER__MODEL",
+      readResolvedChatModel(
+        "TALLEI_CONDUCTOR__MODEL",
+        readResolvedChatModel("TALLEI_LOOP_BUILDER__OPENAI_MODEL", defaultOpenCodeModel),
+      ),
+    ),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
     uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),

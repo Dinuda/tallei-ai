@@ -9,7 +9,7 @@ import { computeOutcomeBriefHash } from "../../../src/loops/outcome-brief.js";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 
-test("buildConductorSystemPrompt includes workspace and compile blockers", () => {
+test("buildConductorSystemPrompt includes workspace and compile blockers without ambient connector inventory", () => {
   const spec = seedSpecFromTemplate(workspaceId, "research_digest");
   const prompt = buildConductorSystemPrompt({
     workspaceName: "Personal",
@@ -19,7 +19,8 @@ test("buildConductorSystemPrompt includes workspace and compile blockers", () =>
   });
   assert.match(prompt, /Workspace: Personal/);
   assert.match(prompt, /Compile blockers/);
-  assert.match(prompt, /gmail\*/);
+  assert.doesNotMatch(prompt, /Connected \(\*=connected\)/);
+  assert.doesNotMatch(prompt, /gmail\*/i);
 });
 
 test("intent prompt does not expose connector inventory", () => {
@@ -260,6 +261,27 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
   assert.match(prompt, /presentAgentTeam/);
   assert.match(prompt, /presentReplyOptions/);
   assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
+  assert.match(prompt, /do not narrate a next action/i);
+  assert.match(prompt, /immediately emitting the corresponding tool call/i);
+  assert.match(prompt, /recoverToPhase/);
+});
+
+test("buildConductorSystemPrompt steers confirmOutcomeBrief when roster is already prepared", () => {
+  const spec = createEmptyLoopSpec(workspaceId);
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    connectedToolkits: [],
+    buildPhase: "review",
+    reviewProgress: {
+      bindingHash: "abc123",
+      rosterPrepared: true,
+      confirmationComplete: false,
+      nextTool: "confirmOutcomeBrief",
+    },
+  });
+  assert.match(prompt, /Call confirmOutcomeBrief now/i);
+  assert.match(prompt, /Do not summarize or repeat the roster/i);
 });
 
 test("buildConductorSystemPrompt includes full spec JSON once", () => {
@@ -293,5 +315,10 @@ test("Conductor refreshes confirmation state per step without a nested summary m
   assert.match(source, /prepareStep:\s*\(\) => \(\{ system: buildCurrentSystemPrompt\(\), activeTools:/);
   assert.match(source, /confirmationHash:\s*currentBuildState!\.artifacts\.bindings\?\.artifactHash\s*\?\?\s*computeOutcomeBriefHash\(currentSpec!\)/);
   assert.match(source, /presentAgentTeam:\s*tool/);
+  assert.match(source, /Review isn't complete yet\. Confirm the specialist team summary before compiling\./);
+  assert.match(source, /recoverToPhase:\s*"review"/);
+  assert.match(source, /deriveReviewProgress/);
+  assert.match(source, /reviewProgress\?\.nextTool/);
+  assert.match(source, /activeToolsForPhase/);
   assert.doesNotMatch(source, /summarizeOutcomeBriefForUser|reviewOutcomeBrief:\s*tool/);
 });

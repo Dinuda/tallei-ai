@@ -35,26 +35,32 @@ export type ConnectorDiscoveryResult = {
 };
 
 export const DEFAULT_CONNECTOR_PICK_QUESTION =
-  "Where should this information come from?";
+  "Which app should handle this workflow step?";
+
+function outcomeSubject(description: string): string {
+  const trimmed = description.trim().replace(/[?.!]+$/, "");
+  const withoutLeadingVerb = trimmed
+    .replace(/^(?:detects?|starts?|triggers?)\s+(?:when\s+)?/i, "")
+    .replace(/^(?:monitors?|watches?)\s+(?:for\s+)?/i, "")
+    .replace(/^(?:receives?|retrieves?|reads?|fetches?|gets?|loads?|finds?)\s+/i, "")
+    .replace(/^(?:sends?|delivers?|publishes?|posts?|creates?|updates?)\s+/i, "")
+    .replace(/^when\s+/i, "");
+  const withoutPassiveEvent = withoutLeadingVerb.replace(
+    /\s+(?:is|are)\s+(?:submitted|received|created|added|sent|published|updated)$/i,
+    "",
+  );
+  if (!withoutPassiveEvent) return "this workflow step";
+  return withoutPassiveEvent.charAt(0).toLowerCase() + withoutPassiveEvent.slice(1);
+}
 
 export function connectorQuestionForOutcome(outcome: {
   role: OutcomeRole;
   description: string;
 }): string {
-  const description = outcome.description.toLowerCase();
   if (outcome.role === "trigger" || outcome.role === "source") {
-    if (/\b(ticket|tickets|support|helpdesk)\b/.test(description)) {
-      return "Where should the support tickets come from?";
-    }
-    if (/\b(email|emails|mail|message|messages|inbox)\b/.test(description)) {
-      return "Where should the incoming messages come from?";
-    }
-    return "Where should this information come from?";
+    return `Where should ${outcomeSubject(outcome.description)} come from?`;
   }
-  if (/\b(reply|replies|email|emails|message|messages)\b/.test(description)) {
-    return "Where should the reply be sent from?";
-  }
-  return "Where should the result be delivered?";
+  return `Where should ${outcomeSubject(outcome.description)} be delivered?`;
 }
 
 export type BlueprintConnectorDiscoveryResult = {
@@ -75,12 +81,20 @@ export type BlueprintConnectorDiscoveryResult = {
     sourceRole: OutcomeRole;
     reason: string;
   }>;
+  rejectedSelections?: Array<{
+    outcomeId: string;
+    role: OutcomeRole;
+    connector: string;
+    reason: string;
+  }>;
   pickerKind: "app";
 };
 
 type ConnectorDiscoveryDependencies = {
   loadToolkits: (auth: AuthContext) => Promise<{ toolkits: ConnectorToolkit[]; total: number }>;
   searchTools: (query: string, limit?: number) => Promise<ComposioToolSearchResult[]>;
+  loadActions: (toolkit: string) => Promise<ComposioToolSearchResult[]>;
+  loadTriggers: (toolkit: string) => Promise<Array<{ slug: string; name: string }>>;
   now: () => number;
   logTiming: (timing: ConnectorDiscoveryTiming) => void;
 };
@@ -105,6 +119,15 @@ const defaultDiscoveryDependencies: ConnectorDiscoveryDependencies = {
       tags: result.tags ?? [],
     }));
   },
+  loadActions: async (toolkit) => {
+    const results = await getConnectorProvider().listActions(toolkit);
+    return results.map((result) => ({
+      ...result,
+      toolkitName: result.toolkitName ?? result.toolkit,
+      tags: result.tags ?? [],
+    }));
+  },
+  loadTriggers: async (toolkit) => getConnectorProvider().listTriggers(toolkit),
   now: Date.now,
   logTiming: (timing) => {
     console.info("[loops/connector-discovery] timing", timing);
@@ -117,63 +140,12 @@ function resolveDiscoveryDependencies(
   return { ...defaultDiscoveryDependencies, ...overrides };
 }
 
-export function inferCatalogToolkitHints(
-  outcomeDescription: string,
-  role: string,
-): string[] {
-  const text = outcomeDescription.toLowerCase();
-  const hints = new Set<string>();
-
-  if (/(email|mail|inbox|message|reply|sender|gmail|outlook)/.test(text) || role === "trigger") {
-    for (const slug of ["gmail", "outlook", "microsoftoutlook", "zendesk", "freshdesk", "intercom"]) {
-      hints.add(slug);
-    }
-  }
-  if (/(ticket|support|helpdesk)/.test(text)) {
-    for (const slug of ["zendesk", "freshdesk", "intercom", "gmail", "outlook"]) hints.add(slug);
-  }
-  if (/(newsletter|mailchimp|campaign|subscribers)/.test(text)) {
-    for (const slug of ["mailchimp", "gmail", "sendgrid", "brevo"]) hints.add(slug);
-  }
-  if (/(notion|doc|page|wiki|knowledge)/.test(text)) {
-    for (const slug of ["notion", "googledocs", "confluence", "googledrive"]) hints.add(slug);
-  }
-  if (/(slack|channel|chat)/.test(text)) {
-    for (const slug of ["slack", "discord", "microsoftteams"]) hints.add(slug);
-  }
-  if (/(search|web|news|research|ai)/.test(text) && role === "source") {
-    hints.add("composio");
-  }
-
-  return [...hints];
-}
-
-function ensureHintCandidates(
-  toolkits: ConnectorToolkit[],
-  hints: string[],
-  scoresByToolkit: Map<string, { score: number; actions: Array<{ actionSlug: string; name: string }> }>,
-  role: string,
-): void {
-  const minScore = role === "trigger" ? 1 : 2;
-  for (const hint of hints) {
-    const normalized = normalizeToolkitSlug(hint);
-    const toolkit = toolkits.find((row) => normalizeToolkitSlug(row.slug) === normalized);
-    if (!toolkit) continue;
-    const existing = scoresByToolkit.get(normalized);
-    if (!existing) {
-      scoresByToolkit.set(normalized, { score: minScore, actions: [] });
-    } else if (existing.score < minScore) {
-      existing.score = minScore;
-    }
-  }
-}
-
 function roleSearchHints(role: string): string {
   switch (role) {
     case "source":
       return "read fetch list search query database page document";
     case "destination":
-      return "send post publish email newsletter message notify";
+      return "send create post publish deliver notify update";
     case "trigger":
       return "webhook event new received created";
     case "transform":
@@ -189,6 +161,27 @@ function connectorSearchQuery(outcomeDescription: string, role: string): string 
 
 function connectorSearchKey(query: string): string {
   return query.toLowerCase();
+}
+
+function actionCanReadOutcome(
+  outcomeDescription: string,
+  action: Pick<ComposioToolSearchResult, "actionSlug" | "name" | "description" | "inputSchema">,
+): boolean {
+  const actionText = `${action.actionSlug} ${action.name} ${action.description}`;
+  if (!/(?:^|[_\s-])(get|fetch|read|retrieve|list|search|find|load)(?:[_\s-]|$)/i.test(actionText)) {
+    return false;
+  }
+  const semanticScore = scoreOutcomeRelevance(
+    outcomeDescription,
+    action.actionSlug,
+    action.name,
+    action.description,
+    action.inputSchema ?? {},
+  );
+  // The LLM decides that the adjacent source is the trigger's initial read by
+  // placing it directly after the trigger. The catalogue is the hard guard:
+  // the selected connector must still expose a concrete read operation.
+  return semanticScore > 0 || /\b(record|item|entry|details?|content|data)\b/i.test(actionText);
 }
 
 function buildRationale(
@@ -269,14 +262,60 @@ export async function discoverConnectorsForBlueprint(
   },
   dependencyOverrides?: Partial<ConnectorDiscoveryDependencies>,
 ): Promise<BlueprintConnectorDiscoveryResult> {
-  const alreadySelected = new Set((input.previousSelections ?? []).map((selection) => selection.outcomeId));
-  const pending = input.outcomes.filter((outcome) => outcome.role !== "transform" && !alreadySelected.has(outcome.id));
-  if (pending.length === 0) return { groups: [], autoResolved: [], pickerKind: "app" };
+  if (input.outcomes.every((outcome) => outcome.role === "transform")) {
+    return { groups: [], autoResolved: [], pickerKind: "app" };
+  }
 
   const dependencies = resolveDiscoveryDependencies(dependencyOverrides);
   const catalogueStartedAt = dependencies.now();
   const { toolkits } = await dependencies.loadToolkits(auth);
   const catalogueMs = dependencies.now() - catalogueStartedAt;
+
+  const rejectedSelections: NonNullable<BlueprintConnectorDiscoveryResult["rejectedSelections"]> = [];
+  const effectiveSelections = [] as NonNullable<typeof input.previousSelections>;
+  const triggerCatalogues = new Map<string, Promise<Array<{ slug: string; name: string }>>>();
+  for (const selection of input.previousSelections ?? []) {
+    if (selection.role !== "trigger") {
+      effectiveSelections.push(selection);
+      continue;
+    }
+    const outcome = input.outcomes.find((candidate) => candidate.id === selection.outcomeId);
+    if (!outcome) continue;
+    const key = normalizeToolkitSlug(selection.connector);
+    let loading = triggerCatalogues.get(key);
+    if (!loading) {
+      loading = dependencies.loadTriggers(selection.connector).catch((error) => {
+        console.warn("[loops/connector-discovery] failed to load connector triggers", {
+          connector: selection.connector,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return [];
+      });
+      triggerCatalogues.set(key, loading);
+    }
+    const triggers = await loading;
+    const supportsTrigger = triggers.length > 0;
+    if (supportsTrigger) {
+      effectiveSelections.push(selection);
+    } else {
+      rejectedSelections.push({
+        outcomeId: selection.outcomeId,
+        role: selection.role,
+        connector: selection.connector,
+        reason: "This app does not expose an event matching the requested trigger",
+      });
+    }
+  }
+  const alreadySelected = new Set(effectiveSelections.map((selection) => selection.outcomeId));
+  const pending = input.outcomes.filter((outcome) => outcome.role !== "transform" && !alreadySelected.has(outcome.id));
+  if (pending.length === 0) {
+    return {
+      groups: [],
+      autoResolved: [],
+      ...(rejectedSelections.length > 0 ? { rejectedSelections } : {}),
+      pickerKind: "app",
+    };
+  }
 
   const searches = new Map<string, Promise<ComposioToolSearchResult[]>>();
   const actionSearchStartedAt = dependencies.now();
@@ -309,29 +348,62 @@ export async function discoverConnectorsForBlueprint(
     outcomeCount: pending.length,
   });
 
-  const autoResolved: BlueprintConnectorDiscoveryResult["autoResolved"] = [];
-  const sharedTriggerSourceConnectors = new Map<string, Set<string>>();
-  for (let index = 0; index < pending.length - 1; index++) {
-    const trigger = pending[index]!;
-    const source = pending[index + 1]!;
-    if (trigger.role !== "trigger" || source.role !== "source") continue;
-    const readable = new Set(discoveries[index + 1]!.candidates
-      .filter((candidate) => candidate.sampleActions.length > 0)
-      .map((candidate) => normalizeToolkitSlug(candidate.connector)));
-    const shared = new Set(discoveries[index]!.candidates
-      .map((candidate) => normalizeToolkitSlug(candidate.connector))
-      .filter((connector) => readable.has(connector)));
-    if (shared.size > 0) sharedTriggerSourceConnectors.set(trigger.id, shared);
+  const actionCatalogues = new Map<string, Promise<ComposioToolSearchResult[]>>();
+  const loadActionsOnce = async (connector: string): Promise<ComposioToolSearchResult[]> => {
+    const key = normalizeToolkitSlug(connector);
+    const existing = actionCatalogues.get(key);
+    if (existing) return existing;
+    const loading = dependencies.loadActions(connector).catch((error) => {
+      console.warn("[loops/connector-discovery] failed to load connector actions", {
+        connector,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    });
+    actionCatalogues.set(key, loading);
+    return loading;
+  };
+
+  // Action search is intentionally broad and capped, so it can omit a valid
+  // read operation for the app the user just chose. Verify that exact app
+  // against its full action catalogue before asking for the adjacent source.
+  const verifiedInitialRead = new Map<string, { outcomeId: string; role: OutcomeRole; connector: string }>();
+  for (let index = 0; index < pending.length; index++) {
+    const outcome = pending[index]!;
+    if (outcome.role !== "source") continue;
+    const outcomeIndex = input.outcomes.findIndex((row) => row.id === outcome.id);
+    const precedingTrigger = input.outcomes[outcomeIndex - 1];
+    if (precedingTrigger?.role !== "trigger") continue;
+    const selection = effectiveSelections.find((row) => row.outcomeId === precedingTrigger.id);
+    if (!selection) continue;
+    const actions = await loadActionsOnce(selection.connector);
+    if (actions.some((action) => actionCanReadOutcome(outcome.description, action))) {
+      verifiedInitialRead.set(outcome.id, selection);
+    }
   }
+
+  const autoResolved: BlueprintConnectorDiscoveryResult["autoResolved"] = [];
   const groups = discoveries.flatMap((discovery, index) => {
       const outcome = pending[index]!;
       const outcomeIndex = input.outcomes.findIndex((row) => row.id === outcome.id);
       const precedingTrigger = input.outcomes[outcomeIndex - 1];
-      // Keep the read as a separate execution outcome, but share the app choice
-      // only when the trigger connector also exposes a matching read action.
+      // Defer the initial read choice until the trigger app is selected. The
+      // selected app alone is then checked for a matching read action.
       if (outcome.role === "source" && precedingTrigger?.role === "trigger"
-        && sharedTriggerSourceConnectors.has(precedingTrigger.id)) return [];
-      const priorSelection = (input.previousSelections ?? [])
+        && !effectiveSelections.some((selection) => selection.outcomeId === precedingTrigger.id)) return [];
+      const verifiedReadSelection = verifiedInitialRead.get(outcome.id);
+      if (verifiedReadSelection) {
+        autoResolved.push({
+          outcomeId: outcome.id,
+          role: outcome.role,
+          connector: verifiedReadSelection.connector,
+          sourceOutcomeId: verifiedReadSelection.outcomeId,
+          sourceRole: verifiedReadSelection.role,
+          reason: "same app as trigger",
+        });
+        return [];
+      }
+      const priorSelection = effectiveSelections
         .filter((selection) => input.outcomes.findIndex((row) => row.id === selection.outcomeId)
           < input.outcomes.findIndex((row) => row.id === outcome.id))
         .reverse()
@@ -348,31 +420,32 @@ export async function discoverConnectorsForBlueprint(
         });
         return [];
       }
-      const reusable = (input.previousSelections?.map((selection) => selection.connector)
-        ?? input.previousConnectors ?? []).find((connector) =>
+      const reusableConnectors = effectiveSelections.length > 0
+        ? effectiveSelections.map((selection) => selection.connector)
+        : input.previousConnectors ?? [];
+      const reusable = reusableConnectors.find((connector) =>
         discovery.candidates.some((candidate) =>
           candidate.connector.toLowerCase() === connector.toLowerCase() && candidate.score > 0,
         ),
       );
-      const sharedConnectors = sharedTriggerSourceConnectors.get(outcome.id);
-      const askOptions = sharedConnectors
-        ? discovery.askOptions.filter((option) => sharedConnectors.has(normalizeToolkitSlug(option.value)))
-        : discovery.askOptions;
+      const askOptions = discovery.askOptions;
       const reusableOptionId = reusable
-        ? askOptions.find((option) => option.value.toLowerCase() === reusable.toLowerCase())?.id
+        ? askOptions.find((option) => !option.disabled && option.value.toLowerCase() === reusable.toLowerCase())?.id
         : undefined;
+      const connectedViableOptionIds = discovery.candidates.flatMap((candidate) => {
+        if (!candidate.connected || candidate.score <= 0) return [];
+        const option = askOptions.find((row) =>
+          normalizeToolkitSlug(row.value) === normalizeToolkitSlug(candidate.connector) && !row.disabled);
+        return option ? [option.id] : [];
+      });
       const recommendedOptionIds = [
         ...(reusableOptionId ? [reusableOptionId] : []),
+        ...connectedViableOptionIds,
         ...buildConnectorRecommendedIds(askOptions),
       ].filter((id, position, all) => all.indexOf(id) === position).slice(0, TOP_CONNECTOR_RECOMMENDATIONS);
       return [{
         outcomeId: outcome.id,
-        linkedOutcomeIds: outcome.role === "trigger" && sharedConnectors
-          ? input.outcomes.slice(outcomeIndex + 1)
-              .filter((row, offset, rows) => row.role === "source"
-                && rows.slice(0, offset).every((prior) => prior.role === "source"))
-              .map((row) => row.id)
-          : [],
+        linkedOutcomeIds: [],
         role: outcome.role,
         outcomeDescription: outcome.description,
         askOptions: askOptions.map((option) => ({
@@ -387,6 +460,7 @@ export async function discoverConnectorsForBlueprint(
   return {
     groups,
     autoResolved,
+    ...(rejectedSelections.length > 0 ? { rejectedSelections } : {}),
     pickerKind: "app",
   };
 }
@@ -438,18 +512,18 @@ function rankConnectorsForOutcome(input: {
     scoresByToolkit.set(slug, row);
   }
 
-  ensureHintCandidates(
-    input.toolkits,
-    inferCatalogToolkitHints(input.outcomeDescription, input.role),
-    scoresByToolkit,
-    input.role,
-  );
-
   const candidates: ConnectorCandidate[] = [];
   for (const toolkit of input.toolkits) {
     const slug = normalizeToolkitSlug(toolkit.slug);
     const match = scoresByToolkit.get(slug);
-    const baseScore = match?.score ?? 0;
+    const catalogScore = scoreOutcomeRelevance(
+      input.outcomeDescription,
+      toolkit.slug,
+      toolkit.name,
+      toolkit.description,
+      {},
+    );
+    const baseScore = Math.max(match?.score ?? 0, catalogScore);
     if (baseScore <= 0 && input.role !== "trigger" && !input.includeAllCatalog) continue;
 
     candidates.push({
@@ -479,7 +553,7 @@ function rankConnectorsForOutcome(input: {
     }
   }
 
-  candidates.sort((a, b) => b.score - a.score);
+  candidates.sort((a, b) => b.score - a.score || Number(b.connected) - Number(a.connected));
   const ranked = candidates.slice(0, limit);
   const askOptions = buildConnectorAskOptions(ranked);
   const recommendedOptionIds = buildConnectorRecommendedIds(askOptions);

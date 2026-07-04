@@ -14,6 +14,17 @@ import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
+import {
+  CONDUCTOR_CONTINUE_SUGGESTIONS,
+  CONDUCTOR_STALL_QUESTION,
+  evaluateConductorStall,
+  isActionableConductorPhase,
+  isBuildIncomplete,
+  isRecoverableConductorExecution,
+  type ConductorBuildPhase,
+  type ConductorStallResult,
+} from "@/lib/conductor-turn-budget";
+import { isReviewConfirmationHandoffPending } from "../../../../shared/conductor-review-handoff.js";
 
 export type BindingRow = { connector: string; capability: string; role?: string };
 
@@ -103,7 +114,7 @@ export type PendingInteractivePrompt = {
 };
 
 export const DEFAULT_CONNECTOR_PICK_QUESTION =
-  "Where should this information come from?";
+  "Which app should handle this workflow step?";
 
 export type PendingPresentReplyOptions = {
   toolCallId: string;
@@ -204,6 +215,117 @@ export type AskQuestionToolPart = {
 
 export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
+export { CONDUCTOR_CONTINUE_SUGGESTIONS, CONDUCTOR_STALL_QUESTION };
+
+type ConductorToolExecution = {
+  ok: boolean;
+  operationKey: string;
+  parentArtifactHash: string;
+  phaseCompleted: boolean;
+  requiresUserInput: boolean;
+  retryAllowed: boolean;
+  recoverToPhase?: string;
+};
+
+function readExecutionFromOutput(output: Record<string, unknown>): ConductorToolExecution | null {
+  const operationKey = typeof output.operationKey === "string" ? output.operationKey : null;
+  const parentArtifactHash = typeof output.parentArtifactHash === "string" ? output.parentArtifactHash : null;
+  if (!operationKey || !parentArtifactHash) return null;
+  return {
+    ok: output.ok === false ? false : true,
+    operationKey,
+    parentArtifactHash,
+    phaseCompleted: output.phaseCompleted === true,
+    requiresUserInput: output.requiresUserInput === true,
+    retryAllowed: output.retryAllowed === true,
+    ...(typeof output.recoverToPhase === "string" ? { recoverToPhase: output.recoverToPhase } : {}),
+  };
+}
+
+function getLastAssistantExecutions(messages: UIMessage[]): ConductorToolExecution[] {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return [];
+  return (last.parts ?? []).flatMap((part) => {
+    if (!isToolPart(part.type)) return [];
+    const toolPart = part as DynamicToolUIPart & { output?: unknown };
+    if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") return [];
+    const parsed = readExecutionFromOutput(toolPart.output as Record<string, unknown>);
+    return parsed ? [parsed] : [];
+  });
+}
+
+function hasTerminalExecution(executions: ConductorToolExecution[]): boolean {
+  return executions.some((execution) => {
+    const output = {
+      ok: execution.ok,
+      retryAllowed: execution.retryAllowed,
+      recoverToPhase: execution.recoverToPhase,
+    };
+    if (isRecoverableConductorExecution(output)) return false;
+    return execution.phaseCompleted
+      || execution.requiresUserInput
+      || (!execution.ok && !execution.retryAllowed);
+  });
+}
+
+function lastAssistantIsTextOnly(messages: UIMessage[]): boolean {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return false;
+  const parts = last.parts ?? [];
+  const hasText = parts.some((part) => part.type === "text" && part.text.trim().length > 0);
+  const hasToolOutput = parts.some((part) =>
+    isToolPart(part.type) && (part as DynamicToolUIPart).state === "output-available");
+  return hasText && !hasToolOutput;
+}
+
+export function findConductorStall(input: {
+  messages: UIMessage[];
+  buildPhase: ConductorBuildPhase | null | undefined;
+  missingSlots: string[];
+  chatBusy: boolean;
+  loopStatus?: string;
+}): ConductorStallResult {
+  const { messages, buildPhase, missingSlots, chatBusy, loopStatus } = input;
+  const last = messages.at(-1);
+  const executions = getLastAssistantExecutions(messages);
+
+  const reviewConfirmationHandoffPending = isReviewConfirmationHandoffPending({ messages, buildPhase });
+
+  return evaluateConductorStall({
+    chatBusy,
+    hasMessages: messages.length > 0,
+    actionablePhase: isActionableConductorPhase(buildPhase),
+    hasUnansweredUiTools: hasUnansweredUiToolCalls(messages),
+    buildIncomplete: isBuildIncomplete(buildPhase, missingSlots, loopStatus),
+    lastRoleIsAssistant: Boolean(last && last.role === "assistant"),
+    hasTerminalExecution: hasTerminalExecution(executions),
+    textOnlyEnding: lastAssistantIsTextOnly(messages),
+    reviewConfirmationHandoffPending,
+    wouldAutoContinue: executions.length > 0 && executions.every((execution) => {
+      const recoverable = isRecoverableConductorExecution({
+        ok: execution.ok,
+        retryAllowed: execution.retryAllowed,
+        recoverToPhase: execution.recoverToPhase,
+      });
+      if (recoverable) return true;
+      return execution.ok
+        && !execution.phaseCompleted
+        && !execution.requiresUserInput
+        && !hasPriorTerminalExecutionForOperation(
+          messages,
+          execution.operationKey,
+          execution.parentArtifactHash,
+        );
+    }),
+    hasExecutions: executions.length > 0,
+    hasAssistantParts: Boolean(last?.parts?.length),
+  });
+}
+
+export { isReviewConfirmationHandoffPending } from "../../../../shared/conductor-review-handoff.js";
+
+export { isActionableConductorPhase, type ConductorBuildPhase, type ConductorStallResult };
+
 export function readTaskBlueprint(spec: Record<string, unknown> | null): TaskBlueprint | null {
   const blueprint = spec?.taskBlueprint;
   if (!blueprint || typeof blueprint !== "object") return null;
@@ -248,8 +370,10 @@ const CONDUCTOR_UI_ONLY_TOOLS = new Set([
 
 function hasQuestionOptionsInput(input: unknown): boolean {
   if (!input || typeof input !== "object") return false;
-  const row = input as { question?: string; options?: unknown[] };
-  return typeof row.question === "string"
+  const row = input as { questionId?: string; question?: string; options?: unknown[] };
+  return typeof row.questionId === "string"
+    && row.questionId.trim().length > 0
+    && typeof row.question === "string"
     && row.question.trim().length > 0
     && Array.isArray(row.options)
     && row.options.length >= 2;
@@ -278,15 +402,7 @@ function hasPickConnectorAppInput(input: unknown): boolean {
   return typeof row.outcomeId === "string" && row.outcomeId.trim().length > 0;
 }
 
-function isResumableUiToolPart(
-  toolName: string,
-  state: string | undefined,
-  input: unknown,
-  output: unknown,
-): boolean {
-  if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName) || output != null) return false;
-  if (state === "input-available") return true;
-  if (state !== "input-streaming") return false;
+function hasResumableUiToolInput(toolName: string, input: unknown): boolean {
   switch (toolName) {
     case "askQuestion":
       return hasQuestionOptionsInput(input);
@@ -297,8 +413,20 @@ function isResumableUiToolPart(
     case "confirmOutcomeBrief":
       return hasConfirmOutcomeBriefInput(input);
     default:
-      return false;
+      return true;
   }
+}
+
+function isResumableUiToolPart(
+  toolName: string,
+  state: string | undefined,
+  input: unknown,
+  output: unknown,
+): boolean {
+  if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName) || output != null) return false;
+  if (state === "input-available") return hasResumableUiToolInput(toolName, input);
+  if (state !== "input-streaming") return false;
+  return hasResumableUiToolInput(toolName, input);
 }
 
 export type StaleConfirmOutcomeBriefCall = {
@@ -371,11 +499,79 @@ export function findStaleConfirmOutcomeBriefCalls(messages: UIMessage[]): StaleC
 
 export function shouldAutoSendConductorChat({
   messages,
+  buildPhase,
+  missingSlots = [],
+  loopStatus,
 }: {
   messages: UIMessage[];
+  buildPhase?: ConductorBuildPhase | null;
+  missingSlots?: string[];
+  loopStatus?: string;
 }): boolean {
   if (hasUnansweredUiToolCalls(messages)) return false;
-  return lastAssistantMessageIsCompleteWithToolCalls({ messages });
+  if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) return false;
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return false;
+  if (findConductorStall({
+    messages,
+    buildPhase,
+    missingSlots,
+    chatBusy: false,
+    loopStatus,
+  }).stalled) {
+    return false;
+  }
+  if (isReviewConfirmationHandoffPending({ messages, buildPhase })
+    && lastAssistantIsTextOnly(messages)) {
+    return true;
+  }
+  const executions = (last.parts ?? []).flatMap((part) => {
+    if (!isToolPart(part.type)) return [];
+    const toolPart = part as DynamicToolUIPart & { output?: unknown };
+    if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") return [];
+    const parsed = readExecutionFromOutput(toolPart.output as Record<string, unknown>);
+    return parsed ? [parsed] : [];
+  });
+  if (executions.length === 0) return true;
+  return executions.every((execution) => {
+    const recoverable = isRecoverableConductorExecution({
+      ok: execution.ok,
+      retryAllowed: execution.retryAllowed,
+      recoverToPhase: execution.recoverToPhase,
+    });
+    if (recoverable) return true;
+    return execution.ok
+      && !execution.phaseCompleted
+      && !execution.requiresUserInput
+      && !hasPriorTerminalExecutionForOperation(messages, execution.operationKey, execution.parentArtifactHash);
+  });
+}
+
+function hasPriorTerminalExecutionForOperation(
+  messages: UIMessage[],
+  operationKey: string,
+  parentArtifactHash: string,
+): boolean {
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (!isToolPart(part.type)) continue;
+      const toolPart = part as DynamicToolUIPart & { output?: unknown };
+      if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") continue;
+      const output = toolPart.output as Record<string, unknown>;
+      if (output.operationKey !== operationKey || output.parentArtifactHash !== parentArtifactHash) continue;
+      if (isRecoverableConductorExecution(output)) continue;
+      const ok = output.ok === false ? false : true;
+      const phaseCompleted = output.phaseCompleted === true;
+      const requiresUserInput = output.requiresUserInput === true;
+      const retryAllowed = output.retryAllowed === true;
+      if (phaseCompleted || requiresUserInput || (!ok && !retryAllowed)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBrief | null {
@@ -439,7 +635,10 @@ export function buildConnectorPickInput(
     options: askOptions,
     recommendedOptionIds: group.recommendedOptionIds ?? askOptions.slice(0, 5).map((option) => option.id),
     allowMultiple: false,
-    allowOther: true,
+    // Discovery already returns the searchable connector catalogue. Free text
+    // would bypass the server-ranked capability set and cannot be validated as
+    // a real connector selection.
+    allowOther: false,
     outcomeId: group.outcomeId,
     role: group.role,
   };
@@ -510,7 +709,7 @@ export function findPendingInteractivePrompts(
         const askPart = part as AskQuestionToolPart;
         if (isResumableUiToolPart("askQuestion", askPart.state, askPart.input, askPart.output)) {
           const input = askPart.input;
-          if (!input?.question || !input.options?.length) continue;
+          if (!hasQuestionOptionsInput(input)) continue;
           prompts.push({ toolCallId: askPart.toolCallId, toolName: "askQuestion", input });
         }
       }
@@ -619,7 +818,8 @@ export function outcomeRoleLabel(role: string): string {
   }
 }
 
-export function promptVariantForQuestion(questionId: string): "connector" | "violet" | "amber" | "neutral" {
+export function promptVariantForQuestion(questionId: string | undefined): "connector" | "violet" | "amber" | "neutral" {
+  if (!questionId) return "neutral";
   if (questionId.startsWith("connector-app:")) return "connector";
   if (questionId === "knowledge-sources") return "violet";
   if (questionId === "review-gates") return "amber";

@@ -224,7 +224,7 @@ export function ConductorBuilderLayout({
                     initial={{ opacity: 0, y: 20 }}
                     transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    {activePendingQuestion.input.questionId.startsWith("connector-app:") ? (
+                    {activePendingQuestion.input.questionId?.startsWith("connector-app:") ? (
                       <BuilderConnectorPrompt
                         allowMultiple={activePendingQuestion.input.allowMultiple}
                         allowOther={activePendingQuestion.input.allowOther ?? true}

@@ -379,6 +379,44 @@ export async function resolveExplicitBindingAction(
   });
 }
 
+export type InvalidBindingActionOverride = {
+  outcomeId: string;
+  actionSlug: string;
+  code: "UNKNOWN_OUTCOME" | "ACTION_NOT_FOUND" | "ACTION_TOOLKIT_MISMATCH";
+  actualToolkit?: string;
+};
+
+export async function resolveBindingActionOverrides(
+  connector: string,
+  outcomes: Array<{ id: string }>,
+  overrides: Array<{ outcomeId: string; actionSlug: string }>,
+  resolveAction: typeof resolveExplicitBindingAction = resolveExplicitBindingAction,
+): Promise<{
+  resolved: Map<string, string>;
+  invalid: InvalidBindingActionOverride[];
+}> {
+  const outcomeIds = new Set(outcomes.map((outcome) => outcome.id));
+  const resolved = new Map<string, string>();
+  const invalid: InvalidBindingActionOverride[] = [];
+  for (const override of overrides) {
+    if (!outcomeIds.has(override.outcomeId)) {
+      invalid.push({ ...override, code: "UNKNOWN_OUTCOME" });
+      continue;
+    }
+    const resolution = await resolveAction(connector, override.actionSlug);
+    if (!resolution.ok) {
+      invalid.push({
+        ...override,
+        code: resolution.code,
+        ...(resolution.actualToolkit ? { actualToolkit: resolution.actualToolkit } : {}),
+      });
+      continue;
+    }
+    resolved.set(override.outcomeId, resolution.action.actionSlug);
+  }
+  return { resolved, invalid };
+}
+
 export async function discoverOutcomeBindings(
   toolkit: string,
   outcomes: Array<{ id: string; description: string; role?: "trigger" | "source" | "transform" | "destination" }>,
@@ -386,13 +424,39 @@ export async function discoverOutcomeBindings(
 ): Promise<{
   toolkit: string;
   suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string; role?: "trigger" | "source" | "transform" | "destination" }>;
+  ambiguities: Array<{
+    outcomeId: string;
+    candidates: Array<{ actionSlug: string; name: string; description: string; score: number }>;
+  }>;
 }> {
   const resolvedToolkit = await resolveToolkitSlug(toolkit);
   const suggestedBindings: Array<{ outcomeId: string; connector: string; capability: string; actionSlug: string; role?: "trigger" | "source" | "transform" | "destination" }> = [];
+  const ambiguities: Array<{
+    outcomeId: string;
+    candidates: Array<{ actionSlug: string; name: string; description: string; score: number }>;
+  }> = [];
 
   for (const outcome of outcomes) {
     const candidates = await rankBindingCandidates(resolvedToolkit, outcome.description, options);
-    const recommended = pickRecommendedBinding(candidates, options?.triggerFields);
+    const explicitSlug = looksLikeComposioActionSlug(outcome.description) ? outcome.description.toUpperCase() : null;
+    const eligibleCandidates = explicitSlug
+      ? candidates.filter((candidate) => candidate.actionSlug.toUpperCase() === explicitSlug)
+      : candidates;
+    const top = eligibleCandidates[0];
+    const close = top ? eligibleCandidates.filter((candidate) => candidate.score >= top.score - BINDING_AMBIGUITY_SCORE_GAP) : [];
+    if (!explicitSlug && !options?.triggerFields && close.length > 1) {
+      ambiguities.push({
+        outcomeId: outcome.id,
+        candidates: close.slice(0, 5).map((candidate) => ({
+          actionSlug: candidate.actionSlug,
+          name: candidate.name,
+          description: candidate.description,
+          score: candidate.score,
+        })),
+      });
+      continue;
+    }
+    const recommended = pickRecommendedBinding(eligibleCandidates, options?.triggerFields);
     if (recommended) {
       const capability = capabilityForAction(recommended.actionSlug);
       suggestedBindings.push({
@@ -408,5 +472,6 @@ export async function discoverOutcomeBindings(
   return {
     toolkit: resolvedToolkit,
     suggestedBindings,
+    ambiguities,
   };
 }

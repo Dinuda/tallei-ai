@@ -29,6 +29,30 @@ test("hasUnansweredUiToolCalls treats resumable input-streaming prompts as pendi
   assert.equal(hasUnansweredUiToolCalls(messages), true);
 });
 
+test("findPendingInteractivePrompts ignores askQuestion until questionId is present", async () => {
+  const { findPendingInteractivePrompts } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-askQuestion",
+      toolCallId: "tool-1",
+      state: "input-streaming",
+      input: {
+        question: "How should this start?",
+        options: [
+          { id: "manual", label: "Manual", value: "manual" },
+          { id: "email", label: "Email", value: "email" },
+        ],
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.deepEqual(findPendingInteractivePrompts(messages), []);
+});
+
 test("findPendingInteractivePrompts returns multiple prompts in transcript order", async () => {
   const { findPendingInteractivePrompts } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
@@ -250,4 +274,173 @@ test("connector picker searches all apps and verifies before submitting", async 
   assert.doesNotMatch(picker, /text-red-600/);
   assert.match(connectCard, /window\.location\.assign\(redirectUrl\)/);
   assert.doesNotMatch(connectCard, /window\.open/);
+});
+
+test("findConductorStall detects text-only mid-phase endings", async () => {
+  const { evaluateConductorStall } = await import("../../../shared/conductor-turn-budget.js");
+  const stall = evaluateConductorStall({
+    chatBusy: false,
+    hasMessages: true,
+    actionablePhase: true,
+    hasUnansweredUiTools: false,
+    buildIncomplete: true,
+    lastRoleIsAssistant: true,
+    hasTerminalExecution: false,
+    textOnlyEnding: true,
+    hasExecutions: false,
+    wouldAutoContinue: false,
+    hasAssistantParts: true,
+  });
+  assert.equal(stall.stalled, true);
+  assert.equal(stall.reason, "text_only_mid_phase");
+});
+
+test("isReviewConfirmationHandoffPending detects roster without confirmation", async () => {
+  const { isReviewConfirmationHandoffPending } = await import("../../../shared/conductor-review-handoff.js");
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-presentAgentTeam",
+        toolCallId: "team-1",
+        state: "output-available",
+        input: { groups: [{ outcomeIds: ["read"] }] },
+        output: {
+          title: "Team",
+          specialists: [{
+            id: "specialist-1",
+            name: "Alex",
+            roleTitle: "Reader",
+            description: "Reads email",
+            avatarSeed: "seed",
+            ownershipSummary: "Read support email",
+            steps: [{ outcomeId: "read", role: "source", description: "Read support email" }],
+          }],
+        },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Here is your specialist team summary." }],
+    },
+  ] satisfies UIMessage[];
+
+  assert.equal(isReviewConfirmationHandoffPending({ messages, buildPhase: "review" }), true);
+  assert.equal(isReviewConfirmationHandoffPending({ messages, buildPhase: "compile" }), false);
+});
+
+test("findConductorStall does not stall text summary after roster when confirmation is pending", async () => {
+  const { isReviewConfirmationHandoffPending } = await import("../../../shared/conductor-review-handoff.js");
+  const { evaluateConductorStall } = await import("../../../shared/conductor-turn-budget.js");
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-presentAgentTeam",
+        toolCallId: "team-1",
+        state: "output-available",
+        input: { groups: [{ outcomeIds: ["read"] }] },
+        output: {
+          title: "Team",
+          specialists: [{
+            id: "specialist-1",
+            name: "Alex",
+            roleTitle: "Reader",
+            description: "Reads email",
+            avatarSeed: "seed",
+            ownershipSummary: "Read support email",
+            steps: [{ outcomeId: "read", role: "source", description: "Read support email" }],
+          }],
+        },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Please confirm the team above." }],
+    },
+  ] satisfies UIMessage[];
+
+  const stall = evaluateConductorStall({
+    chatBusy: false,
+    hasMessages: true,
+    actionablePhase: true,
+    hasUnansweredUiTools: false,
+    buildIncomplete: true,
+    lastRoleIsAssistant: true,
+    hasTerminalExecution: false,
+    textOnlyEnding: true,
+    hasExecutions: false,
+    wouldAutoContinue: false,
+    hasAssistantParts: true,
+    reviewConfirmationHandoffPending: isReviewConfirmationHandoffPending({
+      messages,
+      buildPhase: "review",
+    }),
+  });
+  assert.equal(stall.stalled, false);
+});
+
+test("shouldAutoSendConductorChat blocks stalled auto-continue in source", async () => {
+  const fs = await import("node:fs/promises");
+  const shared = await fs.readFile(
+    new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(shared, /findConductorStall\(/);
+  assert.match(shared, /isReviewConfirmationHandoffPending/);
+  assert.match(shared, /reviewConfirmationHandoffPending/);
+  assert.match(shared, /conductor-review-handoff/);
+});
+
+test("shouldAutoSendConductorChat auto-continues on non-terminal tool output in source", async () => {
+  const fs = await import("node:fs/promises");
+  const shared = await fs.readFile(
+    new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(shared, /phaseCompleted/);
+  assert.match(shared, /requiresUserInput/);
+  assert.match(shared, /isRecoverableConductorExecution/);
+  assert.match(shared, /executions\.length === 0\) return true/);
+});
+
+test("shouldAutoSendConductorChat auto-continues on recoverable compile prerequisite miss in source", async () => {
+  const fs = await import("node:fs/promises");
+  const shared = await fs.readFile(
+    new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(shared, /if \(recoverable\) return true/);
+  assert.match(shared, /isRecoverableConductorExecution/);
+});
+
+test("shouldAutoSendConductorChat still blocks unanswered confirmOutcomeBrief in source", async () => {
+  const fs = await import("node:fs/promises");
+  const shared = await fs.readFile(
+    new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(shared, /hasUnansweredUiToolCalls\(messages\)\) return false/);
+  assert.match(shared, /confirmOutcomeBrief/);
+});
+
+test("conductor builder wires buildPhase and stall-aware auto continue", async () => {
+  const fs = await import("node:fs/promises");
+  const [builder, shared, suggestions] = await Promise.all([
+    fs.readFile(new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/lib/conductor-prompt-suggestions.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(builder, /buildProgress\?\.internalPhase/);
+  assert.match(builder, /findConductorStall/);
+  assert.match(builder, /isStalled/);
+  assert.match(builder, /buildPhase: buildPhaseRef\.current/);
+  assert.match(shared, /findConductorStall/);
+  assert.match(shared, /CONDUCTOR_CONTINUE_SUGGESTIONS/);
+  assert.match(suggestions, /isStalled/);
 });

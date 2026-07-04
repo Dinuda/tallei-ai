@@ -18,6 +18,7 @@ import {
   type ConductorChatApi,
 } from "@/components/conductor/conductor-chat-context";
 import {
+  findConductorStall,
   findPendingInteractivePrompts,
   findPendingOutcomeBrief,
   findStaleConfirmOutcomeBriefCalls,
@@ -29,6 +30,7 @@ import {
   validateConductorComposerMessage,
   type PendingInteractivePrompt,
   type ChatStatus,
+  type ConductorBuildPhase,
 } from "@/components/conductor/conductor-shared";
 import type { InteractivePromptAnswer } from "@/components/ai-elements/interactive-prompt-menu";
 import { apiFetch, getStoredWorkspaceId } from "@/lib/api-fetch";
@@ -44,6 +46,9 @@ type ConductorChatBridgeProps = {
   pendingPrompt: string | null;
   skipLoopFetch?: boolean;
   bootstrapPromptSentRef: MutableRefObject<boolean>;
+  buildPhase: ConductorBuildPhase | null;
+  missingSlots: string[];
+  loopStatus: string;
   onLoopMetaChange: (meta: {
     loopName?: string;
     spec?: Record<string, unknown> | null;
@@ -51,6 +56,7 @@ type ConductorChatBridgeProps = {
     status?: string;
     compiledPlanId?: string | null;
     eventTrigger?: LoopEventTriggerStatus | null;
+    buildPhase?: ConductorBuildPhase | null;
   }) => void;
   children: React.ReactNode;
 };
@@ -60,12 +66,21 @@ function ConductorChatBridge({
   pendingPrompt,
   skipLoopFetch = false,
   bootstrapPromptSentRef,
+  buildPhase,
+  missingSlots,
+  loopStatus,
   onLoopMetaChange,
   children,
 }: ConductorChatBridgeProps) {
   const onLoopMetaChangeRef = useRef(onLoopMetaChange);
+  const buildPhaseRef = useRef(buildPhase);
+  const missingSlotsRef = useRef(missingSlots);
+  const loopStatusRef = useRef(loopStatus);
 
   useEffect(() => { onLoopMetaChangeRef.current = onLoopMetaChange; }, [onLoopMetaChange]);
+  useEffect(() => { buildPhaseRef.current = buildPhase; }, [buildPhase]);
+  useEffect(() => { missingSlotsRef.current = missingSlots; }, [missingSlots]);
+  useEffect(() => { loopStatusRef.current = loopStatus; }, [loopStatus]);
 
   const transport = useMemo(
     () => new DefaultChatTransport({
@@ -88,7 +103,16 @@ function ConductorChatBridge({
     stop,
   } = useChat({
     transport,
-    sendAutomaticallyWhen: shouldAutoSendConductorChat,
+    sendAutomaticallyWhen: ({ messages }) => shouldAutoSendConductorChat({
+      messages,
+      buildPhase: buildPhaseRef.current,
+      missingSlots: missingSlotsRef.current,
+      loopStatus: loopStatusRef.current,
+    }),
+    onError: (error) => {
+      console.error("[conductor/chat] stream failed:", error);
+      toast.error(formatApiError(error, "Conductor could not finish that response. Your message was saved — try again."));
+    },
   });
 
   const chatLoadedRef = useRef(false);
@@ -147,6 +171,9 @@ function ConductorChatBridge({
           status: data.loop?.status ?? "draft",
           compiledPlanId: data.buildChat?.compiledPlanId ?? null,
           eventTrigger: data.eventTrigger ?? null,
+          buildPhase: typeof data.buildProgress?.internalPhase === "string"
+            ? data.buildProgress.internalPhase as ConductorBuildPhase
+            : null,
         });
         if (Array.isArray(data.chatMessages) && data.chatMessages.length > 0) {
           setMessages(data.chatMessages as UIMessage[]);
@@ -177,14 +204,19 @@ function ConductorChatBridge({
         const metaKey = `${message.id}:${"toolCallId" in part ? String(part.toolCallId) : part.type}`;
         const phaseToolPart = part as { type: string; state?: string; output?: unknown };
         if (phaseToolPart.type.startsWith("tool-") && phaseToolPart.state === "output-available") {
-          const output = phaseToolPart.output as { spec?: Record<string, unknown>; missingSlots?: string[] };
-          if (output.spec || output.missingSlots) {
+          const output = phaseToolPart.output as {
+            spec?: Record<string, unknown>;
+            missingSlots?: string[];
+            phaseAfter?: ConductorBuildPhase;
+          };
+          if (output.spec || output.missingSlots || output.phaseAfter) {
             const specMetaKey = `${metaKey}:spec`;
             if (processedToolMetaRef.current.has(specMetaKey)) continue;
             processedToolMetaRef.current.add(specMetaKey);
             onLoopMetaChangeRef.current({
-              spec: output.spec ?? null,
-              missingSlots: output.missingSlots,
+              ...(output.spec ? { spec: output.spec } : {}),
+              ...(output.missingSlots ? { missingSlots: output.missingSlots } : {}),
+              ...(output.phaseAfter ? { buildPhase: output.phaseAfter } : {}),
             });
           }
         }
@@ -256,6 +288,7 @@ function ConductorBuilderLive({
   loopName,
   spec,
   missingSlots,
+  buildPhase,
   compiledPlanId,
   status,
   eventTrigger,
@@ -271,6 +304,7 @@ function ConductorBuilderLive({
   loopName?: string;
   spec: Record<string, unknown> | null;
   missingSlots: string[];
+  buildPhase: ConductorBuildPhase | null;
   compiledPlanId: string | null;
   status: string;
   eventTrigger: LoopEventTriggerStatus | null;
@@ -305,9 +339,21 @@ function ConductorBuilderLive({
     [messages],
   );
 
+  const chatBusy = creating || chatStatus === "streaming" || chatStatus === "submitted";
+  const isStalled = useMemo(
+    () => findConductorStall({
+      messages,
+      buildPhase,
+      missingSlots,
+      chatBusy,
+      loopStatus: status,
+    }).stalled,
+    [messages, buildPhase, missingSlots, chatBusy, status],
+  );
+
   const promptSuggestionsQuestion = useMemo(
-    () => deriveConductorPromptSuggestionsQuestion(messages),
-    [messages],
+    () => deriveConductorPromptSuggestionsQuestion(messages, isStalled),
+    [messages, isStalled],
   );
 
   const promptSuggestions = useMemo(
@@ -315,14 +361,17 @@ function ConductorBuilderLive({
       messages,
       missingSlots,
       status,
+      buildPhase,
+      isStalled,
       hasPendingQuestion: Boolean(pendingQuestions.length || pendingOutcomeBrief),
       hasPendingReplyOptions: Boolean(pendingReplyOptions),
-      chatBusy: creating || chatStatus === "streaming" || chatStatus === "submitted",
+      chatBusy,
       explicitOptions: pendingReplyOptions?.input.options,
     }),
     [
-      creating,
-      chatStatus,
+      buildPhase,
+      chatBusy,
+      isStalled,
       messages,
       missingSlots,
       pendingQuestions,
@@ -491,6 +540,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
   const [missingSlots, setMissingSlots] = useState<string[]>([]);
   const [compiledPlanId, setCompiledPlanId] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("draft");
+  const [buildPhase, setBuildPhase] = useState<ConductorBuildPhase | null>(null);
   const [eventTrigger, setEventTrigger] = useState<LoopEventTriggerStatus | null>(null);
   const [input, setInput] = useState("");
   const [creating, setCreating] = useState(false);
@@ -506,6 +556,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     status?: string;
     compiledPlanId?: string | null;
     eventTrigger?: LoopEventTriggerStatus | null;
+    buildPhase?: ConductorBuildPhase | null;
   }) => {
     if (meta.loopName !== undefined) setLoopName(meta.loopName);
     if (meta.spec !== undefined) {
@@ -525,6 +576,9 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
       ));
     }
     if (meta.status !== undefined) setStatus((prev) => (prev === meta.status ? prev : meta.status!));
+    if (meta.buildPhase !== undefined) {
+      setBuildPhase((prev) => (prev === meta.buildPhase ? prev : meta.buildPhase ?? null));
+    }
     if (meta.compiledPlanId !== undefined) {
       setCompiledPlanId((prev) => (prev === meta.compiledPlanId ? prev : meta.compiledPlanId ?? null));
     }
@@ -611,6 +665,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     loopName,
     spec,
     missingSlots,
+    buildPhase,
     compiledPlanId,
     status,
     eventTrigger,
@@ -633,6 +688,9 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
       pendingPrompt={pendingPromptRef.current}
       skipLoopFetch={createdInSessionRef.current}
       bootstrapPromptSentRef={bootstrapPromptSentRef}
+      buildPhase={buildPhase}
+      missingSlots={missingSlots}
+      loopStatus={status}
       onLoopMetaChange={handleLoopMetaChange}
     >
       {live}

@@ -1,15 +1,31 @@
 import { Router, type Response } from "express";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
-  convertToModelMessages,
+  createUIMessageStream,
+  MissingToolResultsError,
+  pipeUIMessageStreamToResponse,
+  type StopCondition,
   stepCountIs,
   streamText,
   tool,
   type UIMessage,
 } from "ai";
 
-import { prepareConductorChatMessagesForEventLog } from "../../../loops/conductor-chat.js";
-import { eventPayloadHash, interruptionEventsFromUiMessages, projectChatMessages } from "../../../loops/build-events.js";
+import {
+  isMissingToolResultsError,
+  prepareConductorChatMessagesForEventLog,
+  prepareConductorModelMessagesForStream,
+} from "../../../loops/conductor-chat.js";
+import {
+  eventPayloadHash,
+  hasCompletedConductorOperation,
+  hasTerminalConductorPhaseResult,
+  interruptionEventsForToolCallIds,
+  interruptionEventsFromUiMessages,
+  isTerminalConductorExecution,
+  projectChatMessages,
+} from "../../../loops/build-events.js";
 import {
   activateLoopInputSchema,
   analyzeIntentInputSchema,
@@ -25,12 +41,25 @@ import {
   pickConnectorAppInputSchema,
   presentAgentTeamInputSchema,
   presentReplyOptionsInputSchema,
-  setBindingConfigInputSchema,
+  readConductorExecutionMetadata,
+  isConductorBuildPhase,
+  isRecoverableConductorExecution,
+  resolveBindingsInputSchema,
   testRunLoopInputSchema,
+  type ConductorExecutionMetadata,
 } from "../../../loops/conductor-tools.js";
 import { computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
 import { normalizeAgentTeam } from "../../../loops/present-agent-team.js";
-import { discoverOutcomeBindings, extractConfigurableFields, resolveConfigurableFieldOptions, validateConfigAgainstSchema } from "../../../loops/binding-discovery.js";
+import { discoverOutcomeBindings, extractConfigurableFields, resolveConfigurableFieldOptions } from "../../../loops/binding-discovery.js";
+import {
+  prepareBindingResolution,
+  describeBindingResolutionError,
+  filterBindingResolutionAnswers,
+  resolvePreparedBindings,
+  type BindingResolverAnswer,
+  type BindingResolverAction,
+  type BindingResolverTrigger,
+} from "../../../loops/binding-resolver.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
 import { executeLoopTestRun } from "../../../loops/test-run.js";
 import {
@@ -50,19 +79,27 @@ import {
   triggerManualRun,
 } from "../../../loops/service.js";
 import { getLoopRun, getPendingApprovalForRun, listLoopRunSteps, getBuildChatMessages, saveBuildChatMessages, getLoopBuildMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus, getLatestBuildState, commitLoopBuildArtifact, appendBuildEvents, getBuildEvents } from "../../../loops/store.js";
-import { projectLoopSpec, userFacingStageForPhase, BuildStateError } from "../../../loops/build-state.js";
+import {
+  BUILD_ERROR_CODES,
+  BUILD_PHASES,
+  projectLoopSpec,
+  userFacingStageForPhase,
+  BuildPhase,
+  BuildStateError,
+} from "../../../loops/build-state.js";
 import {
   deriveIntentAndBlueprint,
-  deriveBindingArtifact,
+  bindingActionOutcomesForToolkit,
   bindingEvidenceFromMessages,
+  completedToolEvents,
   interpretBindingDiscovery,
   interpretCompletedIntent,
   interpretConnectorSelections,
   interpretReviewConfirmation,
+  deriveReviewProgress,
   connectorSelectionEvidence,
-  type InterpretedBindingDiscovery,
   type InterpretedTriggerList,
-  type InterpretedBindingConfig,
+  type BindingDiagnostic,
 } from "../../../loops/build-event-interpreter.js";
 import { composioWebhookDeliveryUrl, isLocalWebhookUrl } from "../../../integrations/composio/webhook-subscription.js";
 import { deriveLoopNameFromPrompt } from "../../../loops/loop-name.js";
@@ -70,6 +107,7 @@ import { resolveActivationGap } from "../../../loops/activation-status.js";
 import {
   CONDUCTOR_TOOL_DESCRIPTIONS,
 } from "../../../loops/conductor-chat-prompts.js";
+import { conductorStepLimitForPhase } from "../../../loops/conductor-turn-budget.js";
 import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
 import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
 import { getToolkitConnectionStatus, listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
@@ -96,6 +134,12 @@ function sendError(res: Response, error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : fallback;
   const status = /not found/i.test(message) ? 404 : /not connected|invalid/i.test(message) ? 400 : 500;
   res.status(status).json({ error: message });
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 const loopIdSchema = z.object({ loopId: z.string().uuid() });
@@ -371,6 +415,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         connected: Boolean(t.connected),
       })),
       buildPhase: currentBuildState!.buildPhase,
+      reviewProgress: deriveReviewProgress(currentBuildState!, buildEvents),
+      resumeTool: lastToolExecution?.resumeTool ?? null,
     });
 
     const recordArtifact = async (phase: Parameters<typeof commitLoopBuildArtifact>[0]["phase"], artifact: unknown, expectedParentHash?: string) => {
@@ -447,26 +493,159 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       await recordArtifact("review", interpretedReview, currentBuildState.artifacts.bindings!.artifactHash);
     }
     const bindingEvidence = bindingEvidenceFromMessages(buildEvents);
-    const bindingDiscoveries: InterpretedBindingDiscovery[] = [...bindingEvidence.discoveries];
     const triggerLists: InterpretedTriggerList[] = [...bindingEvidence.triggerLists];
-    const bindingConfigs: InterpretedBindingConfig[] = [...bindingEvidence.bindingConfigs];
-    const recordBindingsWhenComplete = async () => {
-      const artifact = deriveBindingArtifact(currentBuildState!, bindingDiscoveries, triggerLists, bindingConfigs);
-      if (!artifact || currentBuildState!.buildPhase !== "bindings") return;
-      await recordArtifact("bindings", artifact, currentBuildState!.artifacts.connectors!.artifactHash);
+    const persistBindingDiagnostics = async (diagnostics: BindingDiagnostic[]) => {
+      if (diagnostics.length === 0) return;
+      await appendBuildEvents(auth, loopId, [{
+        eventKey: `binding-diagnostic:${eventPayloadHash(diagnostics)}`,
+        type: "binding.diagnostic",
+        payload: { diagnostics },
+      }]);
+    };
+    const requestStartPhase = currentBuildState.buildPhase;
+    const parentArtifactHashForPhase = (phase: BuildPhase): string => {
+      const phaseIndex = BUILD_PHASES.indexOf(phase);
+      if (phaseIndex <= 0) return "root";
+      const parent = currentBuildState!.artifacts[BUILD_PHASES[phaseIndex - 1]];
+      return parent?.artifactHash ?? "root";
+    };
+    const requestStartParentArtifactHash = parentArtifactHashForPhase(requestStartPhase);
+    let lastToolExecution: ConductorExecutionMetadata | null = null;
+    let syntheticToolSequence = buildEvents.at(-1)?.sequence ?? 0;
+    const inTurnOperationKeys = new Set<string>();
+    const appendSyntheticToolExecution = (toolName: string, input: unknown, output: unknown) => {
+      const metadata = readConductorExecutionMetadata(output);
+      if (!metadata) return;
+      inTurnOperationKeys.add(metadata.operationKey);
+      syntheticToolSequence += 1;
+      buildEvents = [...buildEvents, {
+        id: `synthetic:${syntheticToolSequence}`,
+        loopId,
+        threadKind: "build",
+        runId: null,
+        sequence: syntheticToolSequence,
+        eventKey: `synthetic:${metadata.operationKey}:${syntheticToolSequence}`,
+        type: "tool_call.completed",
+        payload: {
+          messageId: `synthetic:${syntheticToolSequence}`,
+          toolName,
+          state: "output-available",
+          input,
+          output,
+          ...metadata,
+        },
+        toolCallId: `synthetic:${syntheticToolSequence}`,
+        createdAt: new Date().toISOString(),
+      }];
+      lastToolExecution = metadata;
+    };
+    const beginToolExecution = (
+      toolName: string,
+      target: string,
+      options?: { historicalDedup?: boolean },
+    ) => {
+      const phaseBefore = currentBuildState!.buildPhase;
+      const parentArtifactHash = parentArtifactHashForPhase(phaseBefore);
+      const operationKey = `${phaseBefore}:${parentArtifactHash}:${toolName}:${target}`;
+      const lookup = { operationKey, parentArtifactHash };
+      if (inTurnOperationKeys.has(operationKey)
+        || ((options?.historicalDedup !== false) && hasCompletedConductorOperation(buildEvents, lookup))) {
+        return { duplicate: true as const, operationKey, phaseBefore, parentArtifactHash };
+      }
+      return { duplicate: false as const, operationKey, phaseBefore, parentArtifactHash };
+    };
+    const finalizeToolExecution = <T extends Record<string, unknown>>(
+      toolName: string,
+      input: unknown,
+      start: { operationKey: string; phaseBefore: BuildPhase; parentArtifactHash: string },
+      output: T,
+    ) => {
+      const parsed = readConductorExecutionMetadata(output);
+      const phaseAfter = currentBuildState!.buildPhase;
+      const ok = parsed?.ok ?? (typeof output.ok === "boolean" ? output.ok : true);
+      const retryAllowed = parsed?.retryAllowed ?? (typeof output.retryAllowed === "boolean" ? output.retryAllowed : ok);
+      const requiresUserInput = parsed?.requiresUserInput ?? (typeof output.requiresUserInput === "boolean" ? output.requiresUserInput : false);
+      const invalidatedPhases = parsed?.invalidatedPhases
+        ?? (Array.isArray(output.invalidatedPhases)
+          ? output.invalidatedPhases.filter((phase): phase is BuildPhase => BUILD_PHASES.includes(phase as BuildPhase))
+          : []);
+      const error = parsed?.error ?? (typeof output.error === "string" ? output.error : undefined);
+      const outputRecord = output as Record<string, unknown>;
+      const recoverToPhase = parsed?.recoverToPhase
+        ?? (isConductorBuildPhase(outputRecord.recoverToPhase) ? outputRecord.recoverToPhase : undefined);
+      const recoverReason = parsed?.recoverReason
+        ?? (typeof outputRecord.recoverReason === "string" ? outputRecord.recoverReason : undefined);
+      const resumeTool = parsed?.resumeTool
+        ?? (typeof outputRecord.resumeTool === "string" ? outputRecord.resumeTool : undefined);
+      const execution = {
+        ok,
+        operationKey: start.operationKey,
+        phaseBefore: start.phaseBefore,
+        phaseAfter,
+        phaseCompleted: parsed?.phaseCompleted ?? phaseAfter !== start.phaseBefore,
+        requiresUserInput,
+        retryAllowed,
+        parentArtifactHash: start.parentArtifactHash,
+        invalidatedPhases,
+        ...(error ? { error } : {}),
+        ...(recoverToPhase ? { recoverToPhase } : {}),
+        ...(recoverReason ? { recoverReason } : {}),
+        ...(resumeTool ? { resumeTool } : {}),
+      } satisfies ConductorExecutionMetadata;
+      const merged = { ...output, ...execution };
+      appendSyntheticToolExecution(toolName, input, merged);
+      return merged as T & ConductorExecutionMetadata;
+    };
+    const duplicateToolExecution = (
+      toolName: string,
+      input: unknown,
+      start: { operationKey: string; phaseBefore: BuildPhase; parentArtifactHash: string },
+      error: string,
+    ) => finalizeToolExecution(toolName, input, start, {
+      ok: false as const,
+      error,
+      retryAllowed: false,
+      requiresUserInput: false,
+      invalidatedPhases: [],
+    });
+    const shouldStopConductorTurn: StopCondition<any> = ({ steps }) => {
+      if (steps.length === 0) return false;
+      if (lastToolExecution && isRecoverableConductorExecution(lastToolExecution)) {
+        return false;
+      }
+      if (currentBuildState!.buildPhase !== requestStartPhase) return true;
+      if (lastToolExecution
+        && lastToolExecution.phaseBefore === requestStartPhase
+        && lastToolExecution.parentArtifactHash === requestStartParentArtifactHash
+        && isTerminalConductorExecution(lastToolExecution)) {
+        return true;
+      }
+      return hasTerminalConductorPhaseResult(buildEvents, {
+        phase: requestStartPhase,
+        parentArtifactHash: requestStartParentArtifactHash,
+      });
     };
 
-    const activeToolsForPhase = () => {
-      switch (currentBuildState!.buildPhase) {
+    const toolsForBuildPhase = (phase: BuildPhase) => {
+      switch (phase) {
         case "intent": return ["analyzeIntent", "askQuestion"];
         case "blueprint": return [];
         case "connectors": return ["discoverConnectorsForBlueprint", "pickConnectorApp", "listWorkspaceConnectors", "connectToolkit"];
-        case "bindings": return ["listTriggers", "listActions", "discoverBindings", "askQuestion", "setBindingConfig"];
+        case "bindings": return ["listTriggers", "listActions", "discoverBindings", "askQuestion", "resolveBindings"];
         case "review": return ["presentAgentTeam", "confirmOutcomeBrief"];
-        case "compile": return ["compileLoop"];
+        case "compile": return ["compileLoop", "listTriggers", "listActions", "discoverBindings", "askQuestion", "resolveBindings", "listWorkspaceConnectors", "connectToolkit"];
         case "test": return ["testRunLoop"];
         case "activation": return ["presentReplyOptions", "activateLoop"];
       }
+    };
+    const activeToolsForPhase = () => {
+      const recoveryPhase = lastToolExecution?.recoverToPhase;
+      const effectivePhase = recoveryPhase ?? currentBuildState!.buildPhase;
+      if (effectivePhase === "review") {
+        const reviewProgress = deriveReviewProgress(currentBuildState!, buildEvents);
+        if (reviewProgress?.nextTool) return [reviewProgress.nextTool];
+      }
+      return toolsForBuildPhase(effectivePhase);
     };
     const requirePhase = (...allowed: Array<NonNullable<typeof currentBuildState>["buildPhase"]>) => {
       if (!allowed.includes(currentBuildState!.buildPhase)) {
@@ -474,18 +653,32 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       }
     };
 
-    const result = streamText({
-      model: getStreamingLanguageModel("conductor", { userId: auth.userId }),
-      stopWhen: stepCountIs(16),
-      system: buildCurrentSystemPrompt(),
-      prepareStep: () => ({ system: buildCurrentSystemPrompt(), activeTools: activeToolsForPhase() as never[] }),
-      messages: await convertToModelMessages(chatMessages),
-      tools: {
+    const startConductorStream = async (replaySourceMessages: UIMessage[]) => {
+      const prepared = await prepareConductorModelMessagesForStream(replaySourceMessages);
+      if (prepared.stats.repairedToolCallIds.length > 0) {
+        console.warn(`[loops/chat:${loopId}] repaired ${prepared.stats.repairedToolCallIds.length} superseded tool call(s) for model replay`, {
+          toolCallIds: prepared.stats.repairedToolCallIds,
+          prunedMessageIds: prepared.stats.prunedMessageIds,
+        });
+      }
+      return {
+        ...prepared,
+        result: streamText({
+          model: getStreamingLanguageModel("conductor", { userId: auth.userId }),
+          stopWhen: [shouldStopConductorTurn, stepCountIs(conductorStepLimitForPhase(requestStartPhase))],
+          system: buildCurrentSystemPrompt(),
+          prepareStep: () => ({ system: buildCurrentSystemPrompt(), activeTools: activeToolsForPhase() as never[] }),
+          messages: prepared.modelMessages,
+          tools: {
         analyzeIntent: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.analyzeIntent,
           inputSchema: analyzeIntentInputSchema,
           execute: async (analysis) => {
             requirePhase("intent");
+            const execution = beginToolExecution("analyzeIntent", "intent");
+            if (execution.duplicate) {
+              return duplicateToolExecution("analyzeIntent", analysis, execution, "Intent analysis already exists for the current revision");
+            }
             if (analysis.questions.length === 0) {
               const interpreted = deriveIntentAndBlueprint({
                 spec: currentSpec!,
@@ -498,7 +691,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 await recordArtifact("blueprint", interpreted.blueprint, currentBuildState!.artifacts.intent!.artifactHash);
               }
             }
-            return { ok: true, analysis };
+            return finalizeToolExecution("analyzeIntent", analysis, execution, { ok: true as const, analysis });
           },
         }),
         discoverConnectorsForBlueprint: tool({
@@ -506,6 +699,15 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: discoverConnectorsForBlueprintInputSchema,
           execute: async (input) => {
             requirePhase("connectors");
+            const execution = beginToolExecution("discoverConnectorsForBlueprint", "blueprint", { historicalDedup: false });
+            if (execution.duplicate) {
+              return duplicateToolExecution(
+                "discoverConnectorsForBlueprint",
+                input,
+                execution,
+                "Connector discovery already ran for the current revision",
+              );
+            }
             const discovered = preparedConnectorDiscovery ?? await discoverConnectorsForBlueprint(auth, {
                 ...input,
                 previousSelections: connectorSelectionEvidence(buildEvents),
@@ -515,7 +717,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               });
             preparedConnectorDiscovery = null;
             await applyAutoResolvedConnectors(discovered);
-            return discovered;
+            return finalizeToolExecution("discoverConnectorsForBlueprint", input, execution, discovered);
           },
         }),
         pickConnectorApp: tool({
@@ -530,8 +732,12 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.listTriggers,
           inputSchema: listTriggersInputSchema,
           execute: async ({ toolkit }) => {
-            requirePhase("bindings");
+            requirePhase("bindings", "compile");
             const resolved = await resolveToolkitSlug(toolkit);
+            const execution = beginToolExecution("listTriggers", `toolkit:${resolved}`, { historicalDedup: false });
+            if (execution.duplicate) {
+              return duplicateToolExecution("listTriggers", { toolkit: resolved }, execution, `Triggers for ${resolved} were already listed for the current revision`);
+            }
             const rawTriggers = (await listComposioTriggerTypes(resolved)).map((trigger) => ({
               ...trigger,
               configurableFields: extractConfigurableFields(trigger.config ?? {}),
@@ -545,118 +751,291 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               configurableFields: trigger.configurableFields.map((field) => ({
                 ...field,
                 options: optionsByKey.get(field.key) ?? field.options,
-              })).filter((field) => !/(?:ids?|_ids?)$/i.test(field.key) || field.options.length > 0),
+              })),
             }));
             triggerLists.push({ toolkit: resolved, triggers });
-            await recordBindingsWhenComplete();
-            return { toolkit: resolved, triggers, spec: currentSpec };
+            return finalizeToolExecution("listTriggers", { toolkit: resolved }, execution, {
+              toolkit: resolved,
+              triggers,
+              spec: currentSpec,
+            });
           },
         }),
         listActions: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.listActions,
           inputSchema: listActionsInputSchema,
           execute: async ({ toolkit }) => {
-            requirePhase("bindings");
+            requirePhase("bindings", "compile");
             const resolved = await resolveToolkitSlug(toolkit);
+            const execution = beginToolExecution("listActions", `toolkit:${resolved}`, { historicalDedup: false });
+            if (execution.duplicate) {
+              return duplicateToolExecution("listActions", { toolkit: resolved }, execution, `Actions for ${resolved} were already listed for the current revision`);
+            }
             const actions = await getAllTools(resolved);
-            return {
+            return finalizeToolExecution("listActions", { toolkit: resolved }, execution, {
               toolkit: resolved,
               actions: actions.map((action) => ({
                 slug: action.actionSlug,
                 name: action.name,
                 description: action.description,
               })),
-            };
+            });
           },
         }),
         discoverBindings: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.discoverBindings,
           inputSchema: discoverBindingsInputSchema,
           execute: async (input) => {
-            requirePhase("bindings");
+            requirePhase("bindings", "compile");
+            const execution = beginToolExecution(
+              "discoverBindings",
+              `toolkit:${input.toolkit.toLowerCase()}`,
+              { historicalDedup: false },
+            );
+            if (execution.duplicate) {
+              return duplicateToolExecution("discoverBindings", input, execution, `Bindings for ${input.toolkit} were already discovered for the current revision`);
+            }
             const selected = new Set((currentBuildState!.artifacts.connectors?.artifact as { selections?: Array<{ connector: string }> })
               ?.selections?.map((row) => row.connector.toLowerCase()) ?? []);
             if (!selected.has(input.toolkit.toLowerCase())) {
               throw new BuildStateError("BUILD_UNSELECTED_CONNECTOR", `Cannot discover bindings for unselected connector ${input.toolkit}`);
             }
-            const discovered = await discoverOutcomeBindings(input.toolkit, input.outcomes);
-            bindingDiscoveries.push({
-              toolkit: discovered.toolkit,
-              suggestedBindings: discovered.suggestedBindings,
+            const expectedOutcomes = bindingActionOutcomesForToolkit(currentSpec!, input.toolkit);
+            const discovered = await discoverOutcomeBindings(input.toolkit, expectedOutcomes);
+            return finalizeToolExecution("discoverBindings", input, execution, {
+              ...discovered,
+              spec: currentSpec,
             });
-            await recordBindingsWhenComplete();
-            return { ...discovered, spec: currentSpec };
           },
         }),
-        setBindingConfig: tool({
-          description: CONDUCTOR_TOOL_DESCRIPTIONS.setBindingConfig,
-          inputSchema: setBindingConfigInputSchema,
-          execute: async (input) => {
-            requirePhase("bindings");
-            const blueprint = currentSpec!.taskBlueprint?.outcomes.find((outcome) => outcome.id === input.outcomeId);
-            if (!blueprint || blueprint.role !== "trigger") {
-              throw new BuildStateError("BUILD_INVALID_TRANSITION", "Trigger configuration must target the trigger outcome");
+        resolveBindings: tool({
+          description: CONDUCTOR_TOOL_DESCRIPTIONS.resolveBindings,
+          inputSchema: resolveBindingsInputSchema,
+          execute: async () => {
+            requirePhase("bindings", "compile");
+            const blueprintOutcomes = currentSpec!.taskBlueprint?.outcomes ?? [];
+            const actionOutcomes = blueprintOutcomes.filter((outcome): outcome is typeof outcome & {
+              role: "source" | "destination"; selectedConnector: string;
+            } => (outcome.role === "source" || outcome.role === "destination") && Boolean(outcome.selectedConnector));
+            const triggerOutcome = blueprintOutcomes.find((outcome) =>
+              outcome.role === "trigger" && Boolean(outcome.selectedConnector));
+
+            const latestDiscoveryByToolkit = new Map<string, Record<string, unknown>>();
+            for (const event of completedToolEvents(buildEvents, "discoverBindings")) {
+              const output = recordValue(event.output);
+              const toolkit = String(output?.toolkit ?? "").toLowerCase();
+              if (toolkit) latestDiscoveryByToolkit.set(toolkit, output!);
             }
-            if (blueprint.selectedConnector?.toLowerCase() !== input.connector.toLowerCase()) {
-              throw new BuildStateError("BUILD_UNSELECTED_CONNECTOR", `Cannot configure unselected connector ${input.connector}`);
+            const catalogues = new Map<string, Awaited<ReturnType<typeof getAllTools>>>();
+            await Promise.all([...new Set(actionOutcomes.map((outcome) => outcome.selectedConnector.toLowerCase()))]
+              .map(async (toolkit) => catalogues.set(toolkit, await getAllTools(toolkit))));
+
+            const actions: BindingResolverAction[] = actionOutcomes.map((outcome) => {
+              const connector = outcome.selectedConnector;
+              const discovery = latestDiscoveryByToolkit.get(connector.toLowerCase());
+              const ambiguities = Array.isArray(discovery?.ambiguities) ? discovery.ambiguities : [];
+              const suggestions = Array.isArray(discovery?.suggestedBindings) ? discovery.suggestedBindings : [];
+              const ambiguity = ambiguities.map(recordValue).find((row) => String(row?.outcomeId ?? "") === outcome.id);
+              const suggestion = suggestions.map(recordValue).find((row) => String(row?.outcomeId ?? "") === outcome.id);
+              const candidateRows = ambiguity && Array.isArray(ambiguity.candidates)
+                ? ambiguity.candidates.map(recordValue).filter((row): row is Record<string, unknown> => Boolean(row))
+                : suggestion ? [{ actionSlug: String(suggestion.actionSlug ?? "") }] : [];
+              const catalogue = catalogues.get(connector.toLowerCase()) ?? [];
+              return {
+                outcomeId: outcome.id,
+                connector,
+                role: outcome.role,
+                description: outcome.description,
+                candidates: candidateRows.flatMap((row) => {
+                  const actionSlug = String(row.actionSlug ?? "");
+                  const live = catalogue.find((candidate) => candidate.actionSlug === actionSlug);
+                  if (!actionSlug || !live) return [];
+                  return [{ actionSlug, name: live.name, description: live.description }];
+                }),
+              };
+            });
+
+            let trigger: BindingResolverTrigger | null = null;
+            if (triggerOutcome?.selectedConnector) {
+              const connector = triggerOutcome.selectedConnector;
+              const rows = triggerLists.flatMap((list) => list.toolkit.toLowerCase() === connector.toLowerCase()
+                ? list.triggers : []);
+              const ranked = rows.map((row) => ({
+                row,
+                score: scoreTriggerSlugMatch(triggerOutcome.description, String(row.slug ?? ""), String(row.name ?? "")),
+              })).filter((candidate) => String(candidate.row.slug ?? ""))
+                .sort((left, right) => right.score - left.score);
+              const close = ranked[0] ? ranked.filter((candidate) => candidate.score >= ranked[0]!.score - 1) : [];
+              trigger = {
+                outcomeId: triggerOutcome.id,
+                connector,
+                description: triggerOutcome.description,
+                candidates: close.slice(0, 5).map(({ row }) => {
+                  const configSchema = recordValue(row.config) ?? {};
+                  return {
+                    slug: String(row.slug ?? ""),
+                    name: String(row.name ?? row.slug ?? "Trigger"),
+                    configSchema,
+                    configurableFields: Array.isArray(row.configurableFields)
+                      ? row.configurableFields as BindingResolverTrigger["candidates"][number]["configurableFields"]
+                      : extractConfigurableFields(configSchema),
+                  };
+                }),
+              };
             }
-            const candidates = triggerLists.flatMap((list) => list.toolkit.toLowerCase() === input.connector.toLowerCase()
-              ? list.triggers : []);
-            const selected = candidates.slice().sort((left, right) =>
-              scoreTriggerSlugMatch(blueprint.description, String(right.slug ?? ""), String(right.name ?? ""))
-              - scoreTriggerSlugMatch(blueprint.description, String(left.slug ?? ""), String(left.name ?? "")))[0];
-            if (!selected) throw new BuildStateError("BUILD_INVALID_TRANSITION", "List triggers before setting trigger configuration");
-            const schema = selected.config && typeof selected.config === "object" && !Array.isArray(selected.config)
-              ? selected.config as Record<string, unknown> : {};
-            const surfacedFields = Array.isArray(selected.configurableFields)
-              ? selected.configurableFields.filter((field): field is { key: string } =>
-                Boolean(field && typeof field === "object" && "key" in field && typeof field.key === "string"))
-              : extractConfigurableFields(schema);
-            const allowed = new Set(surfacedFields.map((field) => field.key));
-            const unsupported = Object.keys(input.config).find((key) => !allowed.has(key));
-            if (unsupported) throw new BuildStateError("BUILD_INVALID_TRANSITION", `Unsupported trigger configuration field ${unsupported}`);
-            const validation = validateConfigAgainstSchema(schema, input.config);
-            if (!validation.ok) throw new BuildStateError("BUILD_INVALID_TRANSITION", validation.error);
-            const saved = { outcomeId: input.outcomeId, connector: input.connector, config: input.config };
-            const priorIndex = bindingConfigs.findIndex((entry) => entry.outcomeId === input.outcomeId);
-            if (priorIndex >= 0) bindingConfigs[priorIndex] = saved;
-            else bindingConfigs.push(saved);
-            await appendBuildEvents(auth, loopId, [{
-              eventKey: `binding-config:${input.outcomeId}:${eventPayloadHash(input.config)}`,
-              type: "binding.config_set",
-              payload: saved,
-            }]);
-            await recordBindingsWhenComplete();
-            return { ok: true as const, ...saved };
+
+            const firstBindingEvidenceSequence = buildEvents.find((event) =>
+              event.type === "tool_call.completed"
+              && ["discoverBindings", "listTriggers"].includes(String(event.payload.toolName ?? "")))?.sequence ?? 0;
+            const answers: BindingResolverAnswer[] = filterBindingResolutionAnswers(buildEvents.flatMap((event) => {
+              if (event.sequence <= firstBindingEvidenceSequence
+                || event.type !== "tool_call.completed"
+                || event.payload.toolName !== "askQuestion") return [];
+              const input = recordValue(event.payload.input);
+              const output = recordValue(event.payload.output);
+              if (!input || !output || output.skipped === true) return [];
+              return [{
+                questionId: String(output.questionId ?? input.questionId ?? ""),
+                question: String(input.question ?? ""),
+                answerText: String(output.answerText ?? ""),
+                selectedOptionIds: Array.isArray(output.selectedOptionIds) ? output.selectedOptionIds.map(String) : [],
+                selectedValues: Array.isArray(output.selectedValues) ? output.selectedValues.map(String) : [],
+                ...(typeof output.otherText === "string" ? { otherText: output.otherText } : {}),
+              }];
+            }));
+            const resolutionInput = { actions, trigger, answers, userId: auth.userId };
+            const evidenceHash = eventPayloadHash({
+              blueprintHash: currentBuildState!.artifacts.blueprint!.artifactHash,
+              connectorHash: currentBuildState!.artifacts.connectors!.artifactHash,
+              actions,
+              trigger,
+              answers,
+            });
+            const execution = beginToolExecution("resolveBindings", `evidence:${evidenceHash}`, { historicalDedup: false });
+            if (execution.duplicate) {
+              return duplicateToolExecution("resolveBindings", {}, execution, "These binding choices were already resolved for the current revision");
+            }
+            if (actions.some((action) => action.candidates.length === 0) || (triggerOutcome && (!trigger || trigger.candidates.length === 0))) {
+              return finalizeToolExecution("resolveBindings", {}, execution, {
+                ok: false as const,
+                missingDiscovery: true,
+                requiredToolkits: [...new Set([
+                  ...actions.filter((action) => action.candidates.length === 0).map((action) => action.connector),
+                  ...(triggerOutcome && (!trigger || trigger.candidates.length === 0) ? [triggerOutcome.selectedConnector!] : []),
+                ])],
+                retryAllowed: true,
+              });
+            }
+            const connectionStatuses = await Promise.all([...new Set([
+              ...actions.map((action) => action.connector),
+              ...(trigger ? [trigger.connector] : []),
+            ])].map((connector) => getToolkitConnectionStatus(auth, connector)));
+            const disconnected = connectionStatuses.filter((status) => !status.connected);
+            if (disconnected.length > 0) {
+              const diagnostics: BindingDiagnostic[] = disconnected.map((status) => ({
+                code: "CONNECTOR_NOT_CONNECTED",
+                message: `${status.toolkit} is not connected in this workspace.`,
+                connector: status.toolkit,
+                expected: "An active workspace connection",
+                action: `Connect ${status.toolkit} before resolving bindings.`,
+                technical: { connector: status.toolkit, connectionStatus: status.status },
+              }));
+              await persistBindingDiagnostics(diagnostics);
+              return finalizeToolExecution("resolveBindings", {}, execution, {
+                ok: false as const,
+                diagnostics,
+                retryAllowed: false,
+              });
+            }
+            const prepared = prepareBindingResolution(resolutionInput);
+            if (!prepared.ready) {
+              return finalizeToolExecution("resolveBindings", {}, execution, {
+                ok: true as const,
+                pendingQuestions: prepared.pendingQuestions,
+                retryAllowed: true,
+              });
+            }
+            try {
+              const resolved = await resolvePreparedBindings(prepared, { userId: auth.userId });
+              await appendBuildEvents(auth, loopId, [{
+                eventKey: `binding-resolved:${evidenceHash}`,
+                type: "binding.resolved",
+                payload: {
+                  artifact: resolved.artifact,
+                  evidenceHash,
+                  blueprintHash: currentBuildState!.artifacts.blueprint!.artifactHash,
+                  connectorHash: currentBuildState!.artifacts.connectors!.artifactHash,
+                },
+              }]);
+              buildEvents = await getBuildEvents(auth, loopId);
+              const artifact = interpretBindingDiscovery(currentBuildState!, buildEvents);
+              if (!artifact) throw new Error("Resolved binding event could not be interpreted");
+              const committed = await recordArtifact("bindings", artifact, currentBuildState!.artifacts.connectors!.artifactHash);
+              return finalizeToolExecution("resolveBindings", {}, execution, {
+                ok: true as const,
+                artifactHash: committed.envelope.artifactHash,
+                spec: currentSpec,
+              });
+            } catch (error) {
+              const failure = describeBindingResolutionError(error);
+              const diagnostics: BindingDiagnostic[] = [{
+                code: failure.code,
+                message: failure.message,
+                expected: "One schema-valid binding artifact using the current provider catalogue",
+                action: failure.code === "BINDING_RESOLVER_PROVIDER_ERROR"
+                  ? "Retry binding resolution or configure TALLEI_BINDING_RESOLVER__MODEL to a model that supports structured JSON output."
+                  : failure.code === "INVALID_BINDING_SCOPE_ANSWER"
+                    ? "Call resolveBindings again and answer the returned pendingQuestions exactly."
+                    : "Retry binding resolution with the same confirmed choices.",
+                technical: {
+                  evidenceHash,
+                  error: error instanceof Error ? error.message.slice(0, 500) : "Unknown binding resolution error",
+                },
+              }];
+              await persistBindingDiagnostics(diagnostics);
+              return finalizeToolExecution("resolveBindings", {}, execution, {
+                ok: false as const,
+                diagnostics,
+                retryAllowed: true,
+              });
+            }
           },
         }),
         connectToolkit: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.connectToolkit,
           inputSchema: connectToolkitInputSchema,
           execute: async ({ toolkit, callbackUrl }) => {
-            requirePhase("connectors");
+            requirePhase("connectors", "compile");
+            const execution = beginToolExecution("connectToolkit", `toolkit:${toolkit.toLowerCase()}`, { historicalDedup: false });
+            if (execution.duplicate) {
+              return duplicateToolExecution("connectToolkit", { toolkit, callbackUrl }, execution, `${toolkit} connection is already in progress`);
+            }
             const authorization = await startToolkitAuthorization(auth, toolkit, { callbackUrl });
-            return {
+            return finalizeToolExecution("connectToolkit", { toolkit, callbackUrl }, execution, {
               ok: true,
               toolkit: authorization.toolkit,
               redirectUrl: authorization.redirectUrl,
               connectionRequestId: authorization.connectionRequestId,
-            };
+            });
           },
         }),
         listWorkspaceConnectors: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.listWorkspaceConnectors,
           inputSchema: listWorkspaceConnectorsInputSchema,
           execute: async () => {
-            requirePhase("connectors");
+            requirePhase("connectors", "compile");
+            const execution = beginToolExecution("listWorkspaceConnectors", "workspace", { historicalDedup: false });
+            if (execution.duplicate) {
+              return duplicateToolExecution("listWorkspaceConnectors", {}, execution, "Workspace connectors were already listed in this turn");
+            }
             const connectors = await listWorkspaceConnectors(auth);
-            return {
+            return finalizeToolExecution("listWorkspaceConnectors", {}, execution, {
               connectors: connectors.map((connector) => ({
                 slug: connector.slug,
                 name: connector.name,
                 connected: Boolean(connector.connected),
               })),
-            };
+            });
           },
         }),
         askQuestion: tool({
@@ -668,7 +1047,30 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: presentAgentTeamInputSchema,
           execute: async (input) => {
             requirePhase("review");
-            return normalizeAgentTeam(input, currentSpec!);
+            const execution = beginToolExecution(
+              "presentAgentTeam",
+              `review:${currentBuildState!.artifacts.bindings?.artifactHash ?? computeOutcomeBriefHash(currentSpec!)}`,
+              { historicalDedup: false },
+            );
+            if (execution.duplicate) {
+              const progress = deriveReviewProgress(currentBuildState!, buildEvents);
+              if (progress?.nextTool === "confirmOutcomeBrief") {
+                return finalizeToolExecution("presentAgentTeam", input, execution, {
+                  ok: false as const,
+                  error: "The review roster is already prepared. Call confirmOutcomeBrief now.",
+                  retryAllowed: true,
+                  requiresUserInput: false,
+                  recoverToPhase: "review",
+                  recoverReason: "confirm_outcome_brief_pending",
+                  resumeTool: "compileLoop",
+                });
+              }
+              return duplicateToolExecution("presentAgentTeam", input, execution, "The review roster is already prepared for the current revision");
+            }
+            return finalizeToolExecution("presentAgentTeam", input, execution, {
+              ...normalizeAgentTeam(input, currentSpec!),
+              reviewHandoffNext: "confirmOutcomeBrief" as const,
+            });
           },
         }),
         confirmOutcomeBrief: tool({
@@ -679,15 +1081,93 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.compileLoop,
           inputSchema: compileLoopInputSchema,
           execute: async () => {
-            const compiled = await compileLoop(auth, loopId);
+            const execution = beginToolExecution(
+              "compileLoop",
+              `compile:${currentBuildState!.artifacts.review?.artifactHash ?? currentBuildState!.artifacts.bindings?.artifactHash ?? "missing"}`,
+            );
+            if (execution.duplicate) {
+              return duplicateToolExecution("compileLoop", {}, execution, "This revision has already been compiled");
+            }
+            if (currentBuildState!.buildPhase !== "compile") {
+              const reviewPending = currentBuildState!.buildPhase === "review";
+              if (reviewPending) {
+                return finalizeToolExecution("compileLoop", {}, execution, {
+                  ok: false as const,
+                  error: "Review isn't complete yet. Confirm the specialist team summary before compiling.",
+                  retryAllowed: true,
+                  requiresUserInput: false,
+                  recoverToPhase: "review",
+                  recoverReason: "confirm_outcome_brief_pending",
+                  resumeTool: "compileLoop",
+                });
+              }
+              return finalizeToolExecution("compileLoop", {}, execution, {
+                ok: false as const,
+                error: `Cannot compile during the ${currentBuildState!.buildPhase} step.`,
+                retryAllowed: false,
+                requiresUserInput: false,
+              });
+            }
+            let compiled: Awaited<ReturnType<typeof compileLoop>>;
+            try {
+              compiled = await compileLoop(auth, loopId);
+            } catch (error) {
+              if (error instanceof BuildStateError) {
+                const reviewPending = error.code === BUILD_ERROR_CODES.INVALID_TRANSITION
+                  && currentBuildState!.buildPhase === "review";
+                if (reviewPending) {
+                  return finalizeToolExecution("compileLoop", {}, execution, {
+                    ok: false as const,
+                    error: "Review isn't complete yet. Confirm the specialist team summary before compiling.",
+                    retryAllowed: true,
+                    requiresUserInput: false,
+                    recoverToPhase: "review",
+                    recoverReason: "confirm_outcome_brief_pending",
+                    resumeTool: "compileLoop",
+                  });
+                }
+                return finalizeToolExecution("compileLoop", {}, execution, {
+                  ok: false as const,
+                  error: error.message,
+                  retryAllowed: false,
+                  requiresUserInput: false,
+                });
+              }
+              throw error;
+            }
             if (compiled.errors.length > 0) {
-              return { ok: false as const, errors: compiled.errors };
+              const diagnostics = compiled.errors.map((error) => ({
+                code: String(error.code),
+                message: error.message,
+                connector: error.toolkit,
+                rejectedValue: error.binding,
+                expected: "A binding that matches the current provider catalogue and workspace connection",
+                action: error.code === "CONNECTOR_NOT_CONNECTED"
+                  ? `Reconnect ${error.toolkit ?? "the connector"}, then compile again.`
+                  : "Run binding discovery again for this workflow step, then compile again.",
+                technical: {
+                  compilerCode: String(error.code),
+                  ...(error.toolkit ? { toolkit: error.toolkit } : {}),
+                  ...(error.binding ? { binding: error.binding } : {}),
+                },
+              }));
+              await appendBuildEvents(auth, loopId, [{
+                eventKey: `binding-diagnostic:compile:${eventPayloadHash(diagnostics)}`,
+                type: "binding.diagnostic",
+                payload: { diagnostics },
+              }]);
+              return finalizeToolExecution("compileLoop", {}, execution, {
+                ok: false as const,
+                errors: compiled.errors,
+                diagnostics,
+                retryAllowed: false,
+              });
             }
             latestCompiledPlanId = compiled.plan!.id;
             latestTestRunPass = null;
             currentBuildState = await getLatestBuildState(auth, loopId);
             if (currentBuildState) currentSpec = projectLoopSpec(currentBuildState);
-            return {
+            return finalizeToolExecution("compileLoop", {}, execution, {
               ok: true as const,
               plan: {
                 id: compiled.plan!.id,
@@ -696,7 +1176,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 profile: compiled.plan!.profile,
               },
               spec: currentSpec,
-            };
+            });
           },
         }),
         testRunLoop: tool({
@@ -704,8 +1184,19 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: testRunLoopInputSchema,
           execute: async ({ compiledPlanId, scenario }) => {
             const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;
+            const execution = beginToolExecution(
+              "testRunLoop",
+              `test:${planId ?? "missing"}:${eventPayloadHash(scenario)}`,
+            );
+            if (execution.duplicate) {
+              return duplicateToolExecution("testRunLoop", { compiledPlanId, scenario }, execution, "This test scenario already ran for the current revision");
+            }
             if (!planId) {
-              return { ok: false as const, error: "No compiled plan — call compileLoop first" };
+              return finalizeToolExecution("testRunLoop", { compiledPlanId, scenario }, execution, {
+                ok: false as const,
+                error: "No compiled plan — call compileLoop first",
+                retryAllowed: false,
+              });
             }
             const result = await executeLoopTestRun(auth, {
               loopId,
@@ -720,7 +1211,10 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               currentBuildState = recorded.state;
               currentSpec = projectLoopSpec(recorded.state);
             }
-            return result;
+            return finalizeToolExecution("testRunLoop", { compiledPlanId: planId, scenario }, execution, {
+              ...result,
+              ...(result.ok ? {} : { retryAllowed: false }),
+            });
           },
         }),
         activateLoop: tool({
@@ -728,38 +1222,111 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: activateLoopInputSchema,
           execute: async ({ compiledPlanId, confirmedByUser }) => {
             const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;
+            const execution = beginToolExecution("activateLoop", `activate:${planId ?? "missing"}`);
+            if (execution.duplicate) {
+              return duplicateToolExecution("activateLoop", { compiledPlanId, confirmedByUser }, execution, "This compiled plan is already active for the current revision");
+            }
             if (!planId) {
-              return { ok: false as const, error: "No compiled plan — call compileLoop first" };
+              return finalizeToolExecution("activateLoop", { compiledPlanId, confirmedByUser }, execution, {
+                ok: false as const,
+                error: "No compiled plan — call compileLoop first",
+                retryAllowed: false,
+              });
             }
             const inMemoryPass = latestTestRunPass?.planId === planId ? latestTestRunPass : null;
             const storedPass = inMemoryPass
               ? inMemoryPass
               : await getLatestPassingTestRunForPlan(auth, loopId, planId);
             if (!storedPass) {
-              return { ok: false as const, error: "Run testRunLoop on this plan before activating" };
+              return finalizeToolExecution("activateLoop", { compiledPlanId: planId, confirmedByUser }, execution, {
+                ok: false as const,
+                error: "Run testRunLoop on this plan before activating",
+                retryAllowed: false,
+              });
             }
             const activated = await activateLoop(auth, loopId, planId, confirmedByUser);
             currentBuildState = await getLatestBuildState(auth, loopId);
             if (currentBuildState) currentSpec = projectLoopSpec(currentBuildState);
             latestCompiledPlanId = activated.activePlanId;
-            return { ok: true as const, ...activated };
+            return finalizeToolExecution("activateLoop", { compiledPlanId: planId, confirmedByUser }, execution, {
+              ok: true as const,
+              ...activated,
+            });
           },
         }),
       },
-    });
+    }),
+      };
+    };
 
-    result.pipeUIMessageStreamToResponse(res, {
-      sendReasoning: true,
-      originalMessages: chatMessages,
-      onFinish: async ({ messages, isAborted }) => {
-        try {
-          if (isAborted) await appendBuildEvents(auth, loopId, interruptionEventsFromUiMessages(messages));
-          await saveBuildChatMessages(auth, loopId, messages);
-        } catch (error) {
-          console.error(`[loops/chat] failed to persist conductor transcript${isAborted ? " after abort" : ""}:`, error);
+    const pipeConductorStream = (
+      prepared: Awaited<ReturnType<typeof startConductorStream>>,
+      originalMessages: UIMessage[],
+    ) => {
+      prepared.result.pipeUIMessageStreamToResponse(res, {
+        sendReasoning: true,
+        originalMessages,
+        onFinish: async ({ messages, isAborted }) => {
+          try {
+            if (isAborted) await appendBuildEvents(auth, loopId, interruptionEventsFromUiMessages(messages));
+            await saveBuildChatMessages(auth, loopId, messages);
+          } catch (error) {
+            console.error(`[loops/chat] failed to persist conductor transcript${isAborted ? " after abort" : ""}:`, error);
+          }
+        },
+      });
+    };
+
+    const pipeConductorRecoveryMessage = async (originalMessages: UIMessage[]) => {
+      const recoveryText = "The previous response was interrupted before it finished. Your message was saved — send again to continue.";
+      const recoveryMessage: UIMessage = {
+        id: randomUUID(),
+        role: "assistant",
+        parts: [{ type: "text", text: recoveryText }],
+      };
+      const recoveredMessages = [...originalMessages, recoveryMessage];
+      await saveBuildChatMessages(auth, loopId, recoveredMessages);
+      const stream = createUIMessageStream({
+        originalMessages: originalMessages,
+        execute: ({ writer }) => {
+          writer.write({ type: "text-start", id: recoveryMessage.id });
+          writer.write({ type: "text-delta", id: recoveryMessage.id, delta: recoveryText });
+          writer.write({ type: "text-end", id: recoveryMessage.id });
+        },
+      });
+      pipeUIMessageStreamToResponse({
+        response: res,
+        stream,
+      });
+    };
+
+    try {
+      pipeConductorStream(await startConductorStream(chatMessages), chatMessages);
+    } catch (error) {
+      if (!isMissingToolResultsError(error) && !(error instanceof MissingToolResultsError)) {
+        throw error;
+      }
+      const toolCallIds = "toolCallIds" in error && Array.isArray(error.toolCallIds)
+        ? error.toolCallIds.map(String)
+        : [];
+      console.warn(`[loops/chat:${loopId}] missing tool results during replay; attempting recovery`, { toolCallIds });
+      await appendBuildEvents(auth, loopId, interruptionEventsForToolCallIds(chatMessages, toolCallIds));
+      buildEvents = await getBuildEvents(auth, loopId);
+      chatMessages = projectChatMessages(buildEvents);
+      try {
+        pipeConductorStream(await startConductorStream(chatMessages), chatMessages);
+      } catch (retryError) {
+        if (!isMissingToolResultsError(retryError) && !(retryError instanceof MissingToolResultsError)) {
+          throw retryError;
         }
-      },
-    });
+        console.error(`[loops/chat:${loopId}] conductor replay recovery failed`, {
+          toolCallIds: "toolCallIds" in retryError && Array.isArray(retryError.toolCallIds)
+            ? retryError.toolCallIds
+            : [],
+        });
+        await pipeConductorRecoveryMessage(chatMessages);
+      }
+    }
   } catch (error) {
     sendError(res, error, "Failed to stream Conductor chat");
   }

@@ -1,10 +1,10 @@
 "use client";
 
 import type { DynamicToolUIPart, ReasoningUIPart } from "ai";
-import { BadgeQuestionMark } from "lucide-react";
+import { AlertTriangle, BadgeQuestionMark, ChevronDown } from "lucide-react";
 import { useState } from "react";
 
-import { CollapsibleContent } from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Reasoning, ReasoningTrigger, reasoningStreamdownPlugins } from "@/components/ai-elements/reasoning";
 import { ConductorReasoningStream, CONDUCTOR_REASONING_COLLAPSE_MS } from "@/components/conductor/conductor-reasoning-stream";
 import { Streamdown } from "streamdown";
@@ -114,7 +114,7 @@ export function AnsweredAskQuestionCard({
   input: AskQuestionInput;
   output: AskQuestionOutput;
 }) {
-  const isConnectorPick = input.questionId.startsWith("connector-app:");
+  const isConnectorPick = input.questionId?.startsWith("connector-app:") ?? false;
   const connectorSlug = isConnectorPick ? resolveConnectorIconSlug(output, input.options) : undefined;
 
   return (
@@ -126,6 +126,96 @@ export function AnsweredAskQuestionCard({
       title={input.question}
       variant="emerald"
     />
+  );
+}
+
+type BindingDiagnosticView = {
+  code?: string;
+  message?: string;
+  outcome?: string;
+  connector?: string;
+  rejectedValue?: string;
+  expected?: string;
+  action?: string;
+  options?: Array<{ label: string; value: string; description: string }>;
+  technical?: Record<string, unknown>;
+};
+
+function safeTechnicalDetails(details: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!details) return {};
+  const secretPattern = /(token|secret|password|credential|authorization|cookie|api.?key)/i;
+  return Object.fromEntries(Object.entries(details).map(([key, value]) => [
+    key,
+    secretPattern.test(key) ? "[REDACTED]" : value,
+  ]));
+}
+
+function hasLaterBindingResolution(messages: UIMessage[], toolCallId: string): boolean {
+  let seen = false;
+  for (const message of messages) {
+    for (const rawPart of message.parts ?? []) {
+      const part = rawPart as { toolCallId?: string; state?: string; output?: unknown };
+      if (part.toolCallId === toolCallId) {
+        seen = true;
+        continue;
+      }
+      if (!seen || part.state !== "output-available" || !part.output || typeof part.output !== "object") continue;
+      const output = part.output as { ok?: boolean; diagnostics?: unknown[]; plan?: unknown };
+      if (Array.isArray(output.diagnostics) && output.diagnostics.length === 0) return true;
+      if (output.ok === true && output.plan) return true;
+    }
+  }
+  return false;
+}
+
+export function BindingDiagnosticsCard({ diagnostics, resolved = false }: { diagnostics: BindingDiagnosticView[]; resolved?: boolean }) {
+  return (
+    <div className={`overflow-hidden rounded-lg border ${resolved ? "border-slate-200 bg-slate-50 text-slate-700" : "border-amber-300 bg-amber-50 text-amber-950"}`}>
+      <div className="flex gap-3 px-4 py-3">
+        <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-700" aria-hidden="true" />
+        <div className="min-w-0 space-y-3">
+          <div>
+            <p className="font-medium">{resolved ? "Binding issue resolved" : "Binding setup needs attention"}</p>
+            <p className="text-sm">{resolved
+              ? "This issue was corrected; its details remain visible for reference."
+              : "The workflow cannot continue while these items remain unresolved."}</p>
+          </div>
+          {diagnostics.map((item, index) => (
+            <div className="space-y-1 text-sm" key={`${item.code ?? "binding"}-${index}`}>
+              <p className="font-medium">{item.message ?? "A binding could not be verified."}</p>
+              {item.action ? <p>{item.action}</p> : null}
+              {item.options?.length ? (
+                <ul className="list-disc space-y-1 pl-5">
+                  {item.options.map((option) => (
+                    <li key={option.value}><span className="font-medium">{option.label}</span> — {option.description}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <Collapsible>
+                <CollapsibleTrigger className="group flex items-center gap-1 text-xs font-medium text-amber-800 underline-offset-2 hover:underline">
+                  Technical details
+                  <ChevronDown className="size-3 transition-transform group-data-[state=open]:rotate-180" aria-hidden="true" />
+                </CollapsibleTrigger>
+                <CollapsibleContent className="mt-2 rounded border border-amber-200 bg-white/70 p-2 text-xs">
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-words">
+                    {item.code ? <><dt className="font-medium">Code</dt><dd>{item.code}</dd></> : null}
+                    {item.outcome ? <><dt className="font-medium">Outcome</dt><dd>{item.outcome}</dd></> : null}
+                    {item.connector ? <><dt className="font-medium">Connector</dt><dd>{item.connector}</dd></> : null}
+                    {item.rejectedValue ? <><dt className="font-medium">Rejected</dt><dd>{item.rejectedValue}</dd></> : null}
+                    {item.expected ? <><dt className="font-medium">Expected</dt><dd>{item.expected}</dd></> : null}
+                  </dl>
+                  {Object.keys(safeTechnicalDetails(item.technical)).length ? (
+                    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded bg-amber-100/60 p-2">
+                      {JSON.stringify(safeTechnicalDetails(item.technical), null, 2)}
+                    </pre>
+                  ) : null}
+                </CollapsibleContent>
+              </Collapsible>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -144,6 +234,21 @@ export function ConductorToolPart({
 }) {
   const toolName = resolveToolPartName(part);
   const [open, setOpen] = useState(false);
+  const diagnosticOutput = part.output && typeof part.output === "object"
+    ? part.output as { diagnostics?: BindingDiagnosticView[]; errors?: BindingDiagnosticView[] }
+    : null;
+  const visibleDiagnostics = diagnosticOutput?.diagnostics?.length
+    ? diagnosticOutput.diagnostics
+    : toolName === "compileLoop" && diagnosticOutput?.errors?.length
+      ? diagnosticOutput.errors
+      : null;
+
+  if (visibleDiagnostics) return (
+    <BindingDiagnosticsCard
+      diagnostics={visibleDiagnostics}
+      resolved={hasLaterBindingResolution(messages, part.toolCallId)}
+    />
+  );
 
   if (toolName === "askQuestion") {
     const toolPart = part as AskQuestionToolPart;
@@ -264,7 +369,7 @@ export function ConductorToolPart({
     }
   }
 
-  if (["analyzeIntent", "listWorkspaceConnectors", "listTriggers", "listActions", "discoverBindings"].includes(toolName)) {
+  if (["analyzeIntent", "listWorkspaceConnectors", "listTriggers", "listActions", "discoverBindings", "resolveBindings"].includes(toolName)) {
     return null;
   }
 

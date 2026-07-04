@@ -159,16 +159,20 @@ test("buildConductorSystemPrompt issues every queued intent question in one turn
 
 test("conductor builder renders interactive prompts without auto-selecting connectors", async () => {
   const fs = await import("node:fs/promises");
-  const [source, layout, shared] = await Promise.all([
+  const [source, layout, shared, route] = await Promise.all([
     fs.readFile(new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url), "utf8"),
     fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-builder-layout.tsx", import.meta.url), "utf8"),
     fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../src/transport/http/routes/loops.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(layout, /InteractivePromptMenu/);
   assert.match(shared, /pickConnectorApp/);
   assert.match(shared, /hasUnansweredUiToolCalls/);
   assert.match(shared, /shouldAutoSendConductorChat/);
+  assert.match(shared, /phaseCompleted/);
+  assert.match(shared, /operationKey/);
+  assert.match(shared, /hasPriorTerminalExecutionForOperation/);
   assert.match(source, /addToolOutput/);
   assert.match(source, /shouldAutoSendConductorChat/);
   assert.match(source, /findPendingInteractivePrompts/);
@@ -183,4 +187,7 @@ test("conductor builder renders interactive prompts without auto-selecting conne
   );
   assert.match(pendingResolver, /prompts\.push/);
   assert.match(pendingResolver, /step: \{ index: index \+ 1, total: prompts\.length \}/);
+  assert.match(route, /conductorStepLimitForPhase\(requestStartPhase\)/);
+  assert.match(route, /operationKey/);
+  assert.match(route, /duplicateToolExecution/);
 });

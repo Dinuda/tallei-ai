@@ -48,9 +48,8 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
   listActions: { toolkit: "example" },
   discoverBindings: {
     toolkit: "example",
-    outcomes: [{ id: "result", description: "Deliver the configured result.", role: "destination" }],
   },
-  setBindingConfig: { outcomeId: "trigger", connector: "example", config: { scope: "selected" } },
+  resolveBindings: {},
   connectToolkit: { toolkit: "example", callbackUrl: "https://example.test/callback" },
   listWorkspaceConnectors: {},
   confirmOutcomeBrief: {

@@ -113,50 +113,6 @@ function deriveJobRoleTitle(
 ): string {
   const roles = steps.map((step) => step.role);
   const roleSet = new Set(roles);
-  const text = steps.map((step) => step.description.toLowerCase()).join(" ");
-
-  const ticket = /\b(ticket|support|inbox|helpdesk|customer)\b/.test(text);
-  const reply = /\b(reply|respond|response)\w*\b/.test(text);
-  const email = /\b(email|mail|gmail)\b/.test(text);
-  const classify = /\b(classif\w*|priorit\w*|triage|sort\w*|rout\w*)\b/.test(text);
-  const draft = /\b(draft\w*|writ\w*|compos\w*|author\w*)\b/.test(text);
-  const send = /\b(send\w*|deliver\w*|dispatch\w*|transmit\w*)\b/.test(text);
-  const read = /\b(read\w*|retriev\w*|fetch\w*|pull\w*|ingest\w*|monitor\w*)\b/.test(text);
-  const summarize = /\b(summar\w*|digest\w*|synops\w*)\b/.test(text);
-
-  if (roleSet.has("source") && roleSet.has("transform") && draft && ticket) {
-    return "Customer Support Analyst";
-  }
-  if (roleSet.has("source") && roleSet.has("transform") && classify && ticket) {
-    return "Support Operations Analyst";
-  }
-  if (roleSet.has("transform") && draft && (reply || email)) {
-    return "Response Specialist";
-  }
-  if (roleSet.has("destination") && send && (reply || email) && ticket) {
-    return "Customer Outreach Coordinator";
-  }
-  if (roleSet.has("destination") && send && email) {
-    return "Communications Coordinator";
-  }
-  if (roleSet.has("destination") && send) {
-    return "Fulfillment Coordinator";
-  }
-  if (roleSet.has("transform") && classify) {
-    return "Operations Analyst";
-  }
-  if (roleSet.has("transform") && summarize) {
-    return "Research Analyst";
-  }
-  if (roleSet.has("transform") && draft) {
-    return "Content Specialist";
-  }
-  if (roleSet.has("source") && read && ticket) {
-    return "Intake Analyst";
-  }
-  if (roleSet.has("source") && read) {
-    return "Research Analyst";
-  }
 
   if (roleSet.has("source") && roleSet.has("transform") && roleSet.has("destination")) {
     return "Operations Lead";

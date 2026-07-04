@@ -20,7 +20,7 @@ export const triggerSchema = z.discriminatedUnion("kind", [
       .default("")
       .refine(
         (slug) => !slug.trim() || /^[A-Z][A-Z0-9_]+$/.test(slug.trim()),
-        "composioSlug must be an uppercase Composio trigger slug (e.g. GMAIL_NEW_GMAIL_MESSAGE), not the connector name",
+        "composioSlug must be an uppercase Composio trigger slug, not the connector name",
       ),
     eventType: z.string().optional(),
     config: z.record(z.string(), z.unknown()).default({}),

@@ -7,7 +7,7 @@ import {
   getOpenCodeApiKeyPool,
 } from "../../../services/llm/api-key-pool.js";
 
-export type StreamingPurpose = "conductor" | "run_transcript" | "planner";
+export type StreamingPurpose = "conductor" | "binding_resolver" | "run_transcript" | "planner";
 
 export type StreamingLanguageModelOptions = {
   userId?: string;
@@ -40,7 +40,9 @@ export function getStreamingLanguageModel(
   });
   const modelName = purpose === "conductor"
     ? config.conductorModel
-    : config.opencodeModel;
+    : purpose === "binding_resolver"
+      ? config.bindingResolverModel
+      : config.opencodeModel;
   const model = provider.chatModel(modelName);
   return purpose === "conductor" ? withReasoningExtraction(model) : model;
 }
