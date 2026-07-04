@@ -172,7 +172,19 @@ export function interpretConnectorSelections(state: LoopBuildState, messages: Bu
     if (requiredIds.includes(outcomeId) && connector && event.output.skipped !== true) selections.set(outcomeId, connector);
   }
   for (const event of completedToolEvents(messages, "discoverConnectorsForBlueprint")) {
-    if (!isRecord(event.output) || !Array.isArray(event.output.autoResolved)) continue;
+    if (!isRecord(event.output)) continue;
+    if (Array.isArray(event.output.groups)) {
+      for (const raw of event.output.groups) {
+        if (!isRecord(raw) || !Array.isArray(raw.linkedOutcomeIds)) continue;
+        const connector = selections.get(String(raw.outcomeId ?? ""));
+        if (!connector) continue;
+        for (const linkedId of raw.linkedOutcomeIds) {
+          const outcomeId = String(linkedId);
+          if (requiredIds.includes(outcomeId)) selections.set(outcomeId, connector);
+        }
+      }
+    }
+    if (!Array.isArray(event.output.autoResolved)) continue;
     for (const raw of event.output.autoResolved) {
       if (!isRecord(raw)) continue;
       const outcomeId = String(raw.outcomeId ?? "").trim();
@@ -212,7 +224,19 @@ export function connectorSelectionEvidence(
     selections.set(outcomeId, { outcomeId, role: role as "trigger" | "source" | "transform" | "destination", connector });
   }
   for (const event of completedToolEvents(messages, "discoverConnectorsForBlueprint")) {
-    if (!isRecord(event.output) || !Array.isArray(event.output.autoResolved)) continue;
+    if (!isRecord(event.output)) continue;
+    if (Array.isArray(event.output.groups)) {
+      for (const raw of event.output.groups) {
+        if (!isRecord(raw) || !Array.isArray(raw.linkedOutcomeIds)) continue;
+        const source = selections.get(String(raw.outcomeId ?? ""));
+        if (!source) continue;
+        for (const linkedId of raw.linkedOutcomeIds) {
+          const outcomeId = String(linkedId);
+          selections.set(outcomeId, { outcomeId, role: "source", connector: source.connector });
+        }
+      }
+    }
+    if (!Array.isArray(event.output.autoResolved)) continue;
     for (const raw of event.output.autoResolved) {
       if (!isRecord(raw)) continue;
       const outcomeId = String(raw.outcomeId ?? "");

@@ -2,6 +2,7 @@
 
 import { Pencil } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -70,7 +71,7 @@ export function ConductorLoopHeader({
       onLoopNameChange?.(trimmed);
       setEditing(false);
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Failed to rename loop");
+      toast.error(error instanceof Error ? error.message : "Failed to rename loop");
       setDraft(loopName ?? "");
     } finally {
       setSaving(false);

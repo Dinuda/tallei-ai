@@ -6,7 +6,7 @@ import {
   applyPrimaryConnectorToBlueprint,
   buildConnectorAskOptions,
   buildConnectorRecommendedIds,
-  CONNECTED_TOOLKIT_BOOST,
+  connectorQuestionForOutcome,
   discoverConnectorsForBlueprint,
   inferCatalogToolkitHints,
   TOP_CONNECTOR_RECOMMENDATIONS,
@@ -57,6 +57,7 @@ function candidate(overrides: Partial<ConnectorCandidate> & Pick<ConnectorCandid
   return {
     name: overrides.connector,
     connected: false,
+    connectable: true,
     rationale: "test",
     sampleActions: [],
     ...overrides,
@@ -88,10 +89,26 @@ test("buildConnectorAskOptions uses app name and connection status", () => {
   assert.match(options[1]?.description ?? "", /needs connection/i);
 });
 
+test("buildConnectorAskOptions keeps unavailable apps visible but not selectable", () => {
+  const options = buildConnectorAskOptions([
+    candidate({ connector: "outlook", score: 4, connectable: false, name: "Outlook" }),
+  ]);
+  assert.equal(options[0]?.disabled, true);
+  assert.match(options[0]?.description ?? "", /unavailable/i);
+  assert.deepEqual(buildConnectorRecommendedIds(options), []);
+});
+
 test("inferCatalogToolkitHints includes email apps for support outcomes", () => {
   const hints = inferCatalogToolkitHints("incoming support ticket emails", "trigger");
   assert.ok(hints.includes("gmail"));
   assert.ok(hints.includes("outlook") || hints.includes("zendesk"));
+});
+
+test("connector questions describe the business source instead of asking for an app", () => {
+  assert.equal(connectorQuestionForOutcome({
+    role: "trigger",
+    description: "Receives incoming support tickets",
+  }), "Where should the support tickets come from?");
 });
 
 test("applyPrimaryConnectorToBlueprint marks all pending outcomes", () => {
@@ -130,13 +147,38 @@ test("applyConnectorSelectionsToBlueprint marks outcomes chosen", () => {
   assert.equal(merged.outcomes[1]?.selectedConnector, "zendesk");
 });
 
-test("buildConnectorRecommendedIds prefers connected when scores tie in top five", () => {
+test("buildConnectorRecommendedIds follows relevance order instead of connection state", () => {
   const options = buildConnectorAskOptions([
-    candidate({ connector: "gmail", score: 5 + CONNECTED_TOOLKIT_BOOST, connected: true, name: "Gmail" }),
+    candidate({ connector: "gmail", score: 5, connected: true, name: "Gmail" }),
     candidate({ connector: "mailchimp", score: 8, connected: false, name: "Mailchimp" }),
   ]);
   assert.equal(options[0]?.id, "connector-gmail");
   assert.deepEqual(buildConnectorRecommendedIds(options), ["connector-gmail", "connector-mailchimp"]);
+});
+
+test("discoverConnectorsForBlueprint does not boost a connected app above a more relevant match", async () => {
+  const rankedToolkits: CatalogToolkitView[] = [
+    { slug: "gmail", name: "Gmail", description: "Email", logo: "", connected: true },
+    { slug: "notion", name: "Notion", description: "Knowledge base", logo: "", connected: false },
+  ];
+  const result = await discoverConnectorsForBlueprint(auth, {
+    outcomes: [{ id: "publish", role: "destination", description: "Publish a knowledge base article" }],
+  }, {
+    loadToolkits: async () => ({ toolkits: rankedToolkits, total: rankedToolkits.length }),
+    searchTools: async () => [
+      searchResult({
+        toolkit: "notion",
+        toolkitName: "Notion",
+        actionSlug: "NOTION_CREATE_PAGE",
+        name: "Create page",
+        description: "Create a new knowledge base article",
+      }),
+    ],
+    logTiming: () => undefined,
+  });
+
+  assert.equal(result.groups[0]?.recommendedOptionIds[0], "connector-notion");
+  assert.equal(result.groups[0]?.askOptions[0]?.value, "notion");
 });
 
 test("discoverConnectorsForBlueprint loads toolkits once and deduplicates identical searches", async () => {
@@ -169,6 +211,30 @@ test("discoverConnectorsForBlueprint loads toolkits once and deduplicates identi
   assert.equal(result.groups[0]?.askOptions[0]?.description, "Already connected");
   assert.equal(timings[0]?.searchCount, 1);
   assert.equal(timings[0]?.outcomeCount, 2);
+});
+
+test("discoverConnectorsForBlueprint returns the full catalog and recommends only the top five", async () => {
+  const fullCatalog: CatalogToolkitView[] = [
+    ...toolkits,
+    ...["outlook", "zendesk", "intercom", "freshdesk", "mailchimp"].map((slug) => ({
+      slug,
+      name: slug,
+      description: "",
+      logo: "",
+      connected: false,
+    })),
+  ];
+  const result = await discoverConnectorsForBlueprint(auth, {
+    outcomes: [{ id: "send", role: "destination", description: "Send an email" }],
+  }, {
+    loadToolkits: async () => ({ toolkits: fullCatalog, total: fullCatalog.length }),
+    searchTools: async () => [searchResult()],
+    logTiming: () => undefined,
+  });
+
+  assert.equal(result.groups[0]?.askOptions.length, fullCatalog.length);
+  assert.equal(result.groups[0]?.recommendedOptionIds.length, TOP_CONNECTOR_RECOMMENDATIONS);
+  assert.equal(result.groups[0]?.askOptions[0]?.value, "gmail");
 });
 
 test("discoverConnectorsForBlueprint starts distinct searches concurrently and preserves outcome order", async () => {
@@ -246,4 +312,68 @@ test("discoverConnectorsForBlueprint reuses a clearly leading app selected for a
     sourceRole: "trigger",
     reason: "same app as trigger",
   }]);
+});
+
+test("discoverConnectorsForBlueprint presents one app choice for an event and its initial read", async () => {
+  const result = await discoverConnectorsForBlueprint(auth, {
+    outcomes: [
+      { id: "receive", role: "trigger", description: "Receive a support email" },
+      { id: "read", role: "source", description: "Read the support email details" },
+      { id: "draft", role: "transform", description: "Draft a reply" },
+      { id: "send", role: "destination", description: "Send the reply" },
+    ],
+  }, {
+    loadToolkits: async () => ({ toolkits, total: toolkits.length }),
+    searchTools: async () => [searchResult()],
+    logTiming: () => undefined,
+  });
+
+  assert.deepEqual(result.groups.map((group) => group.outcomeId), ["receive", "send"]);
+  assert.deepEqual(result.groups[0]?.linkedOutcomeIds, ["read"]);
+});
+
+test("discoverConnectorsForBlueprint keeps source separate when trigger apps cannot read it", async () => {
+  const result = await discoverConnectorsForBlueprint(auth, {
+    outcomes: [
+      { id: "receive", role: "trigger", description: "Receive a support event" },
+      { id: "read", role: "source", description: "Read the full support record" },
+    ],
+  }, {
+    loadToolkits: async () => ({ toolkits, total: toolkits.length }),
+    searchTools: async (query) => query.includes("read fetch") ? [] : [searchResult()],
+    logTiming: () => undefined,
+  });
+
+  assert.deepEqual(result.groups.map((group) => group.outcomeId), ["receive", "read"]);
+  assert.deepEqual(result.groups[0]?.linkedOutcomeIds, []);
+});
+
+test("discoverConnectorsForBlueprint reuses a selected top-ranked app without requiring a score gap", async () => {
+  const tiedToolkits: CatalogToolkitView[] = [
+    ...toolkits,
+    { slug: "outlook", name: "Outlook", description: "Email", logo: "", connected: true },
+  ];
+  const result = await discoverConnectorsForBlueprint(auth, {
+    outcomes: [
+      { id: "receive", role: "trigger", description: "Receives support tickets" },
+      { id: "reply", role: "destination", description: "Sends reply to customer" },
+    ],
+    previousSelections: [{ outcomeId: "receive", role: "trigger", connector: "gmail" }],
+  }, {
+    loadToolkits: async () => ({ toolkits: tiedToolkits, total: tiedToolkits.length }),
+    searchTools: async () => [
+      searchResult(),
+      searchResult({
+        toolkit: "outlook",
+        toolkitName: "Outlook",
+        actionSlug: "OUTLOOK_SEND_EMAIL",
+        name: "Send email",
+      }),
+    ],
+    logTiming: () => undefined,
+  });
+
+  assert.deepEqual(result.groups, []);
+  assert.equal(result.autoResolved[0]?.connector, "gmail");
+  assert.equal(result.autoResolved[0]?.outcomeId, "reply");
 });

@@ -7,6 +7,7 @@ import {
 } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { flushSync } from "react-dom";
+import { toast } from "sonner";
 
 import { ConductorBuilderLayout } from "@/components/conductor/conductor-builder-layout";
 import { useConductorLayout } from "@/components/conductor/conductor-layout-context";
@@ -25,11 +26,13 @@ import {
   prepareMessagesForUiToolOutput,
   resolveConfirmOutcomeBriefActionFromSelection,
   shouldAutoSendConductorChat,
+  validateConductorComposerMessage,
   type PendingInteractivePrompt,
   type ChatStatus,
 } from "@/components/conductor/conductor-shared";
 import type { InteractivePromptAnswer } from "@/components/ai-elements/interactive-prompt-menu";
 import { apiFetch, getStoredWorkspaceId } from "@/lib/api-fetch";
+import { formatApiError } from "@/lib/format-api-error";
 import {
   deriveConductorPromptSuggestions,
   deriveConductorPromptSuggestionsQuestion,
@@ -337,12 +340,20 @@ function ConductorBuilderLive({
 
   function handleSubmit(text: string, meta?: { loopName?: string }) {
     if (creating) return;
-    if (hasUnansweredUiToolCalls(messages)) return;
+    const validationError = validateConductorComposerMessage(text);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+    if (hasUnansweredUiToolCalls(messages)) {
+      toast.error("Answer the pending question before sending a message.");
+      return;
+    }
     if (!loopId) {
       onCreateLoop(text, meta);
       return;
     }
-    chatApi?.sendMessage({ text });
+    chatApi?.sendMessage({ text: text.trim() });
   }
 
   function submitAskQuestionAnswer(prompt: PendingInteractivePrompt, answer: InteractivePromptAnswer) {
@@ -405,6 +416,11 @@ function ConductorBuilderLive({
 
     const message = answer.answerText.trim();
     if (!message) return;
+    const validationError = validateConductorComposerMessage(message);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
 
     if (pendingReplyOptions && chatApi) {
       const selectedOptionId = answer.selectedOptionIds[0] ?? "custom";
@@ -419,7 +435,10 @@ function ConductorBuilderLive({
       return;
     }
 
-    if (hasUnansweredUiToolCalls(messages)) return;
+    if (hasUnansweredUiToolCalls(messages)) {
+      toast.error("Answer the pending question before sending a message.");
+      return;
+    }
 
     if (!loopId) {
       onCreateLoop(message);
@@ -538,6 +557,11 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
   }, [setLoopMeta, loopId, loopName, status]);
 
   async function createLoopFromPrompt(text: string, meta?: { loopName?: string }) {
+    const validationError = validateConductorComposerMessage(text);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
     setPendingUserBubble(makeUserMessage(text));
     setCreating(true);
     pendingPromptRef.current = text;
@@ -553,7 +577,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to create loop");
+      if (!res.ok) throw new Error(formatApiError(data, "Failed to create loop"));
       const createdId = data.loop?.id as string | undefined;
       if (!createdId) throw new Error("Failed to create loop");
 
@@ -566,7 +590,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
       pendingPromptRef.current = null;
       bootstrapPromptSentRef.current = false;
       setPendingUserBubble(null);
-      alert(error instanceof Error ? error.message : "Failed to create loop");
+      toast.error(error instanceof Error ? error.message : "Failed to create loop");
     } finally {
       setCreating(false);
     }
@@ -576,7 +600,7 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     if (!loopId) return;
     const res = await apiFetch(`/api/loops/${loopId}/runs`, { method: "POST" });
     const data = await res.json();
-    if (!res.ok) alert(data.error ?? "Run failed");
+    if (!res.ok) toast.error(formatApiError(data, "Run failed"));
     else if (data.run?.id) {
       window.location.href = `/dashboard/loops/${loopId}/runs/${data.run.id}`;
     }

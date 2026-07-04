@@ -1,10 +1,11 @@
 "use client";
 
 import type { UIMessage } from "ai";
-import { History, RefreshCw } from "lucide-react";
+import { History } from "lucide-react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import {
   InteractivePromptMenu,
@@ -30,6 +31,7 @@ import type {
 import {
   promptVariantForQuestion,
   shouldShowThinkingIndicator,
+  validateConductorComposerMessage,
 } from "@/components/conductor/conductor-shared";
 import type { ConductorPromptSuggestion } from "@/lib/conductor-prompt-suggestions";
 
@@ -135,10 +137,38 @@ export function ConductorBuilderLayout({
     [promptSuggestions],
   );
 
+  const chatErrorToastShownRef = useRef(false);
+
+  useEffect(() => {
+    if (chatStatus === "error" && onRetry) {
+      if (!chatErrorToastShownRef.current) {
+        chatErrorToastShownRef.current = true;
+        toast.error("The response was interrupted.", {
+          id: "conductor-chat-error",
+          action: {
+            label: "Retry",
+            onClick: onRetry,
+          },
+        });
+      }
+      return;
+    }
+    chatErrorToastShownRef.current = false;
+    toast.dismiss("conductor-chat-error");
+  }, [chatStatus, onRetry]);
+
   const submitComposerText = useCallback((text: string, meta?: { loopName?: string }) => {
-    const answerText = text.trim();
-    if (!answerText || sendBlocked || chatBusy) return;
-    onSubmit(answerText, meta);
+    if (chatBusy) return;
+    if (sendBlocked) {
+      toast.error("Answer the pending question before sending a message.");
+      return;
+    }
+    const validationError = validateConductorComposerMessage(text);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+    onSubmit(text.trim(), meta);
     setInput("");
   }, [chatBusy, onSubmit, sendBlocked, setInput]);
 
@@ -171,29 +201,6 @@ export function ConductorBuilderLayout({
 
         <div className="conductor-builder-page__composer-wrap">
           <div className="conductor-builder-page__composer-inner">
-            <AnimatePresence initial={false}>
-              {chatStatus === "error" && onRetry ? (
-                <motion.div
-                  animate={{ opacity: 1, y: 0 }}
-                  className="mb-3 flex justify-center"
-                  exit={{ opacity: 0, y: 6 }}
-                  initial={{ opacity: 0, y: 6 }}
-                  role="alert"
-                >
-                  <div className="flex items-center gap-3 border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 shadow-sm">
-                    <span>The response was interrupted.</span>
-                    <button
-                      className="inline-flex items-center gap-1.5 bg-red-900 px-3 py-1.5 font-medium text-white transition-colors hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-2"
-                      onClick={onRetry}
-                      type="button"
-                    >
-                      <RefreshCw className="size-4" aria-hidden />
-                      Retry
-                    </button>
-                  </div>
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
             <motion.div className="conductor-builder-page__composer-surface">
               <AnimatePresence initial={false} mode="popLayout">
                 {pendingOutcomeBrief ? (
@@ -275,10 +282,20 @@ export function ConductorBuilderLayout({
                   >
                     <div
                       aria-label={thinkingLabel}
-                      className="flex min-h-[var(--cb-composer-min-h,56px)] items-center px-4 py-5"
+                      className="relative flex min-h-[var(--cb-composer-min-h,56px)] items-center px-4 py-5"
                       role="status"
                     >
                       <TranscriptThinkingIndicator label={thinkingLabel} />
+                      {onStop && (chatStatus === "streaming" || chatStatus === "submitted") ? (
+                        <div className="absolute bottom-2 right-2 z-10">
+                          <PromptInputSubmit
+                            className="data-[conductor-submit]"
+                            data-conductor-submit
+                            onStop={onStop}
+                            status={chatStatus}
+                          />
+                        </div>
+                      ) : null}
                     </div>
                   </motion.div>
                 ) : (

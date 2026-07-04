@@ -54,7 +54,6 @@ export type AskQuestionOutput = {
 export type PickConnectorAppInput = {
   outcomeId: string;
   role: "trigger" | "source" | "destination";
-  question?: string;
 };
 
 export type PickConnectorAppToolPart = {
@@ -104,7 +103,7 @@ export type PendingInteractivePrompt = {
 };
 
 export const DEFAULT_CONNECTOR_PICK_QUESTION =
-  "Which app should power this loop? Triggers and actions are configured automatically after you pick.";
+  "Where should this information come from?";
 
 export type PendingPresentReplyOptions = {
   toolCallId: string;
@@ -430,14 +429,13 @@ export function findLatestConnectorDiscovery(messages: UIMessage[]): ConnectorDi
 export function buildConnectorPickInput(
   discovery: ConnectorDiscoveryOutput,
   outcomeId: string,
-  questionOverride?: string,
 ): AskQuestionInput | null {
   const group = discovery.groups?.find((candidate) => candidate.outcomeId === outcomeId);
   if (!group?.askOptions.length) return null;
   const askOptions = group.askOptions;
   return {
     questionId: `connector-app:${group.outcomeId}`,
-    question: questionOverride?.trim() || group.defaultQuestion || DEFAULT_CONNECTOR_PICK_QUESTION,
+    question: group.defaultQuestion || DEFAULT_CONNECTOR_PICK_QUESTION,
     options: askOptions,
     recommendedOptionIds: group.recommendedOptionIds ?? askOptions.slice(0, 5).map((option) => option.id),
     allowMultiple: false,
@@ -445,6 +443,39 @@ export function buildConnectorPickInput(
     outcomeId: group.outcomeId,
     role: group.role,
   };
+}
+
+/** Discovery + options shown when the user answered a connector pick earlier in the transcript. */
+export function findConnectorPickInputForToolCall(
+  messages: UIMessage[],
+  toolCallId: string,
+  outcomeId: string,
+): AskQuestionInput | null {
+  let latestDiscovery: ConnectorDiscoveryOutput | null = null;
+
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (isPickConnectorAppPart(part)) {
+        const pickPart = part as PickConnectorAppToolPart;
+        if (pickPart.toolCallId === toolCallId) {
+          return latestDiscovery
+            ? buildConnectorPickInput(latestDiscovery, outcomeId)
+            : null;
+        }
+      }
+      if (!isToolPart(part.type)) continue;
+      if (resolveToolPartName(part as { type: string; toolName?: string }) !== "discoverConnectorsForBlueprint") {
+        continue;
+      }
+      const toolPart = part as DynamicToolUIPart & { output?: unknown };
+      if (toolPart.state !== "output-available" || !toolPart.output) continue;
+      const output = toolPart.output as ConnectorDiscoveryOutput;
+      if (output.groups?.length) latestDiscovery = output;
+    }
+  }
+
+  return null;
 }
 
 export function findPendingInteractivePrompts(
@@ -465,7 +496,7 @@ export function findPendingInteractivePrompts(
         const pickPart = part as PickConnectorAppToolPart;
         if (isResumableUiToolPart("pickConnectorApp", pickPart.state, pickPart.input, pickPart.output)) {
           if (!blueprintNeedsConnectorPick(spec) || !discovery || !pickPart.input?.outcomeId) continue;
-          const input = buildConnectorPickInput(discovery, pickPart.input.outcomeId, pickPart.input.question);
+          const input = buildConnectorPickInput(discovery, pickPart.input.outcomeId);
           if (!input) continue;
           prompts.push({
             toolCallId: pickPart.toolCallId,
@@ -601,6 +632,19 @@ export function connectorLogoUrl(slug: string): string {
   return `https://logos.composio.dev/api/${slug}`;
 }
 
+export function formatConnectorLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (/^[a-z0-9][a-z0-9_-]*$/.test(trimmed)) {
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  }
+  return trimmed;
+}
+
+function formatAskQuestionAnswerLabels(labels: string[]): string {
+  return labels.map(formatConnectorLabel).join("; ");
+}
+
 export function resolveAskQuestionDisplayAnswer(
   input: Pick<AskQuestionInput, "options"> | undefined,
   output: AskQuestionOutput,
@@ -612,7 +656,10 @@ export function resolveAskQuestionDisplayAnswer(
     .filter((label): label is string => Boolean(label));
   if (selectedLabels.length > 0) {
     const custom = output.otherText?.trim();
-    return [...selectedLabels, ...(custom ? [custom] : [])].join("; ");
+    return formatAskQuestionAnswerLabels([
+      ...selectedLabels,
+      ...(custom ? [custom] : []),
+    ]);
   }
 
   const valueLabels = (output.selectedValues ?? [])
@@ -620,10 +667,26 @@ export function resolveAskQuestionDisplayAnswer(
     .filter((label) => label.length > 0);
   if (valueLabels.length > 0) {
     const custom = output.otherText?.trim();
-    return [...valueLabels, ...(custom ? [custom] : [])].join("; ");
+    return formatAskQuestionAnswerLabels([
+      ...valueLabels,
+      ...(custom ? [custom] : []),
+    ]);
   }
 
-  return output.otherText?.trim() || output.answerText;
+  const fallback = output.otherText?.trim() || output.answerText;
+  return formatConnectorLabel(fallback);
+}
+
+/** Matches POST /api/loops prompt validation. */
+export const CONDUCTOR_MESSAGE_MAX_LENGTH = 4_000;
+
+export function validateConductorComposerMessage(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return "Message cannot be empty.";
+  if (trimmed.length > CONDUCTOR_MESSAGE_MAX_LENGTH) {
+    return `Message is too long (${trimmed.length.toLocaleString()} / ${CONDUCTOR_MESSAGE_MAX_LENGTH.toLocaleString()} characters).`;
+  }
+  return null;
 }
 
 export function resolveConnectorIconSlug(

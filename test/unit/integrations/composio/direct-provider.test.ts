@@ -33,3 +33,10 @@ test("production Composio client has no Tool Router Session calls", async () => 
   assert.doesNotMatch(clientSource, /\.create\(userId|\.use\(sessionId/);
   assert.doesNotMatch(integrationIndex, /session\.js|createSession|useSession/);
 });
+
+test("connector authorization creates a missing managed auth config", async () => {
+  const accountsSource = await readFile(new URL("../../../../src/integrations/composio/accounts.ts", import.meta.url), "utf8");
+  assert.match(accountsSource, /authConfigs\.create\(normalized/);
+  assert.match(accountsSource, /type: "use_composio_managed_auth"/);
+  assert.match(accountsSource, /authConfigResolutionInFlight/);
+});

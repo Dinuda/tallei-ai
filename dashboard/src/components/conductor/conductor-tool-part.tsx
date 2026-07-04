@@ -35,16 +35,20 @@ import type {
   AskQuestionOutput,
   AskQuestionToolPart,
   ConfirmOutcomeBriefOutput,
+  PickConnectorAppInput,
   PresentAgentTeamOutput,
   PresentReplyOptionsToolPart,
 } from "@/components/conductor/conductor-shared";
 import {
+  DEFAULT_CONNECTOR_PICK_QUESTION,
   connectorLogoUrl,
+  findConnectorPickInputForToolCall,
   resolveAskQuestionDisplayAnswer,
   resolveConnectorIconSlug,
   resolveOutcomeBriefCardStatus,
   resolveToolPartName,
 } from "@/components/conductor/conductor-shared";
+import type { UIMessage } from "ai";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
@@ -127,11 +131,13 @@ export function AnsweredAskQuestionCard({
 
 export function ConductorToolPart({
   part,
+  messages,
   pendingInteractivePromptCallIds,
   pendingReplyOptionsCallId,
   spec,
 }: {
   part: DynamicToolUIPart & { toolName?: string; input?: unknown; output?: unknown };
+  messages: UIMessage[];
   pendingInteractivePromptCallIds: Set<string>;
   pendingReplyOptionsCallId: string | null;
   spec: Record<string, unknown> | null;
@@ -154,10 +160,24 @@ export function ConductorToolPart({
   }
 
   if (toolName === "pickConnectorApp") {
-    const input = part.input as { role?: string; question?: string } | undefined;
+    const input = part.input as PickConnectorAppInput | undefined;
     const output = part.output as AskQuestionOutput | undefined;
     if (pendingInteractivePromptCallIds.has(part.toolCallId)) return null;
-    if (part.state === "output-available" && output) {
+    if (part.state === "output-available" && output && input?.outcomeId) {
+      const resolvedInput = findConnectorPickInputForToolCall(
+        messages,
+        part.toolCallId,
+        input.outcomeId,
+      );
+      if (resolvedInput) {
+        return (
+          <AnsweredAskQuestionCard
+            input={resolvedInput}
+            output={output}
+          />
+        );
+      }
+
       const connectorSlug = resolveConnectorIconSlug(output);
       const connectorLabel = resolveAskQuestionDisplayAnswer(undefined, output);
 
@@ -167,7 +187,7 @@ export function ConductorToolPart({
           iconAlt={connectorSlug}
           iconSrc={connectorSlug ? connectorLogoUrl(connectorSlug) : undefined}
           subtitle={connectorLabel}
-          title={input?.question || `App selected for ${input?.role ?? "workflow"}`}
+          title={DEFAULT_CONNECTOR_PICK_QUESTION}
           variant="emerald"
         />
       );

@@ -8,6 +8,7 @@ export type ConnectorToolkit = {
   category?: string;
   connected: boolean;
   connectedAccountId?: string;
+  connectable?: boolean;
 };
 
 export type ConnectorAction = {

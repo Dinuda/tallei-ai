@@ -147,8 +147,9 @@ test("buildConductorSystemPrompt issues every queued intent question in one turn
   assert.match(prompt, /askQuestion/);
   assert.match(prompt, /ask every returned question in the same assistant turn/i);
   assert.match(prompt, /askQuestion × N/i);
-  assert.match(prompt, /exactly one by default/i);
-  assert.match(prompt, /never fill the queue to four by default/i);
+  assert.match(prompt, /N may be zero/i);
+  assert.match(prompt, /never add a generic confirmation or filler question/i);
+  assert.match(prompt, /Never ask which app, platform, inbox, provider, or service/i);
   assert.doesNotMatch(prompt, /single follow-up question/i);
   assert.doesNotMatch(prompt, /one clarification question at a time/i);
   assert.match(prompt, /Compile blockers/i);

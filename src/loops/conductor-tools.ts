@@ -13,6 +13,7 @@ export const askQuestionOptionSchema = z.object({
   icon: z.string().optional(),
   outcomeId: z.string().optional(),
   role: z.string().optional(),
+  disabled: z.boolean().optional(),
 });
 
 export const askQuestionInputSchema = z.object({
@@ -46,8 +47,7 @@ export type AskQuestionOutput = z.infer<typeof askQuestionOutputSchema>;
 export const pickConnectorAppInputSchema = z.object({
   outcomeId: z.string().min(1),
   role: z.enum(["trigger", "source", "destination"]),
-  question: z.string().min(1).optional(),
-});
+}).strict();
 
 export type PickConnectorAppInput = z.infer<typeof pickConnectorAppInputSchema>;
 

@@ -100,6 +100,30 @@ test("Gmail picker answers are authoritative consent for every connector outcome
   assert.ok(artifact.selections.every((row) => row.confirmedByUser));
 });
 
+test("one trigger picker also selects the linked initial source", () => {
+  const state = connectorState();
+  const messages = [
+    toolMessage([{
+      type: "tool-discoverConnectorsForBlueprint", toolCallId: "discover", state: "output-available",
+      input: {}, output: {
+        groups: [
+          { outcomeId: "receive", linkedOutcomeIds: ["read"] },
+          { outcomeId: "send", linkedOutcomeIds: [] },
+        ],
+        autoResolved: [],
+      },
+    }]),
+    ...["receive", "send"].map((outcomeId) => toolMessage([{
+      type: "tool-pickConnectorApp", toolCallId: `pick-${outcomeId}`, state: "output-available",
+      input: { outcomeId }, output: { outcomeId, selectedValues: ["gmail"] },
+    }])),
+  ];
+
+  const artifact = interpretConnectorSelections(state, messages);
+  assert.deepEqual(artifact?.selections.map((row) => row.outcomeId), ["receive", "read", "send"]);
+  assert.deepEqual(artifact?.selections.map((row) => row.connector), ["gmail", "gmail", "gmail"]);
+});
+
 test("connector interpretation waits until every required picker is answered", () => {
   const state = connectorState();
   const messages = [toolMessage([{

@@ -3,10 +3,22 @@
 import { useEffect } from "react";
 import { Check } from "lucide-react";
 
+const CONNECTOR_RETURN_URL_KEY = "tallei.connectorReturnUrl";
+
 export default function ConnectorCompletePage() {
   useEffect(() => {
-    window.opener?.postMessage({ type: "tallei-connector-complete" }, window.location.origin);
-    const timer = window.setTimeout(() => window.close(), 500);
+    const storedReturnUrl = window.sessionStorage.getItem(CONNECTOR_RETURN_URL_KEY);
+    window.sessionStorage.removeItem(CONNECTOR_RETURN_URL_KEY);
+    let returnUrl = `${window.location.origin}/dashboard`;
+    if (storedReturnUrl) {
+      try {
+        const candidate = new URL(storedReturnUrl);
+        if (candidate.origin === window.location.origin) returnUrl = candidate.toString();
+      } catch {
+        // Use the safe dashboard fallback.
+      }
+    }
+    const timer = window.setTimeout(() => window.location.replace(returnUrl), 500);
     return () => window.clearTimeout(timer);
   }, []);
 

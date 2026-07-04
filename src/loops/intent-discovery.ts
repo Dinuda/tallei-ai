@@ -20,7 +20,10 @@ export const intentQuestionSchema = z.object({
   options: z.array(intentQuestionOptionSchema).min(2).max(4),
 });
 
-const intentQuestionsSchema = z.array(intentQuestionSchema).min(1).max(4).superRefine((questions, ctx) => {
+const implementationQuestionPattern = /\b(app|apps|platform|platforms|channel|channels|connector|connectors|integration|integrations|toolkit|toolkits|provider|providers|inbox|email|mail|gmail|outlook|zendesk|freshdesk|intercom|slack|notion|hubspot|mailchimp)\b/i;
+const sourceSelectionQuestionPattern = /\b(where|which)\b.{0,60}\b(ticket|tickets|request|requests|message|messages)\b.{0,40}\b(come from|arrive from|source)\b/i;
+
+const intentQuestionsSchema = z.array(intentQuestionSchema).max(4).default([]).superRefine((questions, ctx) => {
   const seen = new Set<string>();
   for (const [index, question] of questions.entries()) {
     if (seen.has(question.id)) {
@@ -32,6 +35,18 @@ const intentQuestionsSchema = z.array(intentQuestionSchema).min(1).max(4).superR
       continue;
     }
     seen.add(question.id);
+    const implementationText = [
+      question.question,
+      ...question.options.flatMap((option) => [option.label, option.value]),
+    ].join(" ");
+    if (implementationQuestionPattern.test(implementationText)
+      || sourceSelectionQuestionPattern.test(implementationText)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Intent questions must cover business behavior, not apps or platforms",
+        path: [index, "question"],
+      });
+    }
   }
 });
 
@@ -46,10 +61,26 @@ export const intentExecutionStepSchema = z.object({
   description: z.string().min(1),
 });
 
+const intentExecutionOrderSchema = z.array(intentExecutionStepSchema).min(2).max(12).superRefine((steps, ctx) => {
+  if (steps[0]?.role !== "trigger") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "The execution plan must start with a trigger step",
+      path: [0, "role"],
+    });
+  }
+  if (!steps.some((step) => step.role !== "trigger")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "The execution plan must include work after the trigger",
+    });
+  }
+});
+
 export const intentAnalysisSchema = z.object({
   outcome: z.string().min(1),
   trigger: z.string().min(1),
-  executionOrder: z.array(intentExecutionStepSchema).default([]),
+  executionOrder: intentExecutionOrderSchema,
   questions: intentQuestionsSchema,
   approval: intentApprovalSchema.optional(),
   decisions: z.array(intentDecisionSchema).default([]),

@@ -15,6 +15,7 @@ export type InteractivePromptOption = {
   icon?: string;
   outcomeId?: string;
   role?: string;
+  disabled?: boolean;
 };
 
 export type InteractivePromptAnswer = {
@@ -292,9 +293,10 @@ export function InteractivePromptMenu({
         className={cn(
           "flex w-full items-start gap-3 border border-transparent px-3 py-2.5 text-left transition-colors",
           selected ? theme.optionSelected : theme.optionHover,
-          (disabled || isSubmitted) && "cursor-default"
+          (disabled || isSubmitted) && "cursor-default",
+          option.disabled && "cursor-not-allowed opacity-50",
         )}
-        disabled={disabled || isSubmitted}
+        disabled={disabled || isSubmitted || option.disabled}
         key={option.id ?? `option-${index}`}
         onClick={() => toggle(option.id)}
         type="button"
@@ -343,6 +345,7 @@ export function InteractivePromptMenu({
   function toggle(optionId: string) {
     if (disabled || isSubmitted) return;
     const option = options.find((row) => row.id === optionId);
+    if (option?.disabled) return;
     setSelectedIds((current) => {
       if (allowMultiple && option?.outcomeId) {
         const withoutSameOutcome = current.filter((id) => {

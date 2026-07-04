@@ -74,7 +74,7 @@ test("findPendingInteractivePrompts returns multiple prompts in transcript order
               outcomeId: "source",
               role: "source",
               outcomeDescription: "Read support emails",
-              defaultQuestion: "Which app should we use?",
+              defaultQuestion: "Where should the incoming messages come from?",
               recommendedOptionIds: ["gmail"],
               askOptions: [
                 { id: "gmail", label: "Gmail", value: "gmail" },
@@ -116,6 +116,7 @@ test("findPendingInteractivePrompts returns multiple prompts in transcript order
     ["tool-1", "tool-2", "tool-3"],
   );
   assert.equal(pending[1]?.input.questionId, "connector-app:source");
+  assert.equal(pending[1]?.input.question, "Where should the incoming messages come from?");
   assert.deepEqual(
     pending.map((item) => item.input.step),
     [
@@ -208,4 +209,45 @@ test("completed askQuestion answers stay visible while pending copies stay hidde
   assert.match(shared, /findPendingInteractivePrompts/);
   assert.match(shared, /return prompts\.map/);
   assert.match(shared, /step: \{ index: index \+ 1, total: prompts\.length \}/);
+});
+
+test("conductor composer validates message length and surfaces sonner toasts", async () => {
+  const fs = await import("node:fs/promises");
+  const [shared, layout, builder] = await Promise.all([
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/conductor-builder-layout.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(shared, /CONDUCTOR_MESSAGE_MAX_LENGTH = 4_000/);
+  assert.match(shared, /validateConductorComposerMessage/);
+  assert.match(shared, /Message is too long/);
+  assert.match(layout, /from \"sonner\"/);
+  assert.match(layout, /toast\.error\(validationError\)/);
+  assert.match(builder, /toast\.error\(validationError\)/);
+});
+
+test("connector picker searches all apps and verifies before submitting", async () => {
+  const fs = await import("node:fs/promises");
+  const [menu, picker, connectCard] = await Promise.all([
+    fs.readFile(new URL("../../../dashboard/src/components/ai-elements/interactive-prompt-menu.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/builder-connector-prompt.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/builder-connect-toolkit-card.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(menu, /placeholder="Search apps…"/);
+  assert.match(menu, /max-h-\[21rem\].*overflow-y-auto/);
+  assert.match(menu, /More apps/);
+  assert.match(picker, /\/api\/connectors\/status\//);
+  assert.match(picker, /\/api\/connectors\/authorize\//);
+  assert.match(picker, /verifyPendingConnection/);
+  assert.match(picker, /Complete authorization.*continue automatically/);
+  assert.match(picker, /isn't available to connect yet/);
+  assert.match(picker, /window\.location\.assign\(authorization\.redirectUrl\)/);
+  assert.doesNotMatch(picker, /window\.open/);
+  assert.doesNotMatch(picker, /setInterval/);
+  assert.match(picker, /Connection was not completed/);
+  assert.doesNotMatch(picker, /text-red-600/);
+  assert.match(connectCard, /window\.location\.assign\(redirectUrl\)/);
+  assert.doesNotMatch(connectCard, /window\.open/);
 });

@@ -52,6 +52,7 @@ import {
 import { getLoopRun, getPendingApprovalForRun, listLoopRunSteps, getBuildChatMessages, saveBuildChatMessages, getLoopBuildMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus, getLatestBuildState, commitLoopBuildArtifact, appendBuildEvents, getBuildEvents } from "../../../loops/store.js";
 import { projectLoopSpec, userFacingStageForPhase, BuildStateError } from "../../../loops/build-state.js";
 import {
+  deriveIntentAndBlueprint,
   deriveBindingArtifact,
   bindingEvidenceFromMessages,
   interpretBindingDiscovery,
@@ -71,7 +72,7 @@ import {
 } from "../../../loops/conductor-chat-prompts.js";
 import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
 import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
-import { listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
+import { getToolkitConnectionStatus, listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
 import { listComposioTriggerTypes, scoreTriggerSlugMatch } from "../../../integrations/composio/triggers.js";
 import { resolveToolkitSlug } from "../../../integrations/composio/auth.js";
 import { getAllTools } from "../../../integrations/composio/tools.js";
@@ -336,7 +337,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
 
     const incomingMessages = prepareConductorChatMessagesForEventLog(body.messages);
     await saveBuildChatMessages(auth, loopId, incomingMessages);
-    const buildEvents = await getBuildEvents(auth, loopId);
+    let buildEvents = await getBuildEvents(auth, loopId);
     let chatMessages = projectChatMessages(buildEvents);
 
     let currentBuildState = await getLatestBuildState(auth, loopId);
@@ -396,9 +397,46 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       await recordArtifact("intent", interpretedIntent.intent);
       await recordArtifact("blueprint", interpretedIntent.blueprint, currentBuildState.artifacts.intent!.artifactHash);
     }
+    const connectorSelectionsAreLive = async (
+      artifact: { selections: Array<{ connector: string }> },
+    ): Promise<boolean> => {
+      const toolkits = [...new Set(artifact.selections.map((selection) => selection.connector.toLowerCase()))];
+      const statuses = await Promise.all(toolkits.map((toolkit) => getToolkitConnectionStatus(auth, toolkit)));
+      return statuses.every((connection) => connection.connected);
+    };
     const interpretedConnectors = interpretConnectorSelections(currentBuildState, buildEvents);
-    if (interpretedConnectors) {
+    if (interpretedConnectors && await connectorSelectionsAreLive(interpretedConnectors)) {
       await recordArtifact("connectors", interpretedConnectors, currentBuildState.artifacts.blueprint!.artifactHash);
+    }
+    let preparedConnectorDiscovery: Awaited<ReturnType<typeof discoverConnectorsForBlueprint>> | null = null;
+    const applyAutoResolvedConnectors = async (
+      discovered: Awaited<ReturnType<typeof discoverConnectorsForBlueprint>>,
+    ) => {
+      if (discovered.autoResolved.length === 0) return;
+      await appendBuildEvents(auth, loopId, discovered.autoResolved.map((selection) => ({
+        eventKey: `connector-auto:${selection.outcomeId}:${selection.connector.toLowerCase()}`,
+        type: "connector.auto_resolved" as const,
+        payload: selection,
+      })));
+      buildEvents = await getBuildEvents(auth, loopId);
+      chatMessages = projectChatMessages(buildEvents);
+      const connectorArtifact = interpretConnectorSelections(currentBuildState!, buildEvents);
+      if (connectorArtifact
+        && currentBuildState!.buildPhase === "connectors"
+        && await connectorSelectionsAreLive(connectorArtifact)) {
+        await recordArtifact("connectors", connectorArtifact, currentBuildState!.artifacts.blueprint!.artifactHash);
+      }
+    };
+    const priorConnectorSelections = connectorSelectionEvidence(buildEvents);
+    if (currentBuildState.buildPhase === "connectors" && priorConnectorSelections.length > 0) {
+      preparedConnectorDiscovery = await discoverConnectorsForBlueprint(auth, {
+        outcomes: currentSpec.taskBlueprint?.outcomes ?? [],
+        previousSelections: priorConnectorSelections,
+        previousConnectors: (currentSpec.taskBlueprint?.outcomes ?? [])
+          .map((outcome) => outcome.selectedConnector)
+          .filter((connector): connector is string => Boolean(connector)),
+      });
+      await applyAutoResolvedConnectors(preparedConnectorDiscovery);
     }
     const interpretedBindings = interpretBindingDiscovery(currentBuildState, buildEvents);
     if (interpretedBindings) {
@@ -448,6 +486,18 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: analyzeIntentInputSchema,
           execute: async (analysis) => {
             requirePhase("intent");
+            if (analysis.questions.length === 0) {
+              const interpreted = deriveIntentAndBlueprint({
+                spec: currentSpec!,
+                analysis,
+                answers: new Map(),
+                connectedToolkits: initialConnectors,
+              });
+              if (interpreted) {
+                await recordArtifact("intent", interpreted.intent);
+                await recordArtifact("blueprint", interpreted.blueprint, currentBuildState!.artifacts.intent!.artifactHash);
+              }
+            }
             return { ok: true, analysis };
           },
         }),
@@ -456,23 +506,15 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           inputSchema: discoverConnectorsForBlueprintInputSchema,
           execute: async (input) => {
             requirePhase("connectors");
-            const discovered = await discoverConnectorsForBlueprint(auth, {
-              ...input,
-              previousSelections: connectorSelectionEvidence(buildEvents),
-              previousConnectors: (currentSpec!.taskBlueprint?.outcomes ?? [])
-                .map((outcome) => outcome.selectedConnector)
-                .filter((connector): connector is string => Boolean(connector)),
-            });
-            await appendBuildEvents(auth, loopId, discovered.autoResolved.map((selection) => ({
-              eventKey: `connector-auto:${selection.outcomeId}:${selection.connector.toLowerCase()}`,
-              type: "connector.auto_resolved" as const,
-              payload: selection,
-            })));
-            const refreshedEvents = await getBuildEvents(auth, loopId);
-            const connectorArtifact = interpretConnectorSelections(currentBuildState!, refreshedEvents);
-            if (connectorArtifact && currentBuildState!.buildPhase === "connectors") {
-              await recordArtifact("connectors", connectorArtifact, currentBuildState!.artifacts.blueprint!.artifactHash);
-            }
+            const discovered = preparedConnectorDiscovery ?? await discoverConnectorsForBlueprint(auth, {
+                ...input,
+                previousSelections: connectorSelectionEvidence(buildEvents),
+                previousConnectors: (currentSpec!.taskBlueprint?.outcomes ?? [])
+                  .map((outcome) => outcome.selectedConnector)
+                  .filter((connector): connector is string => Boolean(connector)),
+              });
+            preparedConnectorDiscovery = null;
+            await applyAutoResolvedConnectors(discovered);
             return discovered;
           },
         }),

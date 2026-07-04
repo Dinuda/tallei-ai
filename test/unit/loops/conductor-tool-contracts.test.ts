@@ -27,6 +27,10 @@ test("test-only conductor examples satisfy production schemas", () => {
   askQuestionInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.askQuestion);
   discoverConnectorsForBlueprintInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.discoverConnectorsForBlueprint);
   pickConnectorAppInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.pickConnectorApp);
+  assert.equal(pickConnectorAppInputSchema.safeParse({
+    ...CONDUCTOR_TOOL_INPUT_EXAMPLES.pickConnectorApp,
+    question: "Does that work for you?",
+  }).success, false);
   presentReplyOptionsInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.presentReplyOptions);
   presentAgentTeamInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.presentAgentTeam);
   listTriggersInputSchema.parse(CONDUCTOR_TOOL_INPUT_EXAMPLES.listTriggers);

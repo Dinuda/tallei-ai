@@ -1,7 +1,8 @@
 "use client";
 
-import { ExternalLink, LoaderCircle } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { connectorLogoUrl } from "@/components/conductor/conductor-shared";
@@ -28,20 +29,22 @@ export function BuilderConnectToolkitCard({
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
-  const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
   const verifyingRef = useRef(false);
 
   const redirectUrl = output?.redirectUrl;
   const connectionRequestId = output?.connectionRequestId;
   const displayName = toolkit.charAt(0).toUpperCase() + toolkit.slice(1);
+  const pendingStorageKey = connectionRequestId
+    ? `tallei.pendingToolkitAuthorization:${connectionRequestId}`
+    : null;
 
   const markConnected = useCallback(() => {
     setConnected(true);
     setBusy(false);
     setVerifyError(null);
-    setFallbackUrl(null);
+    if (pendingStorageKey) window.sessionStorage.removeItem(pendingStorageKey);
     verifyingRef.current = false;
-  }, []);
+  }, [pendingStorageKey]);
 
   const verifyConnection = useCallback(async () => {
     if (verifyingRef.current) return;
@@ -70,26 +73,20 @@ export function BuilderConnectToolkitCard({
       setVerifyError("Could not verify the connection. Try again.");
     } finally {
       verifyingRef.current = false;
+      setBusy(false);
     }
   }, [connectionRequestId, markConnected, toolkit]);
 
   useEffect(() => {
-    const onReturn = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin || event.data?.type !== "tallei-connector-complete") {
-        return;
-      }
+    if (pendingStorageKey && window.sessionStorage.getItem(pendingStorageKey)) {
       void verifyConnection();
-    };
-    const onFocus = () => {
-      if (busy) void verifyConnection();
-    };
-    window.addEventListener("message", onReturn);
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.removeEventListener("message", onReturn);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [busy, verifyConnection]);
+    }
+  }, [pendingStorageKey, verifyConnection]);
+
+  useEffect(() => {
+    if (!verifyError) return;
+    toast.error(verifyError, { id: "connector-verify-error" });
+  }, [verifyError]);
 
   if (connected) {
     return (
@@ -111,9 +108,10 @@ export function BuilderConnectToolkitCard({
     if (!redirectUrl) return;
     setBusy(true);
     setVerifyError(null);
-    setFallbackUrl(null);
-    const popup = window.open(redirectUrl, `connector-${toolkit}`, "popup=yes,width=560,height=760");
-    if (!popup) setFallbackUrl(redirectUrl);
+    if (pendingStorageKey) window.sessionStorage.setItem(pendingStorageKey, "1");
+    window.sessionStorage.setItem("tallei.connectorReturnUrl", window.location.href);
+    window.location.assign(redirectUrl);
+    setBusy(false);
   }
 
   return (
@@ -152,23 +150,10 @@ export function BuilderConnectToolkitCard({
         >
           {busy ? <LoaderCircle className="size-4 animate-spin" /> : `Connect ${displayName}`}
         </Button>
-        {fallbackUrl ? (
-          <a
-            className="inline-flex items-center gap-1 text-xs font-medium text-[var(--builder-indigo-accent)] underline underline-offset-4"
-            href={fallbackUrl}
-            rel="noreferrer"
-            target="_blank"
-          >
-            Open authorization <ExternalLink className="size-3" />
-          </a>
-        ) : null}
         {busy ? (
           <span className={cn("text-xs text-[var(--builder-indigo-text-muted)]")}>
-            Complete authorization in the popup window…
+            Redirecting to authorization…
           </span>
-        ) : null}
-        {verifyError ? (
-          <span className={cn("text-xs text-red-600")}>{verifyError}</span>
         ) : null}
       </div>
     </div>

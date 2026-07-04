@@ -8,15 +8,14 @@ import type { BindingAskOption } from "./binding-discovery.js";
 import { scoreSchemaFieldRelevance } from "./tool-schema.js";
 import type { OutcomeRole, TaskBlueprint } from "./spec.js";
 
-export const CONNECTED_TOOLKIT_BOOST = 4;
 export const TOP_CONNECTOR_RECOMMENDATIONS = 5;
-export const CONNECTOR_AUTO_RESOLVE_SCORE_GAP = 2;
 
 export type ConnectorCandidate = {
   connector: string;
   name: string;
   connected: boolean;
   connectedAccountId?: string;
+  connectable: boolean;
   score: number;
   rationale: string;
   sampleActions: string[];
@@ -24,6 +23,7 @@ export type ConnectorCandidate = {
 
 export type ConnectorAskOption = BindingAskOption & {
   icon?: string;
+  disabled?: boolean;
 };
 
 export type ConnectorDiscoveryResult = {
@@ -35,11 +35,32 @@ export type ConnectorDiscoveryResult = {
 };
 
 export const DEFAULT_CONNECTOR_PICK_QUESTION =
-  "Which app should power this loop? Triggers and actions are configured automatically after you pick.";
+  "Where should this information come from?";
+
+export function connectorQuestionForOutcome(outcome: {
+  role: OutcomeRole;
+  description: string;
+}): string {
+  const description = outcome.description.toLowerCase();
+  if (outcome.role === "trigger" || outcome.role === "source") {
+    if (/\b(ticket|tickets|support|helpdesk)\b/.test(description)) {
+      return "Where should the support tickets come from?";
+    }
+    if (/\b(email|emails|mail|message|messages|inbox)\b/.test(description)) {
+      return "Where should the incoming messages come from?";
+    }
+    return "Where should this information come from?";
+  }
+  if (/\b(reply|replies|email|emails|message|messages)\b/.test(description)) {
+    return "Where should the reply be sent from?";
+  }
+  return "Where should the result be delivered?";
+}
 
 export type BlueprintConnectorDiscoveryResult = {
   groups: Array<{
     outcomeId: string;
+    linkedOutcomeIds: string[];
     role: OutcomeRole;
     outcomeDescription: string;
     askOptions: ConnectorAskOption[];
@@ -191,8 +212,13 @@ export function buildConnectorAskOptions(candidates: ConnectorCandidate[]): Conn
     id: connectorOptionId(candidate.connector),
     label: candidate.name,
     value: candidate.connector,
-    description: candidate.connected ? "Already connected" : "Needs connection",
+    description: candidate.connected
+      ? "Already connected"
+      : candidate.connectable
+        ? "Needs connection"
+        : "Unavailable — connection setup required",
     icon: candidate.connector.toLowerCase(),
+    ...(!candidate.connected && !candidate.connectable ? { disabled: true } : {}),
   }));
 }
 
@@ -200,7 +226,7 @@ export function buildConnectorRecommendedIds(
   askOptions: ConnectorAskOption[],
   limit = TOP_CONNECTOR_RECOMMENDATIONS,
 ): string[] {
-  return askOptions.slice(0, limit).map((option) => option.id);
+  return askOptions.filter((option) => !option.disabled).slice(0, limit).map((option) => option.id);
 }
 
 export function applyConnectorSelectionsToBlueprint(
@@ -268,7 +294,10 @@ export async function discoverConnectorsForBlueprint(
     pending.map(async (outcome) => rankConnectorsForOutcome({
       outcomeDescription: outcome.description,
       role: outcome.role,
-      limit: TOP_CONNECTOR_RECOMMENDATIONS,
+      // Keep the full ranked result for the searchable picker. Recommendation
+      // badges are limited separately by buildConnectorRecommendedIds().
+      limit: toolkits.length,
+      includeAllCatalog: true,
       toolkits,
       searchResults: await searchForOutcome(outcome),
     })),
@@ -281,17 +310,34 @@ export async function discoverConnectorsForBlueprint(
   });
 
   const autoResolved: BlueprintConnectorDiscoveryResult["autoResolved"] = [];
+  const sharedTriggerSourceConnectors = new Map<string, Set<string>>();
+  for (let index = 0; index < pending.length - 1; index++) {
+    const trigger = pending[index]!;
+    const source = pending[index + 1]!;
+    if (trigger.role !== "trigger" || source.role !== "source") continue;
+    const readable = new Set(discoveries[index + 1]!.candidates
+      .filter((candidate) => candidate.sampleActions.length > 0)
+      .map((candidate) => normalizeToolkitSlug(candidate.connector)));
+    const shared = new Set(discoveries[index]!.candidates
+      .map((candidate) => normalizeToolkitSlug(candidate.connector))
+      .filter((connector) => readable.has(connector)));
+    if (shared.size > 0) sharedTriggerSourceConnectors.set(trigger.id, shared);
+  }
   const groups = discoveries.flatMap((discovery, index) => {
       const outcome = pending[index]!;
+      const outcomeIndex = input.outcomes.findIndex((row) => row.id === outcome.id);
+      const precedingTrigger = input.outcomes[outcomeIndex - 1];
+      // Keep the read as a separate execution outcome, but share the app choice
+      // only when the trigger connector also exposes a matching read action.
+      if (outcome.role === "source" && precedingTrigger?.role === "trigger"
+        && sharedTriggerSourceConnectors.has(precedingTrigger.id)) return [];
       const priorSelection = (input.previousSelections ?? [])
         .filter((selection) => input.outcomes.findIndex((row) => row.id === selection.outcomeId)
           < input.outcomes.findIndex((row) => row.id === outcome.id))
         .reverse()
         .find((selection) => discovery.candidates[0]?.connector.toLowerCase() === selection.connector.toLowerCase());
       const top = discovery.candidates[0];
-      const runnerUp = discovery.candidates[1];
-      const clearLead = Boolean(top && top.score > 0 && (!runnerUp || top.score - runnerUp.score >= CONNECTOR_AUTO_RESOLVE_SCORE_GAP));
-      if (priorSelection && top && clearLead) {
+      if (priorSelection && top && top.score > 0) {
         autoResolved.push({
           outcomeId: outcome.id,
           role: outcome.role,
@@ -308,24 +354,34 @@ export async function discoverConnectorsForBlueprint(
           candidate.connector.toLowerCase() === connector.toLowerCase() && candidate.score > 0,
         ),
       );
+      const sharedConnectors = sharedTriggerSourceConnectors.get(outcome.id);
+      const askOptions = sharedConnectors
+        ? discovery.askOptions.filter((option) => sharedConnectors.has(normalizeToolkitSlug(option.value)))
+        : discovery.askOptions;
       const reusableOptionId = reusable
-        ? discovery.askOptions.find((option) => option.value.toLowerCase() === reusable.toLowerCase())?.id
+        ? askOptions.find((option) => option.value.toLowerCase() === reusable.toLowerCase())?.id
         : undefined;
       const recommendedOptionIds = [
         ...(reusableOptionId ? [reusableOptionId] : []),
-        ...discovery.recommendedOptionIds,
+        ...buildConnectorRecommendedIds(askOptions),
       ].filter((id, position, all) => all.indexOf(id) === position).slice(0, TOP_CONNECTOR_RECOMMENDATIONS);
       return [{
         outcomeId: outcome.id,
+        linkedOutcomeIds: outcome.role === "trigger" && sharedConnectors
+          ? input.outcomes.slice(outcomeIndex + 1)
+              .filter((row, offset, rows) => row.role === "source"
+                && rows.slice(0, offset).every((prior) => prior.role === "source"))
+              .map((row) => row.id)
+          : [],
         role: outcome.role,
         outcomeDescription: outcome.description,
-        askOptions: discovery.askOptions.map((option) => ({
+        askOptions: askOptions.map((option) => ({
           ...option,
           outcomeId: outcome.id,
           role: outcome.role,
         })),
         recommendedOptionIds,
-        defaultQuestion: `Which app should handle ${outcome.description}?`,
+        defaultQuestion: connectorQuestionForOutcome(outcome),
       }];
     });
   return {
@@ -355,6 +411,7 @@ function rankConnectorsForOutcome(input: {
   outcomeDescription: string;
   role: "trigger" | "source" | "transform" | "destination";
   limit?: number;
+  includeAllCatalog?: boolean;
   toolkits: ConnectorToolkit[];
   searchResults: ComposioToolSearchResult[];
 }): ConnectorDiscoveryResult {
@@ -393,29 +450,30 @@ function rankConnectorsForOutcome(input: {
     const slug = normalizeToolkitSlug(toolkit.slug);
     const match = scoresByToolkit.get(slug);
     const baseScore = match?.score ?? 0;
-    if (baseScore <= 0 && input.role !== "trigger") continue;
+    if (baseScore <= 0 && input.role !== "trigger" && !input.includeAllCatalog) continue;
 
-    const finalScore = baseScore + (toolkit.connected ? CONNECTED_TOOLKIT_BOOST : 0);
     candidates.push({
       connector: toolkit.slug,
       name: toolkit.name,
       connected: toolkit.connected,
+      connectable: toolkit.connected || toolkit.connectable !== false,
       ...(toolkit.connectedAccountId ? { connectedAccountId: toolkit.connectedAccountId } : {}),
-      score: finalScore,
+      score: baseScore,
       rationale: buildRationale(toolkit.name, toolkit.connected, match?.actions[0]),
       sampleActions: match?.actions.map((action) => action.actionSlug) ?? [],
     });
   }
 
   if (candidates.length === 0 && input.role === "trigger") {
-    for (const toolkit of input.toolkits.filter((row) => row.connected).slice(0, 6)) {
+    for (const toolkit of input.toolkits.slice(0, 6)) {
       candidates.push({
         connector: toolkit.slug,
         name: toolkit.name,
-        connected: true,
+        connected: toolkit.connected,
+        connectable: toolkit.connected || toolkit.connectable !== false,
         ...(toolkit.connectedAccountId ? { connectedAccountId: toolkit.connectedAccountId } : {}),
-        score: CONNECTED_TOOLKIT_BOOST,
-        rationale: buildRationale(toolkit.name, true, undefined),
+        score: 1,
+        rationale: buildRationale(toolkit.name, toolkit.connected, undefined),
         sampleActions: [],
       });
     }

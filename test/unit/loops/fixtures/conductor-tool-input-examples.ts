@@ -29,7 +29,7 @@ export const CONDUCTOR_TOOL_INPUT_EXAMPLES = {
   discoverConnectorsForBlueprint: {
     outcomes: [{ id: "result", role: "destination", description: "Deliver the configured result." }],
   },
-  pickConnectorApp: { outcomeId: "result", role: "destination", question: "Which app should deliver the result?" },
+  pickConnectorApp: { outcomeId: "result", role: "destination" },
   presentReplyOptions: {
     options: [
       { id: "continue", label: "Continue", message: "Continue." },

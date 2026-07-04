@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { FileJson, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import type { TaskBlueprint } from "@/components/conductor/conductor-shared";
 import { outcomeRoleLabel, readTaskBlueprint } from "@/components/conductor/conductor-shared";
@@ -75,7 +76,7 @@ export function ConductorSpecSheet({
       await deleteLoop(loopId);
       router.push("/dashboard/loops");
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Failed to delete loop");
+      toast.error(error instanceof Error ? error.message : "Failed to delete loop");
       setDeleting(false);
     }
   }

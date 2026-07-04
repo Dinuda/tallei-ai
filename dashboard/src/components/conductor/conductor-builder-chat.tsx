@@ -26,6 +26,7 @@ function renderTranscriptPart(
     messageId: string;
     lastMessageId: string | undefined;
     isStreamingPart: boolean;
+    messages: UIMessage[];
     pendingInteractivePromptCallIds: Set<string>;
     pendingReplyOptionsCallId: string | null;
     spec: Record<string, unknown> | null;
@@ -52,6 +53,7 @@ function renderTranscriptPart(
     return (
       <ConductorToolPart
         key={key}
+        messages={options.messages}
         part={part as DynamicToolUIPart}
         pendingInteractivePromptCallIds={options.pendingInteractivePromptCallIds}
         pendingReplyOptionsCallId={options.pendingReplyOptionsCallId}
@@ -64,6 +66,7 @@ function renderTranscriptPart(
 
 function AssistantTranscriptTurn({
   message,
+  messages,
   chatStatus,
   lastMessageId,
   pendingInteractivePromptCallIds,
@@ -71,6 +74,7 @@ function AssistantTranscriptTurn({
   spec,
 }: {
   message: UIMessage;
+  messages: UIMessage[];
   chatStatus: ChatStatus;
   lastMessageId: string | undefined;
   pendingInteractivePromptCallIds: Set<string>;
@@ -90,6 +94,7 @@ function AssistantTranscriptTurn({
     messageId: message.id,
     lastMessageId,
     isStreamingPart: false,
+    messages,
     pendingInteractivePromptCallIds,
     pendingReplyOptionsCallId,
     spec,
@@ -174,6 +179,7 @@ export function ConductorBuilderChat({
                   chatStatus={chatStatus}
                   lastMessageId={lastMessageId}
                   message={message}
+                  messages={messages}
                   pendingInteractivePromptCallIds={pendingInteractivePromptCallIds}
                   pendingReplyOptionsCallId={pendingReplyOptionsCallId}
                   spec={spec}

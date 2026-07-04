@@ -23,6 +23,7 @@ export type WorkspaceConnectorView = {
   logo: string;
   connected: boolean;
   connectedAccountId?: string;
+  connectable?: boolean;
 };
 
 export type CatalogToolkitView = WorkspaceConnectorView & {
@@ -39,6 +40,7 @@ export type ToolkitConnectionStatus = {
 const CONNECTORS_CACHE_TTL_MS = 60_000;
 const CONNECTORS_CACHE_MAX_SIZE = 200;
 const connectorsCache: TtlCacheStore<WorkspaceConnectorView[]> = new Map();
+const authConfigResolutionInFlight = new Map<string, Promise<string>>();
 
 function connectorsCacheKey(auth: AuthContext): string {
   return `connectors:${auth.tenantId}:${auth.userId}:${auth.workspaceId ?? ""}`;
@@ -113,8 +115,35 @@ async function resolveAuthConfigId(toolkit: string): Promise<string> {
     }
     return configured;
   }
-  const response = await composio.authConfigs.list({ toolkit, isComposioManaged: true, limit: 50 });
-  return selectComposioAuthConfigId(toolkit, response.items);
+  const normalized = normalizeToolkitSlug(toolkit);
+  const inFlight = authConfigResolutionInFlight.get(normalized);
+  if (inFlight) return inFlight;
+
+  const resolution = (async () => {
+    const response = await composio.authConfigs.list({ toolkit: normalized, isComposioManaged: true, limit: 50 });
+    const enabled = response.items.filter((item) => item.status.toUpperCase() === "ENABLED");
+    if (enabled.length > 0) return selectComposioAuthConfigId(normalized, response.items);
+
+    try {
+      const created = await composio.authConfigs.create(normalized, {
+        type: "use_composio_managed_auth",
+        name: `Tallei ${normalized}`,
+      });
+      return created.id;
+    } catch (createError) {
+      // A concurrent process may have created it after our initial list request.
+      const refreshed = await composio.authConfigs.list({ toolkit: normalized, isComposioManaged: true, limit: 50 });
+      const refreshedEnabled = refreshed.items.filter((item) => item.status.toUpperCase() === "ENABLED");
+      if (refreshedEnabled.length > 0) return selectComposioAuthConfigId(normalized, refreshed.items);
+      throw createError;
+    }
+  })();
+  authConfigResolutionInFlight.set(normalized, resolution);
+  try {
+    return await resolution;
+  } finally {
+    authConfigResolutionInFlight.delete(normalized);
+  }
 }
 
 export function selectComposioAuthConfigId(
