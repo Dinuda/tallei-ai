@@ -40,7 +40,7 @@ test("prepareConductorChatMessagesForEventLog strips provider replay ids", () =>
   assert.equal(reasoning.providerOptions?.openai?.itemId, undefined);
 });
 
-test("sanitizeConductorChatMessagesForModelReplay repairs unresolved tool calls before later user messages", () => {
+test("sanitizeConductorChatMessagesForModelReplay auto-resolves continue replies for open confirmOutcomeBrief", () => {
   const messages = [
     { id: "user-1", role: "user", parts: [{ type: "text", text: "Build a loop" }] },
     {
@@ -61,6 +61,43 @@ test("sanitizeConductorChatMessagesForModelReplay repairs unresolved tool calls 
       }],
     },
     { id: "user-2", role: "user", parts: [{ type: "text", text: "sure" }] },
+    { id: "user-3", role: "user", parts: [{ type: "text", text: "go ahead" }] },
+  ] satisfies UIMessage[];
+
+  const { messages: replay, stats } = sanitizeConductorChatMessagesForModelReplay(messages, {
+    preserveOpenUiToolCallIds: new Set(["call-1"]),
+  });
+  assert.deepEqual(stats.repairedToolCallIds, ["call-1"]);
+  const repairedPart = replay[1]?.parts[0] as {
+    state?: string;
+    output?: { action?: string; briefHash?: string };
+  };
+  assert.equal(repairedPart.state, "output-available");
+  assert.equal(repairedPart.output?.action, "confirm");
+  assert.equal(repairedPart.output?.briefHash, "a".repeat(64));
+});
+
+test("sanitizeConductorChatMessagesForModelReplay repairs unresolved tool calls before later user messages", () => {
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Build a loop" }] },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-confirmOutcomeBrief",
+        toolCallId: "call-1",
+        state: "input-available",
+        input: {
+          briefHash: "a".repeat(64),
+          question: "Ready?",
+          options: [
+            { id: "confirm", label: "Yes", value: "confirm" },
+            { id: "other", label: "No", value: "other" },
+          ],
+        },
+      }],
+    },
+    { id: "user-2", role: "user", parts: [{ type: "text", text: "change the trigger" }] },
     { id: "user-3", role: "user", parts: [{ type: "text", text: "go ahead" }] },
   ] satisfies UIMessage[];
 

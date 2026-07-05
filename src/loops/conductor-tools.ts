@@ -159,10 +159,41 @@ export const conductorExecutionMetadataSchema = z.object({
   error: z.string().min(1).optional(),
   recoverToPhase: buildPhaseSchema.optional(),
   recoverReason: z.string().min(1).optional(),
+  recoveryPhase: buildPhaseSchema.optional(),
+  recoveryReason: z.string().min(1).optional(),
   resumeTool: z.string().min(1).optional(),
+  nextPhase: buildPhaseSchema.optional(),
+  handoffId: z.string().min(1).optional(),
+  compiledPlanId: z.string().uuid().optional(),
+  noProgressFingerprint: z.string().min(1).optional(),
+  turnOutcome: z.enum([
+    "progress",
+    "phase_complete",
+    "waiting_for_user",
+    "blocked",
+    "budget_exhausted",
+    "build_complete",
+  ]),
+  continuation: z.enum([
+    "continue_phase",
+    "next_phase",
+    "wait_for_user",
+    "stop",
+  ]),
+  stepsUsed: z.number().int().min(0),
+  stepLimit: z.number().int().min(1),
 });
 
 export type ConductorExecutionMetadata = z.infer<typeof conductorExecutionMetadataSchema>;
+
+export type PhaseExecutionContract = Readonly<{
+  phase: z.infer<typeof buildPhaseSchema>;
+  parentArtifactHash: string;
+  allowedTools: readonly string[];
+  nextTool: string | null;
+  compiledPlanId: string | null;
+  revision: string;
+}>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -183,7 +214,17 @@ export function readConductorExecutionMetadata(value: unknown): ConductorExecuti
     error: value.error,
     recoverToPhase: value.recoverToPhase,
     recoverReason: value.recoverReason,
+    recoveryPhase: value.recoveryPhase,
+    recoveryReason: value.recoveryReason,
     resumeTool: value.resumeTool,
+    nextPhase: value.nextPhase,
+    handoffId: value.handoffId,
+    compiledPlanId: value.compiledPlanId,
+    noProgressFingerprint: value.noProgressFingerprint,
+    turnOutcome: value.turnOutcome,
+    continuation: value.continuation,
+    stepsUsed: value.stepsUsed,
+    stepLimit: value.stepLimit,
   };
   const parsed = conductorExecutionMetadataSchema.safeParse(candidate);
   return parsed.success ? parsed.data : null;

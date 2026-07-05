@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CONDUCTOR_BUDGET_EXHAUSTED_QUESTION,
   CONDUCTOR_CONTINUE_SUGGESTIONS,
   CONDUCTOR_STALL_QUESTION,
   conductorStepLimitForPhase,
@@ -87,6 +88,23 @@ test("evaluateConductorStall does not stall when non-terminal tools would auto-c
   }).stalled, false);
 });
 
+test("evaluateConductorStall does not stall text-only endings when phase handoff is pending", () => {
+  assert.equal(evaluateConductorStall({
+    chatBusy: false,
+    hasMessages: true,
+    actionablePhase: true,
+    hasUnansweredUiTools: false,
+    buildIncomplete: true,
+    lastRoleIsAssistant: true,
+    hasTerminalExecution: false,
+    textOnlyEnding: true,
+    hasExecutions: false,
+    wouldAutoContinue: false,
+    hasAssistantParts: true,
+    phaseHandoffPending: true,
+  }).stalled, false);
+});
+
 test("evaluateConductorStall does not stall text-only endings when review confirmation is pending", () => {
   assert.equal(evaluateConductorStall({
     chatBusy: false,
@@ -101,6 +119,23 @@ test("evaluateConductorStall does not stall text-only endings when review confir
     wouldAutoContinue: false,
     hasAssistantParts: true,
     reviewConfirmationHandoffPending: true,
+  }).stalled, false);
+});
+
+test("evaluateConductorStall does not stall when a UI-only tool was answered and awaits continue", () => {
+  assert.equal(evaluateConductorStall({
+    chatBusy: false,
+    hasMessages: true,
+    actionablePhase: true,
+    hasUnansweredUiTools: false,
+    buildIncomplete: true,
+    lastRoleIsAssistant: true,
+    hasTerminalExecution: false,
+    textOnlyEnding: false,
+    hasExecutions: false,
+    wouldAutoContinue: false,
+    hasAssistantParts: true,
+    answeredUiToolAwaitingContinue: true,
   }).stalled, false);
 });
 
@@ -128,4 +163,23 @@ test("isRecoverableConductorExecution detects phase redirect metadata", () => {
     retryAllowed: false,
     recoverToPhase: "review",
   }), false);
+});
+
+test("evaluateConductorStall does not stall after budget exhaustion", () => {
+  const result = evaluateConductorStall({
+    chatBusy: false,
+    hasMessages: true,
+    actionablePhase: true,
+    hasUnansweredUiTools: false,
+    buildIncomplete: true,
+    lastRoleIsAssistant: true,
+    hasTerminalExecution: false,
+    textOnlyEnding: true,
+    wouldAutoContinue: false,
+    hasExecutions: false,
+    hasAssistantParts: true,
+    budgetExhausted: true,
+  });
+  assert.equal(result.stalled, false);
+  assert.match(CONDUCTOR_BUDGET_EXHAUSTED_QUESTION, /step budget/i);
 });

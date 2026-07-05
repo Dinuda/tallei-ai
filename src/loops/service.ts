@@ -16,6 +16,7 @@ import {
   listLoops,
   moveLoopToWorkspace as moveLoopRow,
   commitLoopBuildArtifact,
+  recoverLoopBuildPhase,
   setLoopStatus,
   updateLoopName,
   updateLoopRun,
@@ -29,8 +30,43 @@ import {
 } from "./build-state.js";
 import { resolveWorkspaceId } from "../services/workspace/index.js";
 import { getConnectorProvider } from "../integrations/connectors/index.js";
+import { determineBuildContinuityRecovery } from "./build-continuity.js";
 
 const connectorProvider = getConnectorProvider();
+
+export async function reconcileLoopBuildContinuity(auth: AuthContext, loopId: string) {
+  const state = await getLatestBuildState(auth, loopId);
+  if (!state) throw new Error("Loop build state not found");
+  const compileArtifact = state.artifacts.compile
+    ? compileArtifactSchema.parse(state.artifacts.compile.artifact)
+    : null;
+  const plan = compileArtifact ? await getCompiledPlan(compileArtifact.compiledPlanId) : null;
+  const recovery = determineBuildContinuityRecovery(state, plan);
+  if (!recovery) return { state, recovered: false as const, recovery: null };
+  const result = await recoverLoopBuildPhase({ auth, loopId, ...recovery });
+  return { state: result.state, recovered: result.recovered, recovery };
+}
+
+export async function recoverLoopBuildToCompile(
+  auth: AuthContext,
+  loopId: string,
+  reason: string,
+) {
+  const state = await getLatestBuildState(auth, loopId);
+  if (!state) throw new Error("Loop build state not found");
+  if (state.buildPhase !== "test" && state.buildPhase !== "activation") {
+    return { state, recovered: false as const, recovery: null, invalidatedPhases: [] };
+  }
+  const parentArtifactHash = state.artifacts.review?.artifactHash ?? "root";
+  const recovery = { phase: "compile" as const, reason, parentArtifactHash };
+  const result = await recoverLoopBuildPhase({ auth, loopId, ...recovery });
+  return {
+    state: result.state,
+    recovered: result.recovered,
+    recovery,
+    invalidatedPhases: result.invalidatedPhases,
+  };
+}
 
 export async function resolveLoopAuthWorkspace(auth: AuthContext, workspaceId?: string | null) {
   const resolved = await resolveWorkspaceId(auth, workspaceId ?? auth.workspaceId);

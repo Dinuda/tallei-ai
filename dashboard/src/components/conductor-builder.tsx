@@ -23,14 +23,20 @@ import {
   findPendingOutcomeBrief,
   findStaleConfirmOutcomeBriefCalls,
   hasUnansweredUiToolCalls,
+  isConductorBudgetExhausted,
   makeUserMessage,
   prepareMessagesForUiToolOutput,
   resolveConfirmOutcomeBriefActionFromSelection,
+  messagesUiStateRevision,
   shouldAutoSendConductorChat,
+  findPendingConductorPhaseHandoff,
+  tryResolveContinueAsPendingUiToolAnswer,
   validateConductorComposerMessage,
+  resolveToolPartName,
   type PendingInteractivePrompt,
   type ChatStatus,
   type ConductorBuildPhase,
+  type PhaseHandoffProgress,
 } from "@/components/conductor/conductor-shared";
 import type { InteractivePromptAnswer } from "@/components/ai-elements/interactive-prompt-menu";
 import { apiFetch, getStoredWorkspaceId } from "@/lib/api-fetch";
@@ -40,6 +46,7 @@ import {
   deriveConductorPromptSuggestionsQuestion,
   findPendingPresentReplyOptions,
 } from "@/lib/conductor-prompt-suggestions";
+import { isBuildTerminalForStall } from "@/lib/conductor-stall-recovery";
 
 type ConductorChatBridgeProps = {
   loopId: string;
@@ -47,6 +54,14 @@ type ConductorChatBridgeProps = {
   skipLoopFetch?: boolean;
   bootstrapPromptSentRef: MutableRefObject<boolean>;
   buildPhase: ConductorBuildPhase | null;
+  phaseProgress: PhaseHandoffProgress | null;
+  latestPhaseTurn: {
+    phase?: string;
+    parentArtifactHash?: string;
+    continuation?: string;
+    nextPhase?: string;
+    handoffId?: string;
+  } | null;
   missingSlots: string[];
   loopStatus: string;
   onLoopMetaChange: (meta: {
@@ -57,6 +72,14 @@ type ConductorChatBridgeProps = {
     compiledPlanId?: string | null;
     eventTrigger?: LoopEventTriggerStatus | null;
     buildPhase?: ConductorBuildPhase | null;
+    phaseProgress?: PhaseHandoffProgress | null;
+    latestPhaseTurn?: {
+      phase?: string;
+      parentArtifactHash?: string;
+      continuation?: string;
+      nextPhase?: string;
+      handoffId?: string;
+    } | null;
   }) => void;
   children: React.ReactNode;
 };
@@ -67,6 +90,8 @@ function ConductorChatBridge({
   skipLoopFetch = false,
   bootstrapPromptSentRef,
   buildPhase,
+  phaseProgress,
+  latestPhaseTurn,
   missingSlots,
   loopStatus,
   onLoopMetaChange,
@@ -74,11 +99,21 @@ function ConductorChatBridge({
 }: ConductorChatBridgeProps) {
   const onLoopMetaChangeRef = useRef(onLoopMetaChange);
   const buildPhaseRef = useRef(buildPhase);
+  const phaseProgressRef = useRef(phaseProgress);
+  const latestPhaseTurnRef = useRef<{
+    phase?: string;
+    parentArtifactHash?: string;
+    continuation?: string;
+    nextPhase?: string;
+    handoffId?: string;
+  } | null>(null);
   const missingSlotsRef = useRef(missingSlots);
   const loopStatusRef = useRef(loopStatus);
 
   useEffect(() => { onLoopMetaChangeRef.current = onLoopMetaChange; }, [onLoopMetaChange]);
   useEffect(() => { buildPhaseRef.current = buildPhase; }, [buildPhase]);
+  useEffect(() => { phaseProgressRef.current = phaseProgress; }, [phaseProgress]);
+  useEffect(() => { latestPhaseTurnRef.current = latestPhaseTurn; }, [latestPhaseTurn]);
   useEffect(() => { missingSlotsRef.current = missingSlots; }, [missingSlots]);
   useEffect(() => { loopStatusRef.current = loopStatus; }, [loopStatus]);
 
@@ -106,18 +141,22 @@ function ConductorChatBridge({
     sendAutomaticallyWhen: ({ messages }) => shouldAutoSendConductorChat({
       messages,
       buildPhase: buildPhaseRef.current,
+      phaseProgress: phaseProgressRef.current,
       missingSlots: missingSlotsRef.current,
       loopStatus: loopStatusRef.current,
     }),
     onError: (error) => {
       console.error("[conductor/chat] stream failed:", error);
-      toast.error(formatApiError(error, "Conductor could not finish that response. Your message was saved — try again."));
+      toast.error(error instanceof Error ? error.message : "Conductor could not finish that response. Your message was saved — try again.");
     },
   });
 
   const chatLoadedRef = useRef(false);
   const processedToolMetaRef = useRef<Set<string>>(new Set());
   const supersededConfirmRef = useRef<Set<string>>(new Set());
+  const consumedHandoffRef = useRef<Set<string>>(new Set());
+  const answeredToolResumeRef = useRef<Set<string>>(new Set());
+  const messagesRevision = messagesUiStateRevision(messages);
 
   const chatApi = useMemo<ConductorChatApi>(
     () => ({
@@ -125,6 +164,9 @@ function ConductorChatBridge({
       regenerate,
       stop,
       addToolOutput: (params) => {
+        const answerKey = `${buildPhaseRef.current ?? "unknown"}:${latestPhaseTurnRef.current?.parentArtifactHash ?? "unknown"}:${params.toolCallId}`;
+        if (answeredToolResumeRef.current.has(answerKey)) return Promise.resolve();
+        answeredToolResumeRef.current.add(answerKey);
         flushSync(() => {
           setMessages((current) => prepareMessagesForUiToolOutput(
             current,
@@ -132,10 +174,13 @@ function ConductorChatBridge({
             params.output,
           ));
         });
-        return addToolOutput({
+        return Promise.resolve(addToolOutput({
           tool: params.tool,
           toolCallId: params.toolCallId,
           output: params.output,
+        })).catch((error) => {
+          answeredToolResumeRef.current.delete(answerKey);
+          throw error;
         });
       },
     }),
@@ -152,6 +197,8 @@ function ConductorChatBridge({
     chatLoadedRef.current = false;
     processedToolMetaRef.current = new Set();
     supersededConfirmRef.current = new Set();
+    consumedHandoffRef.current = new Set();
+    answeredToolResumeRef.current = new Set();
 
     if (skipLoopFetch) {
       chatLoadedRef.current = true;
@@ -174,6 +221,8 @@ function ConductorChatBridge({
           buildPhase: typeof data.buildProgress?.internalPhase === "string"
             ? data.buildProgress.internalPhase as ConductorBuildPhase
             : null,
+          phaseProgress: data.buildProgress?.phaseProgress ?? null,
+          latestPhaseTurn: data.buildProgress?.latestPhaseTurn ?? null,
         });
         if (Array.isArray(data.chatMessages) && data.chatMessages.length > 0) {
           setMessages(data.chatMessages as UIMessage[]);
@@ -220,23 +269,25 @@ function ConductorChatBridge({
             });
           }
         }
-        if (part.type === "tool-compileLoop" && part.state === "output-available") {
+        if (resolveToolPartName(phaseToolPart) === "compileLoop" && phaseToolPart.state === "output-available") {
           if (processedToolMetaRef.current.has(metaKey)) continue;
           processedToolMetaRef.current.add(metaKey);
-          const output = part.output as { ok?: boolean; plan?: { id: string } };
+          const output = phaseToolPart.output as { ok?: boolean; plan?: { id: string } };
           if (output.ok && output.plan?.id) {
             onLoopMetaChangeRef.current({ compiledPlanId: output.plan.id });
           }
         }
-        if (part.type === "tool-activateLoop" && part.state === "output-available") {
+        if (resolveToolPartName(phaseToolPart) === "activateLoop" && phaseToolPart.state === "output-available") {
           if (processedToolMetaRef.current.has(metaKey)) continue;
           processedToolMetaRef.current.add(metaKey);
-          const output = part.output as {
+          const output = phaseToolPart.output as {
             ok?: boolean;
             status?: string;
             eventTrigger?: LoopEventTriggerStatus;
+            alreadyActive?: boolean;
+            turnOutcome?: string;
           };
-          if (output.ok) {
+          if (output.ok || output.alreadyActive || output.turnOutcome === "build_complete") {
             onLoopMetaChangeRef.current({
               status: output.status ?? "active",
               eventTrigger: output.eventTrigger ?? null,
@@ -276,6 +327,72 @@ function ConductorChatBridge({
     return () => window.clearTimeout(timer);
   }, [messages, chatStatus, loopId]);
 
+  useEffect(() => {
+    if (!chatLoadedRef.current || chatStatus === "streaming" || chatStatus === "submitted") return;
+    let cancelled = false;
+    void (async () => {
+      const res = await apiFetch(`/api/loops/${loopId}`);
+      const data = await res.json();
+      if (cancelled || !res.ok) return;
+      onLoopMetaChangeRef.current({
+        status: typeof data.loop?.status === "string" ? data.loop.status : undefined,
+        buildPhase: typeof data.buildProgress?.internalPhase === "string"
+          ? data.buildProgress.internalPhase as ConductorBuildPhase
+          : null,
+        phaseProgress: data.buildProgress?.phaseProgress ?? null,
+        latestPhaseTurn: data.buildProgress?.latestPhaseTurn ?? null,
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatStatus, loopId, messagesRevision]);
+
+  useEffect(() => {
+    if (!chatLoadedRef.current || chatStatus !== "ready") return;
+    if (hasUnansweredUiToolCalls(messages, phaseProgressRef.current)) return;
+    const messageHandoff = findPendingConductorPhaseHandoff(messages);
+    const phaseTurnHandoff = phaseProgressRef.current && latestPhaseTurnRef.current?.handoffId
+      && (latestPhaseTurnRef.current.continuation === "next_phase"
+        || latestPhaseTurnRef.current.continuation === "continue_phase")
+      ? {
+        handoffId: latestPhaseTurnRef.current.handoffId,
+        nextPhase: latestPhaseTurnRef.current.nextPhase ?? phaseProgressRef.current.phase,
+      }
+      : null;
+    const handoff = messageHandoff ?? phaseTurnHandoff;
+    if (!handoff?.handoffId || !handoff.nextPhase || consumedHandoffRef.current.has(handoff.handoffId)) return;
+    consumedHandoffRef.current.add(handoff.handoffId);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch(`/api/loops/${loopId}`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) throw new Error("Failed to refresh phase progress");
+        const persistedPhase = typeof data.buildProgress?.internalPhase === "string"
+          ? data.buildProgress.internalPhase as ConductorBuildPhase
+          : null;
+        onLoopMetaChangeRef.current({
+          buildPhase: persistedPhase,
+          phaseProgress: data.buildProgress?.phaseProgress ?? null,
+          compiledPlanId: data.buildChat?.compiledPlanId ?? null,
+        });
+        if (persistedPhase !== handoff.nextPhase) {
+          consumedHandoffRef.current.delete(handoff.handoffId!);
+          return;
+        }
+        await sendMessage();
+      } catch (error) {
+        consumedHandoffRef.current.delete(handoff.handoffId!);
+        console.error("[conductor/chat] phase handoff failed:", error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatStatus, loopId, messages, sendMessage]);
+
   return (
     <ConductorChatProvider value={chatContextValue}>
       {children}
@@ -289,6 +406,7 @@ function ConductorBuilderLive({
   spec,
   missingSlots,
   buildPhase,
+  phaseProgress,
   compiledPlanId,
   status,
   eventTrigger,
@@ -305,6 +423,7 @@ function ConductorBuilderLive({
   spec: Record<string, unknown> | null;
   missingSlots: string[];
   buildPhase: ConductorBuildPhase | null;
+  phaseProgress: PhaseHandoffProgress | null;
   compiledPlanId: string | null;
   status: string;
   eventTrigger: LoopEventTriggerStatus | null;
@@ -327,12 +446,12 @@ function ConductorBuilderLive({
   const chatApi = liveChat?.chatApi ?? null;
 
   const pendingQuestions = useMemo(
-    () => findPendingInteractivePrompts(messages, spec),
-    [messages, spec],
+    () => findPendingInteractivePrompts(messages, spec, phaseProgress),
+    [messages, spec, phaseProgress],
   );
   const pendingOutcomeBrief = useMemo(
-    () => findPendingOutcomeBrief(messages),
-    [messages],
+    () => findPendingOutcomeBrief(messages, phaseProgress),
+    [messages, phaseProgress],
   );
   const pendingReplyOptions = useMemo(
     () => findPendingPresentReplyOptions(messages),
@@ -347,13 +466,24 @@ function ConductorBuilderLive({
       missingSlots,
       chatBusy,
       loopStatus: status,
+      phaseProgress,
     }).stalled,
-    [messages, buildPhase, missingSlots, chatBusy, status],
+    [messages, buildPhase, missingSlots, chatBusy, status, phaseProgress],
+  );
+
+  const budgetExhausted = useMemo(
+    () => isConductorBudgetExhausted(messages),
+    [messages],
+  );
+
+  const buildTerminal = useMemo(
+    () => isBuildTerminalForStall({ loopStatus: status, phaseProgress }),
+    [status, phaseProgress],
   );
 
   const promptSuggestionsQuestion = useMemo(
-    () => deriveConductorPromptSuggestionsQuestion(messages, isStalled),
-    [messages, isStalled],
+    () => deriveConductorPromptSuggestionsQuestion(messages, isStalled, budgetExhausted, buildTerminal),
+    [messages, isStalled, budgetExhausted, buildTerminal],
   );
 
   const promptSuggestions = useMemo(
@@ -363,6 +493,8 @@ function ConductorBuilderLive({
       status,
       buildPhase,
       isStalled,
+      budgetExhausted,
+      phaseProgress,
       hasPendingQuestion: Boolean(pendingQuestions.length || pendingOutcomeBrief),
       hasPendingReplyOptions: Boolean(pendingReplyOptions),
       chatBusy,
@@ -372,11 +504,13 @@ function ConductorBuilderLive({
       buildPhase,
       chatBusy,
       isStalled,
+      budgetExhausted,
       messages,
       missingSlots,
       pendingQuestions,
       pendingOutcomeBrief,
       pendingReplyOptions,
+      phaseProgress,
       status,
     ],
   );
@@ -394,7 +528,12 @@ function ConductorBuilderLive({
       toast.error(validationError);
       return;
     }
-    if (hasUnansweredUiToolCalls(messages)) {
+    const pendingUiResolution = tryResolveContinueAsPendingUiToolAnswer(text, phaseProgress);
+    if (pendingUiResolution && chatApi) {
+      void chatApi.addToolOutput(pendingUiResolution);
+      return;
+    }
+    if (hasUnansweredUiToolCalls(messages, phaseProgress)) {
       toast.error("Answer the pending question before sending a message.");
       return;
     }
@@ -484,7 +623,13 @@ function ConductorBuilderLive({
       return;
     }
 
-    if (hasUnansweredUiToolCalls(messages)) {
+    const pendingUiResolution = tryResolveContinueAsPendingUiToolAnswer(message, phaseProgress);
+    if (pendingUiResolution && chatApi) {
+      void chatApi.addToolOutput(pendingUiResolution);
+      return;
+    }
+
+    if (hasUnansweredUiToolCalls(messages, phaseProgress)) {
       toast.error("Answer the pending question before sending a message.");
       return;
     }
@@ -525,7 +670,7 @@ function ConductorBuilderLive({
       thinkingLabel={creating ? "Creating loop…" : "Thinking…"}
       forceThinking={creating}
       composerDisabled={creating}
-      sendBlocked={hasUnansweredUiToolCalls(messages)}
+      sendBlocked={hasUnansweredUiToolCalls(messages, phaseProgress)}
     />
   );
 }
@@ -541,6 +686,14 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
   const [compiledPlanId, setCompiledPlanId] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("draft");
   const [buildPhase, setBuildPhase] = useState<ConductorBuildPhase | null>(null);
+  const [phaseProgress, setPhaseProgress] = useState<PhaseHandoffProgress | null>(null);
+  const [latestPhaseTurn, setLatestPhaseTurn] = useState<{
+    phase?: string;
+    parentArtifactHash?: string;
+    continuation?: string;
+    nextPhase?: string;
+    handoffId?: string;
+  } | null>(null);
   const [eventTrigger, setEventTrigger] = useState<LoopEventTriggerStatus | null>(null);
   const [input, setInput] = useState("");
   const [creating, setCreating] = useState(false);
@@ -557,6 +710,14 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     compiledPlanId?: string | null;
     eventTrigger?: LoopEventTriggerStatus | null;
     buildPhase?: ConductorBuildPhase | null;
+    phaseProgress?: PhaseHandoffProgress | null;
+    latestPhaseTurn?: {
+      phase?: string;
+      parentArtifactHash?: string;
+      continuation?: string;
+      nextPhase?: string;
+      handoffId?: string;
+    } | null;
   }) => {
     if (meta.loopName !== undefined) setLoopName(meta.loopName);
     if (meta.spec !== undefined) {
@@ -578,6 +739,22 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     if (meta.status !== undefined) setStatus((prev) => (prev === meta.status ? prev : meta.status!));
     if (meta.buildPhase !== undefined) {
       setBuildPhase((prev) => (prev === meta.buildPhase ? prev : meta.buildPhase ?? null));
+    }
+    if (meta.phaseProgress !== undefined) {
+      setPhaseProgress((prev) => {
+        const next = meta.phaseProgress ?? null;
+        if (prev === next) return prev;
+        if (prev && next && JSON.stringify(prev) === JSON.stringify(next)) return prev;
+        return next;
+      });
+    }
+    if (meta.latestPhaseTurn !== undefined) {
+      setLatestPhaseTurn((prev) => {
+        const next = meta.latestPhaseTurn ?? null;
+        if (prev === next) return prev;
+        if (prev && next && JSON.stringify(prev) === JSON.stringify(next)) return prev;
+        return next;
+      });
     }
     if (meta.compiledPlanId !== undefined) {
       setCompiledPlanId((prev) => (prev === meta.compiledPlanId ? prev : meta.compiledPlanId ?? null));
@@ -666,6 +843,8 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     spec,
     missingSlots,
     buildPhase,
+    phaseProgress,
+    latestPhaseTurn,
     compiledPlanId,
     status,
     eventTrigger,
@@ -689,6 +868,8 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
       skipLoopFetch={createdInSessionRef.current}
       bootstrapPromptSentRef={bootstrapPromptSentRef}
       buildPhase={buildPhase}
+      phaseProgress={phaseProgress}
+      latestPhaseTurn={latestPhaseTurn}
       missingSlots={missingSlots}
       loopStatus={status}
       onLoopMetaChange={handleLoopMetaChange}

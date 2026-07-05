@@ -18,6 +18,9 @@ export const LOOP_BUILD_EVENT_TYPES = [
   "binding.config_set",
   "binding.resolved",
   "binding.diagnostic",
+  "phase_turn.completed",
+  "phase.recovery_requested",
+  "phase_handoff.consumed",
 ] as const;
 
 export type LoopBuildEventType = (typeof LOOP_BUILD_EVENT_TYPES)[number];
@@ -38,6 +41,24 @@ export type LoopBuildEvent = {
 export type ConductorOperationLookup = {
   operationKey: string;
   parentArtifactHash?: string | null;
+};
+
+export type ConductorPhaseTurnPayload = {
+  phase: string;
+  parentArtifactHash: string;
+  stepsUsed: number;
+  stepLimit: number;
+  outcome: string;
+  continuation: string;
+  nextPhase?: string;
+  handoffId?: string;
+  compiledPlanId?: string;
+  recoveryPhase?: string;
+  recoveryReason?: string;
+  noProgressFingerprint?: string;
+  resolutionReason?: string;
+  pendingToolCallId?: string;
+  resumeAfterAnswer?: boolean;
 };
 
 export type NewLoopBuildEvent = Pick<LoopBuildEvent, "eventKey" | "type" | "payload"> & {
@@ -133,6 +154,92 @@ export function eventsFromUiMessages(messages: UIMessage[]): NewLoopBuildEvent[]
 }
 
 const HUMAN_INPUT_TOOLS = new Set(["askQuestion", "pickConnectorApp", "confirmOutcomeBrief", "presentReplyOptions"]);
+
+export type PendingUiToolCall = {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasResumableUiToolInput(toolName: string, input: unknown): boolean {
+  if (!isRecord(input)) return false;
+  switch (toolName) {
+    case "askQuestion":
+      return typeof input.questionId === "string"
+        && input.questionId.trim().length > 0
+        && typeof input.question === "string"
+        && input.question.trim().length > 0
+        && Array.isArray(input.options)
+        && input.options.length >= 2;
+    case "pickConnectorApp":
+      return typeof input.outcomeId === "string" && input.outcomeId.trim().length > 0;
+    case "presentReplyOptions":
+      return Array.isArray(input.options) && input.options.length >= 2;
+    case "confirmOutcomeBrief":
+      return typeof input.briefHash === "string"
+        && input.briefHash.trim().length > 0
+        && typeof input.question === "string"
+        && input.question.trim().length > 0
+        && Array.isArray(input.options)
+        && input.options.length >= 2;
+    default:
+      return true;
+  }
+}
+
+function isOpenUiToolEvent(event: LoopBuildEvent): boolean {
+  if (!event.toolCallId || event.type === "tool_call.completed") return false;
+  const toolName = String(event.payload.toolName ?? "");
+  if (!HUMAN_INPUT_TOOLS.has(toolName)) return false;
+  if (event.type !== "tool_call.requested" && event.type !== "tool_call.interrupted") return false;
+  const state = String(event.payload.state ?? "");
+  if (state !== "input-available" && state !== "input-streaming") return false;
+  if (event.payload.output != null) return false;
+  return hasResumableUiToolInput(toolName, event.payload.input);
+}
+
+/** Latest UI-only tool call still awaiting user input, derived from persisted build events. */
+export function derivePendingUiToolFromEvents(events: LoopBuildEvent[]): PendingUiToolCall | null {
+  const completed = new Set(
+    events
+      .filter((event) => event.type === "tool_call.completed" && event.toolCallId)
+      .map((event) => event.toolCallId as string),
+  );
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (!isOpenUiToolEvent(event) || !event.toolCallId || completed.has(event.toolCallId)) continue;
+    return {
+      toolCallId: event.toolCallId,
+      toolName: String(event.payload.toolName ?? ""),
+      input: event.payload.input,
+    };
+  }
+  return null;
+}
+
+export function countUncompletedUiToolRequests(
+  events: LoopBuildEvent[],
+  toolName: string,
+  inputFingerprint?: string,
+): number {
+  let count = 0;
+  for (const event of events) {
+    if (event.type !== "tool_call.requested" || event.payload.toolName !== toolName || !event.toolCallId) continue;
+    if (inputFingerprint) {
+      const input = event.payload.input;
+      const briefHash = isRecord(input) ? String(input.briefHash ?? "") : "";
+      if (briefHash !== inputFingerprint) continue;
+    }
+    const finished = events.some((candidate) =>
+      candidate.toolCallId === event.toolCallId && candidate.type === "tool_call.completed");
+    if (!finished) count += 1;
+  }
+  return count;
+}
 
 export function interruptionEventsFromUiMessages(messages: UIMessage[]): NewLoopBuildEvent[] {
   return messages.flatMap((message) => (message.parts ?? []).flatMap((rawPart) => {
@@ -303,7 +410,7 @@ export async function getLatestArtifactEvent(
   const result = await client.query<LoopBuildEventRow>(
     `SELECT * FROM loop_build_events
      WHERE loop_id = $1 AND thread_kind = 'build' AND run_id IS NULL
-       AND event_type = 'artifact.committed'
+       AND event_type IN ('artifact.committed', 'phase.recovery_requested')
      ORDER BY sequence DESC
      LIMIT 1`,
     [loopId],
@@ -352,6 +459,14 @@ export function hasCompletedConductorOperation(
   return findConductorOperationEvents(events, lookup).length > 0;
 }
 
+export function hasFailedConductorOperation(
+  events: LoopBuildEvent[],
+  lookup: ConductorOperationLookup,
+): boolean {
+  const latest = getLatestConductorOperationAttempt(events, lookup);
+  return latest?.metadata.ok === false;
+}
+
 export function isTerminalConductorExecution(metadata: ConductorExecutionMetadata): boolean {
   if (isRecoverableConductorExecution(metadata)) return false;
   return metadata.requiresUserInput
@@ -371,6 +486,70 @@ export function hasTerminalConductorPhaseResult(
       && isTerminalConductorExecution(metadata));
   });
 }
+
+export function eventsForConductorPhaseAttempt(
+  events: LoopBuildEvent[],
+  input: { phase: ConductorExecutionMetadata["phaseBefore"]; parentArtifactHash: string },
+): LoopBuildEvent[] {
+  const recoverySequence = events
+    .filter((event) => event.type === "phase.recovery_requested"
+      && event.payload.recoveryPhase === input.phase
+      && event.payload.parentArtifactHash === input.parentArtifactHash)
+    .at(-1)?.sequence;
+  return recoverySequence == null
+    ? events
+    : events.filter((event) => event.sequence > recoverySequence);
+}
+
+export function makeConductorPhaseTurnEvent(
+  payload: ConductorPhaseTurnPayload,
+): NewLoopBuildEvent {
+  return {
+    eventKey: `phase-turn:${payload.phase}:${payload.parentArtifactHash}:${eventPayloadHash(payload)}`,
+    type: "phase_turn.completed",
+    payload,
+  };
+}
+
+/** Persist server-executed tool evidence for dedup and projection during a Conductor turn. */
+export function makeConductorToolCompletedEvent(input: {
+  toolName: string;
+  input: unknown;
+  output: Record<string, unknown>;
+  toolCallId?: string;
+  messageId?: string;
+}): NewLoopBuildEvent {
+  const metadata = readConductorExecutionMetadata(input.output);
+  const operationKey = typeof metadata?.operationKey === "string" ? metadata.operationKey : input.toolName;
+  const stepsUsed = metadata?.stepsUsed ?? 0;
+  const toolCallId = input.toolCallId ?? `server:${operationKey}:${stepsUsed}`;
+  const payload = {
+    messageId: input.messageId ?? `server:${toolCallId}`,
+    toolName: input.toolName,
+    state: "output-available",
+    input: input.input,
+    output: input.output,
+    ...metadata,
+  };
+  return {
+    eventKey: `tool-exec:${operationKey}:${stepsUsed}`,
+    type: "tool_call.completed",
+    toolCallId,
+    payload,
+  };
+}
+
+export type ConductorPhaseRecoveryPayload = {
+  sourcePhase: string;
+  recoveryPhase: string;
+  parentArtifactHash: string;
+  artifactRevision?: string;
+  reason: string;
+  invalidatedPhases: string[];
+  continuation: "next_phase";
+  handoffId?: string;
+  state: Record<string, unknown>;
+};
 
 /** Rebuild the persisted transcript without mutating or repairing stored message state. */
 export function projectChatMessages(events: LoopBuildEvent[]): UIMessage[] {

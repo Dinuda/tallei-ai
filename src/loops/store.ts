@@ -9,6 +9,7 @@ import {
   buildCommandResult,
   commitBuildArtifact,
   createBuildState,
+  recoverBuildState,
   loopBuildStateSchema,
   type BuildPhase,
   type LoopBuildState,
@@ -20,8 +21,15 @@ import {
   listAuthorizedBuildEvents,
   listAuthorizedRunEvents,
   projectChatMessages,
+  type LoopBuildEvent,
   type NewLoopBuildEvent,
 } from "./build-events.js";
+import {
+  projectBuildStateFromEvents,
+  projectLoopBuild,
+  type LoopBuildProjection,
+  type LoopBuildProjectionContext,
+} from "./build-state-projection.js";
 
 export type LoopRow = {
   id: string;
@@ -186,30 +194,32 @@ export async function getLoop(auth: AuthContext, loopId: string) {
 }
 
 export async function getLatestSpec(auth: AuthContext, loopId: string): Promise<LoopSpec | null> {
-  const state = await getLatestBuildState(auth, loopId);
-  if (!state) return null;
-  return projectLoopSpec(state);
+  const projection = await getLoopBuildProjection(auth, loopId);
+  return projection.spec;
 }
 
 export async function getLatestBuildState(auth: AuthContext, loopId: string): Promise<LoopBuildState | null> {
-  const result = await pool.query<{ state: unknown }>(
-    `SELECT event.payload->'state' AS state
-     FROM loop_build_events event
-     INNER JOIN loops loop ON loop.id = event.loop_id
-     WHERE event.loop_id = $1
-       AND event.thread_kind = 'build'
-       AND event.run_id IS NULL
-       AND event.event_type = 'artifact.committed'
-       AND loop.tenant_id = $2
-       AND loop.user_id = $3
-     ORDER BY event.sequence DESC
-     LIMIT 1`,
-    [loopId, auth.tenantId, auth.userId],
-  );
-  const row = result.rows[0];
-  if (!row) return null;
-  return loopBuildStateSchema.parse(row.state);
+  const projection = await getLoopBuildProjection(auth, loopId);
+  return projection.state;
 }
+
+export async function getLoopBuildProjection(
+  auth: AuthContext,
+  loopId: string,
+  context: LoopBuildProjectionContext = {},
+): Promise<LoopBuildProjection> {
+  const events = await getBuildEvents(auth, loopId);
+  return projectLoopBuild(events, context);
+}
+
+export function projectLoopBuildFromEvents(
+  events: LoopBuildEvent[],
+  context: LoopBuildProjectionContext = {},
+): LoopBuildProjection {
+  return projectLoopBuild(events, context);
+}
+
+export { projectBuildStateFromEvents };
 
 export async function commitLoopBuildArtifact(input: {
   auth: AuthContext;
@@ -262,12 +272,66 @@ export async function commitLoopBuildArtifact(input: {
   }
 }
 
+export async function recoverLoopBuildPhase(input: {
+  auth: AuthContext;
+  loopId: string;
+  phase: BuildPhase;
+  reason: string;
+  parentArtifactHash: string;
+}): Promise<{ state: LoopBuildState; invalidatedPhases: BuildPhase[]; recovered: boolean }> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const owner = await client.query(
+      `SELECT id FROM loops WHERE id = $1 AND tenant_id = $2 AND user_id = $3 FOR UPDATE`,
+      [input.loopId, input.auth.tenantId, input.auth.userId],
+    );
+    if (!owner.rows[0]) throw new Error("Loop not found");
+    const latest = await getLatestArtifactEvent(client, input.loopId);
+    if (!latest?.payload.state) throw new Error("Loop build state not found");
+    const current = loopBuildStateSchema.parse(latest.payload.state);
+    if (current.buildPhase === input.phase && !current.artifacts[input.phase]) {
+      await client.query("COMMIT");
+      return { state: current, invalidatedPhases: [], recovered: false };
+    }
+    const recovered = recoverBuildState({ state: current, phase: input.phase, reason: input.reason });
+    const artifactRevision = current.artifacts[input.phase]?.artifactHash ?? input.parentArtifactHash;
+    await appendLoopBuildEventsWithClient({
+      client,
+      loopId: input.loopId,
+      events: [{
+        eventKey: `phase-recovery:${input.phase}:${artifactRevision}:${createHash("sha256").update(input.reason).digest("hex")}`,
+        type: "phase.recovery_requested",
+        payload: {
+          sourcePhase: current.buildPhase,
+          recoveryPhase: input.phase,
+          parentArtifactHash: input.parentArtifactHash,
+          artifactRevision,
+          reason: input.reason,
+          invalidatedPhases: recovered.invalidatedPhases,
+          continuation: "next_phase",
+          state: recovered.state,
+        },
+      }],
+    });
+    await client.query(`UPDATE loops SET updated_at = NOW() WHERE id = $1`, [input.loopId]);
+    await client.query("COMMIT");
+    return { ...recovered, recovered: true };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getLatestSpecRevision(loopId: string): Promise<number> {
   const result = await pool.query<{ revision: string }>(
     `SELECT COALESCE(MAX(sequence), 0)::text AS revision
      FROM loop_build_events
      WHERE loop_id = $1 AND thread_kind = 'build' AND run_id IS NULL
-       AND event_type = 'artifact.committed'`,
+       AND event_type = 'artifact.committed'
+       AND payload->>'phase' IN ('intent', 'blueprint', 'connectors', 'bindings', 'review')`,
     [loopId],
   );
   return Number.parseInt(result.rows[0]?.revision ?? "0", 10);
@@ -848,31 +912,21 @@ export async function getLoopBuildMeta(
   auth: AuthContext,
   loopId: string,
 ): Promise<import("./loop-chat.js").LoopBuildMeta> {
-  const result = await pool.query<{ compiled_plan_id: string | null }>(
-    `SELECT plan.id AS compiled_plan_id
-     FROM compiled_plans plan
-     INNER JOIN loops loop ON loop.id = plan.loop_id
-     WHERE plan.loop_id = $1
-       AND loop.tenant_id = $2
-       AND loop.user_id = $3
-       AND plan.spec_revision = (
-         SELECT COALESCE(MAX(sequence), 0)
-         FROM loop_build_events
-         WHERE loop_id = $1 AND thread_kind = 'build' AND run_id IS NULL
-           AND event_type = 'artifact.committed'
-       )
-     ORDER BY plan.revision DESC
-     LIMIT 1`,
-    [loopId, auth.tenantId, auth.userId],
-  );
-  return { compiledPlanId: result.rows[0]?.compiled_plan_id ?? null };
+  const projection = await getLoopBuildProjection(auth, loopId);
+  const compileArtifact = projection.state?.artifacts.compile?.artifact as { compiledPlanId?: unknown } | undefined;
+  return {
+    compiledPlanId: typeof compileArtifact?.compiledPlanId === "string"
+      ? compileArtifact.compiledPlanId
+      : null,
+  };
 }
 
 export async function getBuildChatMessages(
   auth: AuthContext,
   loopId: string,
 ): Promise<import("ai").UIMessage[]> {
-  return projectChatMessages(await getBuildEvents(auth, loopId));
+  const projection = await getLoopBuildProjection(auth, loopId);
+  return projection.chatMessages;
 }
 
 export async function getBuildEvents(auth: AuthContext, loopId: string) {

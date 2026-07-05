@@ -199,6 +199,33 @@ export function createBuildState(): LoopBuildState {
   return { buildPhase: "intent", artifacts: {}, invalidations: [] };
 }
 
+export function recoverBuildState(input: {
+  state: LoopBuildState;
+  phase: BuildPhase;
+  reason: string;
+}): { state: LoopBuildState; invalidatedPhases: BuildPhase[] } {
+  const state = loopBuildStateSchema.parse(input.state);
+  const phaseIndex = BUILD_PHASES.indexOf(input.phase);
+  const invalidatedPhases = BUILD_PHASES
+    .slice(phaseIndex)
+    .filter((phase) => Boolean(state.artifacts[phase]));
+  const artifacts = { ...state.artifacts };
+  for (const phase of BUILD_PHASES.slice(phaseIndex)) delete artifacts[phase];
+  return {
+    invalidatedPhases,
+    state: loopBuildStateSchema.parse({
+      buildPhase: input.phase,
+      artifacts,
+      invalidations: [...state.invalidations, {
+        reason: input.reason,
+        invalidatedAt: new Date().toISOString(),
+        fromPhase: input.phase,
+        phases: invalidatedPhases,
+      }],
+    }),
+  };
+}
+
 export function commitBuildArtifact(input: {
   state: LoopBuildState;
   phase: BuildPhase;

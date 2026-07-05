@@ -123,7 +123,9 @@ export function ConductorBuilderLayout({
   const showTranscriptThinking = showThinking && !showComposerBusy;
   const suggestionsKey = promptSuggestions.map((suggestion) => suggestion.id).join("|");
   const [dismissedSuggestionsKey, setDismissedSuggestionsKey] = useState<string | null>(null);
-  const showPromptSuggestions = promptSuggestions.length > 0 && dismissedSuggestionsKey !== suggestionsKey;
+  const showPromptSuggestions = promptSuggestions.length > 0
+    && promptSuggestionsQuestion.trim().length > 0
+    && dismissedSuggestionsKey !== suggestionsKey;
   const suggestionOptions = useMemo(
     () => promptSuggestions.map((suggestion) => ({
       id: suggestion.id,

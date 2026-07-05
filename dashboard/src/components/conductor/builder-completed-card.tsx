@@ -61,7 +61,7 @@ export function BuilderCompletedCard({
   const styles = variantStyles[variant];
 
   return (
-    <div className={cn("border px-4 py-3", styles.border, styles.bg, className)} data-transcript-block>
+    <div className={cn("w-full border px-4 py-3", styles.border, styles.bg, className)} data-transcript-block>
       <div className="flex items-center gap-3">
         {iconSrc ? (
           <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-[var(--ed-border-light)] bg-white">

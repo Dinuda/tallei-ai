@@ -263,7 +263,7 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
   assert.doesNotMatch(prompt, /reviewOutcomeBrief/);
   assert.match(prompt, /do not narrate a next action/i);
   assert.match(prompt, /immediately emitting the corresponding tool call/i);
-  assert.match(prompt, /recoverToPhase/);
+  assert.match(prompt, /Phase recovery crosses a server handoff/);
 });
 
 test("buildConductorSystemPrompt steers confirmOutcomeBrief when roster is already prepared", () => {
@@ -273,15 +273,39 @@ test("buildConductorSystemPrompt steers confirmOutcomeBrief when roster is alrea
     confirmationHash: computeOutcomeBriefHash(spec),
     connectedToolkits: [],
     buildPhase: "review",
-    reviewProgress: {
-      bindingHash: "abc123",
-      rosterPrepared: true,
-      confirmationComplete: false,
+    phaseProgress: {
+      phase: "review",
+      status: "in_progress",
       nextTool: "confirmOutcomeBrief",
+      allowedTools: ["confirmOutcomeBrief"],
+      instruction: "The specialist team roster is already shown. Call confirmOutcomeBrief now in this step. Do not summarize or repeat the roster.",
+      handoffPending: true,
+      terminal: false,
     },
   });
   assert.match(prompt, /Call confirmOutcomeBrief now/i);
   assert.match(prompt, /Do not summarize or repeat the roster/i);
+});
+
+test("buildConductorSystemPrompt uses phase progress instruction for connectors", () => {
+  const spec = createEmptyLoopSpec(workspaceId);
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    connectedToolkits: [],
+    buildPhase: "connectors",
+    phaseProgress: {
+      phase: "connectors",
+      status: "in_progress",
+      nextTool: "pickConnectorApp",
+      allowedTools: ["pickConnectorApp"],
+      instruction: "Call pickConnectorApp for each remaining unresolved app role. Do not summarize app choices in plain text.",
+      handoffPending: true,
+      terminal: false,
+    },
+  });
+  assert.match(prompt, /pickConnectorApp/);
+  assert.match(prompt, /Do not summarize app choices/i);
 });
 
 test("buildConductorSystemPrompt includes full spec JSON once", () => {
@@ -312,13 +336,19 @@ test("Conductor refreshes confirmation state per step without a nested summary m
     "utf8",
   ));
 
-  assert.match(source, /prepareStep:\s*\(\) => \(\{ system: buildCurrentSystemPrompt\(\), activeTools:/);
+  assert.match(source, /prepareStep:\s*async \(\) => \{/);
+  assert.match(source, /system: buildCurrentSystemPrompt\(\)/);
+  assert.match(source, /toolChoice: resolveConductorToolChoice\(activeTools\.length, config\.conductorModel\)/);
   assert.match(source, /confirmationHash:\s*currentBuildState!\.artifacts\.bindings\?\.artifactHash\s*\?\?\s*computeOutcomeBriefHash\(currentSpec!\)/);
   assert.match(source, /presentAgentTeam:\s*tool/);
   assert.match(source, /Review isn't complete yet\. Confirm the specialist team summary before compiling\./);
   assert.match(source, /recoverToPhase:\s*"review"/);
-  assert.match(source, /deriveReviewProgress/);
-  assert.match(source, /reviewProgress\?\.nextTool/);
+  assert.match(source, /deriveBuildPhaseProgress/);
+  assert.match(source, /phaseProgress/);
   assert.match(source, /activeToolsForPhase/);
+  assert.match(source, /requestPhaseContract/);
+  assert.match(source, /requestPhaseContract\.allowedTools\.includes\(toolName\)/);
+  assert.doesNotMatch(source, /lastToolExecution\?\.recoverToPhase/);
+  assert.match(source, /recoverLoopBuildToCompile/);
   assert.doesNotMatch(source, /summarizeOutcomeBriefForUser|reviewOutcomeBrief:\s*tool/);
 });

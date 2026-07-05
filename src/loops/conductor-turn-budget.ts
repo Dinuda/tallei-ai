@@ -1,25 +1,25 @@
 import type { BuildPhase } from "./build-state.js";
 
+export {
+  CONDUCTOR_BUDGET_EXHAUSTED_QUESTION,
+  isBuildIncomplete,
+  isRecoverableConductorExecution,
+  type ConductorStallResult,
+} from "../../shared/conductor-turn-budget.js";
+
+export const CONDUCTOR_PHASE_STEP_LIMITS: Record<BuildPhase, number> = {
+  intent: 6,
+  blueprint: 4,
+  connectors: 8,
+  bindings: 12,
+  review: 6,
+  compile: 8,
+  test: 6,
+  activation: 6,
+};
+
 export function conductorStepLimitForPhase(phase: BuildPhase): number {
-  switch (phase) {
-    case "intent":
-      return 6;
-    case "connectors":
-      return 8;
-    case "bindings":
-      return 12;
-    case "review":
-      return 6;
-    case "compile":
-      return 8;
-    case "test":
-      return 6;
-    case "activation":
-      return 6;
-    case "blueprint":
-    default:
-      return 4;
-  }
+  return CONDUCTOR_PHASE_STEP_LIMITS[phase] ?? CONDUCTOR_PHASE_STEP_LIMITS.blueprint;
 }
 
 export function isActionableConductorPhase(phase: BuildPhase | null | undefined): boolean {

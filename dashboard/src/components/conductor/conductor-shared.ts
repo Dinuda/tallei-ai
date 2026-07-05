@@ -10,21 +10,35 @@ import {
   resolveConfirmOutcomeBriefActionFromSelection,
   type ConfirmOutcomeBriefAction,
 } from "@/lib/confirm-outcome-brief-action";
+import { findActivationReplyOption } from "@/lib/conductor-activation-confirm";
+import {
+  isBuildTerminalForStall,
+  isPhaseOpenForStallRecovery,
+} from "@/lib/conductor-stall-recovery";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
 import {
-  CONDUCTOR_CONTINUE_SUGGESTIONS,
-  CONDUCTOR_STALL_QUESTION,
-  evaluateConductorStall,
+  CONDUCTOR_BUDGET_EXHAUSTED_QUESTION,
   isActionableConductorPhase,
-  isBuildIncomplete,
   isRecoverableConductorExecution,
   type ConductorBuildPhase,
   type ConductorStallResult,
 } from "@/lib/conductor-turn-budget";
-import { isReviewConfirmationHandoffPending } from "../../../../shared/conductor-review-handoff.js";
+import { isPhaseHandoffPending, type PhaseHandoffProgress } from "@/lib/conductor-phase-handoff";
+
+export type { PhaseHandoffProgress };
+
+export type ConductorToolResultStatus = "failed" | "blocked" | "recovering" | undefined;
+
+export function resolveConductorToolResultStatus(output: unknown): ConductorToolResultStatus {
+  if (!output || typeof output !== "object") return undefined;
+  const execution = output as { ok?: boolean; turnOutcome?: string; recoveryPhase?: string };
+  if (execution.recoveryPhase) return "recovering";
+  if (execution.ok !== false) return undefined;
+  return execution.turnOutcome === "blocked" ? "blocked" : "failed";
+}
 
 export type BindingRow = { connector: string; capability: string; role?: string };
 
@@ -215,16 +229,19 @@ export type AskQuestionToolPart = {
 
 export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
-export { CONDUCTOR_CONTINUE_SUGGESTIONS, CONDUCTOR_STALL_QUESTION };
-
-type ConductorToolExecution = {
+export type ConductorToolExecution = {
   ok: boolean;
   operationKey: string;
   parentArtifactHash: string;
   phaseCompleted: boolean;
   requiresUserInput: boolean;
   retryAllowed: boolean;
+  turnOutcome?: string;
+  continuation?: string;
   recoverToPhase?: string;
+  nextPhase?: string;
+  handoffId?: string;
+  compiledPlanId?: string;
 };
 
 function readExecutionFromOutput(output: Record<string, unknown>): ConductorToolExecution | null {
@@ -238,7 +255,12 @@ function readExecutionFromOutput(output: Record<string, unknown>): ConductorTool
     phaseCompleted: output.phaseCompleted === true,
     requiresUserInput: output.requiresUserInput === true,
     retryAllowed: output.retryAllowed === true,
+    ...(typeof output.turnOutcome === "string" ? { turnOutcome: output.turnOutcome } : {}),
+    ...(typeof output.continuation === "string" ? { continuation: output.continuation } : {}),
     ...(typeof output.recoverToPhase === "string" ? { recoverToPhase: output.recoverToPhase } : {}),
+    ...(typeof output.nextPhase === "string" ? { nextPhase: output.nextPhase } : {}),
+    ...(typeof output.handoffId === "string" ? { handoffId: output.handoffId } : {}),
+    ...(typeof output.compiledPlanId === "string" ? { compiledPlanId: output.compiledPlanId } : {}),
   };
 }
 
@@ -254,8 +276,28 @@ function getLastAssistantExecutions(messages: UIMessage[]): ConductorToolExecuti
   });
 }
 
+export { isBuildTerminalForStall } from "@/lib/conductor-stall-recovery";
+
+export function findPendingConductorPhaseHandoff(messages: UIMessage[]): ConductorToolExecution | null {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return null;
+  const executions = getLastAssistantExecutions(messages);
+  for (let index = executions.length - 1; index >= 0; index -= 1) {
+    const execution = executions[index]!;
+    if ((execution.continuation === "next_phase" || execution.continuation === "continue_phase")
+      && (execution.turnOutcome === "phase_complete" || execution.turnOutcome === "progress")
+      && execution.nextPhase
+      && execution.handoffId
+      && !hasPriorTerminalExecutionForOperation(messages, execution.operationKey, execution.parentArtifactHash)) {
+      return execution;
+    }
+  }
+  return null;
+}
+
 function hasTerminalExecution(executions: ConductorToolExecution[]): boolean {
   return executions.some((execution) => {
+    if (execution.turnOutcome === "build_complete") return true;
     const output = {
       ok: execution.ok,
       retryAllowed: execution.retryAllowed,
@@ -278,51 +320,33 @@ function lastAssistantIsTextOnly(messages: UIMessage[]): boolean {
   return hasText && !hasToolOutput;
 }
 
+function isBudgetExhaustedEnding(messages: UIMessage[]): boolean {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return false;
+  const executions = getLastAssistantExecutions(messages);
+  if (executions.some((execution) => execution.turnOutcome === "budget_exhausted")) return true;
+  return (last.parts ?? []).some((part) =>
+    part.type === "text"
+    && part.text.includes(CONDUCTOR_BUDGET_EXHAUSTED_QUESTION.slice(0, 48)));
+}
+
 export function findConductorStall(input: {
   messages: UIMessage[];
   buildPhase: ConductorBuildPhase | null | undefined;
   missingSlots: string[];
   chatBusy: boolean;
   loopStatus?: string;
+  phaseProgress?: PhaseHandoffProgress | null;
 }): ConductorStallResult {
-  const { messages, buildPhase, missingSlots, chatBusy, loopStatus } = input;
-  const last = messages.at(-1);
-  const executions = getLastAssistantExecutions(messages);
-
-  const reviewConfirmationHandoffPending = isReviewConfirmationHandoffPending({ messages, buildPhase });
-
-  return evaluateConductorStall({
-    chatBusy,
-    hasMessages: messages.length > 0,
-    actionablePhase: isActionableConductorPhase(buildPhase),
-    hasUnansweredUiTools: hasUnansweredUiToolCalls(messages),
-    buildIncomplete: isBuildIncomplete(buildPhase, missingSlots, loopStatus),
-    lastRoleIsAssistant: Boolean(last && last.role === "assistant"),
-    hasTerminalExecution: hasTerminalExecution(executions),
-    textOnlyEnding: lastAssistantIsTextOnly(messages),
-    reviewConfirmationHandoffPending,
-    wouldAutoContinue: executions.length > 0 && executions.every((execution) => {
-      const recoverable = isRecoverableConductorExecution({
-        ok: execution.ok,
-        retryAllowed: execution.retryAllowed,
-        recoverToPhase: execution.recoverToPhase,
-      });
-      if (recoverable) return true;
-      return execution.ok
-        && !execution.phaseCompleted
-        && !execution.requiresUserInput
-        && !hasPriorTerminalExecutionForOperation(
-          messages,
-          execution.operationKey,
-          execution.parentArtifactHash,
-        );
-    }),
-    hasExecutions: executions.length > 0,
-    hasAssistantParts: Boolean(last?.parts?.length),
-  });
+  void input;
+  return { stalled: false };
 }
 
-export { isReviewConfirmationHandoffPending } from "../../../../shared/conductor-review-handoff.js";
+export function isConductorBudgetExhausted(messages: UIMessage[]): boolean {
+  return isBudgetExhaustedEnding(messages);
+}
+
+export { isPhaseHandoffPending, isReviewConfirmationHandoffPending } from "@/lib/conductor-phase-handoff";
 
 export { isActionableConductorPhase, type ConductorBuildPhase, type ConductorStallResult };
 
@@ -390,10 +414,13 @@ function hasPresentReplyOptionsInput(input: unknown): boolean {
 
 function hasConfirmOutcomeBriefInput(input: unknown): boolean {
   if (!input || typeof input !== "object") return false;
-  const row = input as { briefHash?: string };
+  const row = input as { briefHash?: string; question?: string; options?: unknown[] };
   return typeof row.briefHash === "string"
     && row.briefHash.trim().length > 0
-    && hasQuestionOptionsInput(input);
+    && typeof row.question === "string"
+    && row.question.trim().length > 0
+    && Array.isArray(row.options)
+    && row.options.length >= 2;
 }
 
 function hasPickConnectorAppInput(input: unknown): boolean {
@@ -440,8 +467,97 @@ function isUnansweredUiToolPart(part: { type: string; toolName?: string; state?:
   return isResumableUiToolPart(toolName, part.state, (part as { input?: unknown }).input, part.output);
 }
 
+function isPhaseProgressPendingUiToolAnswered(
+  messages: UIMessage[],
+  pending: NonNullable<PhaseHandoffProgress["pendingUiTool"]>,
+): boolean {
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (!isToolPart(part.type)) continue;
+      const toolPart = part as DynamicToolUIPart & { output?: unknown };
+      if (toolPart.toolCallId !== pending.toolCallId) continue;
+      return toolPart.state === "output-available" && toolPart.output != null;
+    }
+  }
+  return false;
+}
+
+function lastAssistantEndedWithAnsweredUiTool(messages: UIMessage[]): boolean {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return false;
+  const allParts = last.parts ?? [];
+  const lastStepStartIndex = allParts.reduce(
+    (lastIndex, part, index) => part.type === "step-start" ? index : lastIndex,
+    -1,
+  );
+  const parts = allParts.slice(lastStepStartIndex + 1);
+  const toolParts = parts.filter((part) => isToolPart(part.type));
+  if (toolParts.length === 0) return false;
+  if (toolParts.some((part) => isUnansweredUiToolPart(part as { type: string; toolName?: string; state?: string; output?: unknown }))) {
+    return false;
+  }
+  const allToolsFinished = toolParts.every((part) => {
+    const toolPart = part as DynamicToolUIPart & { output?: unknown };
+    return (toolPart.state === "output-available" && toolPart.output != null)
+      || toolPart.state === "output-error";
+  });
+  if (!allToolsFinished) return false;
+  const lastToolPart = toolParts.at(-1)!;
+  const lastToolName = resolveToolPartName(lastToolPart as { type: string; toolName?: string });
+  if (!CONDUCTOR_UI_ONLY_TOOLS.has(lastToolName)) return false;
+  return toolParts.some((part) => {
+    const toolName = resolveToolPartName(part as { type: string; toolName?: string });
+    if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName)) return false;
+    const toolPart = part as DynamicToolUIPart & { output?: unknown };
+    return toolPart.state === "output-available" && toolPart.output != null;
+  });
+}
+
+function pendingOutcomeBriefFromPhaseProgress(
+  messages: UIMessage[],
+  phaseProgress?: PhaseHandoffProgress | null,
+): PendingOutcomeBrief | null {
+  const pending = phaseProgress?.pendingUiTool;
+  if (!pending || pending.toolName !== "confirmOutcomeBrief") return null;
+  if (isPhaseProgressPendingUiToolAnswered(messages, pending)) return null;
+  const input = pending.input as ConfirmOutcomeBriefInput | undefined;
+  if (!input?.briefHash || !input.question || !input.options?.length) return null;
+  return {
+    toolCallId: pending.toolCallId,
+    confirmBriefHash: input.briefHash,
+    confirmPrompt: {
+      question: input.question,
+      options: input.options,
+      recommendedOptionIds: input.recommendedOptionIds,
+      allowOther: false,
+    },
+  };
+}
+
+/** Fingerprint tool part states so effects can react to addToolOutput without message count changes. */
+export function messagesUiStateRevision(messages: UIMessage[]): string {
+  return messages.map((message) => {
+    const toolStates = (message.parts ?? [])
+      .filter((part) => isToolPart(part.type))
+      .map((part) => {
+        const toolPart = part as DynamicToolUIPart & { output?: unknown };
+        return `${toolPart.toolCallId ?? ""}:${toolPart.state ?? ""}:${toolPart.output != null ? 1 : 0}`;
+      })
+      .join(",");
+    return `${message.id}:${toolStates}`;
+  }).join("|");
+}
+
 /** Any UI-only tool call in the transcript still waiting for addToolOutput. */
-export function hasUnansweredUiToolCalls(messages: UIMessage[]): boolean {
+export function hasUnansweredUiToolCalls(
+  messages: UIMessage[],
+  phaseProgress?: PhaseHandoffProgress | null,
+): boolean {
+  if (phaseProgress?.pendingUiTool
+    && !isPhaseProgressPendingUiToolAnswered(messages, phaseProgress.pendingUiTool)) {
+    return true;
+  }
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts ?? []) {
@@ -502,26 +618,20 @@ export function shouldAutoSendConductorChat({
   buildPhase,
   missingSlots = [],
   loopStatus,
+  phaseProgress,
 }: {
   messages: UIMessage[];
   buildPhase?: ConductorBuildPhase | null;
   missingSlots?: string[];
   loopStatus?: string;
+  phaseProgress?: PhaseHandoffProgress | null;
 }): boolean {
-  if (hasUnansweredUiToolCalls(messages)) return false;
+  if (hasUnansweredUiToolCalls(messages, phaseProgress)) return false;
   if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) return false;
+  if (lastAssistantEndedWithAnsweredUiTool(messages)) return true;
   const last = messages.at(-1);
   if (!last || last.role !== "assistant") return false;
-  if (findConductorStall({
-    messages,
-    buildPhase,
-    missingSlots,
-    chatBusy: false,
-    loopStatus,
-  }).stalled) {
-    return false;
-  }
-  if (isReviewConfirmationHandoffPending({ messages, buildPhase })
+  if (isPhaseHandoffPending({ messages, buildPhase, phaseProgress })
     && lastAssistantIsTextOnly(messages)) {
     return true;
   }
@@ -532,18 +642,14 @@ export function shouldAutoSendConductorChat({
     const parsed = readExecutionFromOutput(toolPart.output as Record<string, unknown>);
     return parsed ? [parsed] : [];
   });
-  if (executions.length === 0) return true;
+  if (executions.length === 0) return false;
   return executions.every((execution) => {
-    const recoverable = isRecoverableConductorExecution({
-      ok: execution.ok,
-      retryAllowed: execution.retryAllowed,
-      recoverToPhase: execution.recoverToPhase,
-    });
-    if (recoverable) return true;
-    return execution.ok
-      && !execution.phaseCompleted
-      && !execution.requiresUserInput
-      && !hasPriorTerminalExecutionForOperation(messages, execution.operationKey, execution.parentArtifactHash);
+    if (execution.turnOutcome === "waiting_for_user") return false;
+    if (execution.turnOutcome === "build_complete") return false;
+    if (execution.turnOutcome === "blocked") return false;
+    if (execution.turnOutcome === "budget_exhausted") return false;
+    if (execution.turnOutcome === "phase_complete" && execution.continuation === "next_phase") return true;
+    return false;
   });
 }
 
@@ -574,7 +680,12 @@ function hasPriorTerminalExecutionForOperation(
   return false;
 }
 
-export function findPendingOutcomeBrief(messages: UIMessage[]): PendingOutcomeBrief | null {
+export function findPendingOutcomeBrief(
+  messages: UIMessage[],
+  phaseProgress?: PhaseHandoffProgress | null,
+): PendingOutcomeBrief | null {
+  const fromProgress = pendingOutcomeBriefFromPhaseProgress(messages, phaseProgress);
+  if (fromProgress) return fromProgress;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.role !== "assistant") continue;
@@ -680,6 +791,7 @@ export function findConnectorPickInputForToolCall(
 export function findPendingInteractivePrompts(
   messages: UIMessage[],
   spec: Record<string, unknown> | null = null,
+  phaseProgress?: PhaseHandoffProgress | null,
 ): PendingInteractivePrompt[] {
   const discovery = findLatestConnectorDiscovery(messages);
   const prompts: PendingInteractivePrompt[] = [];
@@ -709,9 +821,37 @@ export function findPendingInteractivePrompts(
         const askPart = part as AskQuestionToolPart;
         if (isResumableUiToolPart("askQuestion", askPart.state, askPart.input, askPart.output)) {
           const input = askPart.input;
-          if (!hasQuestionOptionsInput(input)) continue;
+          if (!input || !hasQuestionOptionsInput(input)) continue;
           prompts.push({ toolCallId: askPart.toolCallId, toolName: "askQuestion", input });
         }
+      }
+    }
+  }
+
+  const persistedPending = phaseProgress?.pendingUiTool;
+  if (persistedPending
+    && !prompts.some((prompt) => prompt.toolCallId === persistedPending.toolCallId)
+    && !isPhaseProgressPendingUiToolAnswered(messages, persistedPending)) {
+    if (persistedPending.toolName === "askQuestion"
+      && hasQuestionOptionsInput(persistedPending.input)) {
+      prompts.push({
+        toolCallId: persistedPending.toolCallId,
+        toolName: "askQuestion",
+        input: persistedPending.input as AskQuestionInput,
+      });
+    } else if (discovery
+      && persistedPending.toolName === "pickConnectorApp"
+      && hasPickConnectorAppInput(persistedPending.input)) {
+      const input = buildConnectorPickInput(
+        discovery,
+        (persistedPending.input as PickConnectorAppInput).outcomeId,
+      );
+      if (input) {
+        prompts.push({
+          toolCallId: persistedPending.toolCallId,
+          toolName: "pickConnectorApp",
+          input,
+        });
       }
     }
   }
@@ -827,6 +967,49 @@ export function promptVariantForQuestion(questionId: string | undefined): "conne
 }
 
 export { resolveConfirmOutcomeBriefActionFromSelection };
+
+function isContinueLikeComposerMessage(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return ["continue", "yes", "okay", "ok", "go ahead", "proceed", "sure"].includes(normalized);
+}
+
+/** Route stall/continue chips to an open event-log pending UI tool when possible. */
+export function tryResolveContinueAsPendingUiToolAnswer(
+  text: string,
+  phaseProgress?: PhaseHandoffProgress | null,
+): { tool: string; toolCallId: string; output: Record<string, unknown> } | null {
+  const pending = phaseProgress?.pendingUiTool;
+  if (!pending || !isContinueLikeComposerMessage(text)) return null;
+  if (pending.toolName === "confirmOutcomeBrief") {
+    const input = pending.input as ConfirmOutcomeBriefInput | undefined;
+    const confirmOption = input?.options?.find((option) => option.value === "confirm" || option.id === "confirm");
+    if (!input?.briefHash || !confirmOption) return null;
+    return {
+      tool: "confirmOutcomeBrief",
+      toolCallId: pending.toolCallId,
+      output: {
+        action: "confirm" as ConfirmOutcomeBriefAction,
+        briefHash: input.briefHash,
+        answerText: text.trim(),
+        selectedOptionIds: [confirmOption.id],
+        selectedValues: [confirmOption.value],
+      },
+    };
+  }
+  if (pending.toolName === "presentReplyOptions") {
+    const activateOption = findActivationReplyOption(pending.input);
+    if (!activateOption) return null;
+    return {
+      tool: "presentReplyOptions",
+      toolCallId: pending.toolCallId,
+      output: {
+        selectedOptionId: activateOption.id,
+        message: activateOption.message || text.trim(),
+      },
+    };
+  }
+  return null;
+}
 
 export function connectorLogoUrl(slug: string): string {
   return `https://logos.composio.dev/api/${slug}`;

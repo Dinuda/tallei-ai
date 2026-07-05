@@ -101,7 +101,7 @@ function AssistantTranscriptTurn({
   };
 
   return (
-    <div className="conductor-transcript-stream max-w-full min-w-0">
+    <div className="conductor-transcript-stream w-full max-w-full min-w-0">
       {segments.map((segment, segmentIndex) => {
         if (segment.type === "patch-beat") {
           return (
@@ -169,7 +169,7 @@ export function ConductorBuilderChat({
 
         {messages.map((message) => (
           <Message key={message.id} from={message.role}>
-            <MessageContent>
+            <MessageContent className={message.role === "assistant" ? "w-full" : undefined}>
               {message.role === "user" ? (
                 message.parts?.map((part, i) =>
                   part.type === "text" ? <span key={i}>{part.text}</span> : null,

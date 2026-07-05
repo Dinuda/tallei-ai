@@ -88,6 +88,73 @@ function hasLaterUserMessage(messages: UIMessage[], assistantIndex: number, last
   return messages.slice(assistantIndex + 1, lastUserIndex + 1).some((message) => message.role === "user");
 }
 
+function resolveToolPartName(part: { type: string; toolName?: string }): string {
+  if (part.type === "dynamic-tool" && part.toolName) return part.toolName;
+  return part.type.replace(/^tool-/, "");
+}
+
+function extractUserText(message: UIMessage): string {
+  return (message.parts ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
+function firstUserTextAfter(messages: UIMessage[], assistantIndex: number, lastUserIndex: number): string {
+  for (let index = assistantIndex + 1; index <= lastUserIndex; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const text = extractUserText(message);
+    if (text) return text;
+  }
+  return "";
+}
+
+function isContinueLikeMessage(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return ["continue", "yes", "okay", "ok", "go ahead", "proceed", "sure"].includes(normalized);
+}
+
+function inferUiToolOutputFromUserText(
+  toolName: string,
+  input: unknown,
+  userText: string,
+): unknown | null {
+  if (toolName === "confirmOutcomeBrief" && isContinueLikeMessage(userText) && isRecord(input)) {
+    const options = Array.isArray(input.options)
+      ? input.options as Array<{ id?: string; value?: string; label?: string }>
+      : [];
+    const confirmOption = options.find((option) => option.value === "confirm" || option.id === "confirm");
+    if (confirmOption?.id && confirmOption.value) {
+      return {
+        action: "confirm",
+        briefHash: input.briefHash,
+        answerText: userText,
+        selectedOptionIds: [confirmOption.id],
+        selectedValues: [confirmOption.value],
+      };
+    }
+  }
+  return null;
+}
+
+function repairUiToolWithUserAnswer(
+  rawPart: UIMessage["parts"][number],
+  userText: string,
+): UIMessage["parts"][number] | null {
+  const part = rawPart as { type: string; toolName?: string; input?: unknown };
+  const resolvedToolName = resolveToolPartName(part);
+  if (!CONDUCTOR_UI_ONLY_TOOLS.has(resolvedToolName)) return null;
+  const output = inferUiToolOutputFromUserText(resolvedToolName, part.input, userText);
+  if (!output) return null;
+  return {
+    ...rawPart,
+    state: "output-available",
+    output,
+  } as UIMessage["parts"][number];
+}
+
 function repairSupersededToolPart(rawPart: UIMessage["parts"][number]): UIMessage["parts"][number] {
   return {
     ...rawPart,
@@ -98,7 +165,7 @@ function repairSupersededToolPart(rawPart: UIMessage["parts"][number]): UIMessag
       skipped: true,
     },
     errorText: SUPERSEDED_TOOL_ERROR,
-  } as UIMessage["parts"][number];
+  } as unknown as UIMessage["parts"][number];
 }
 
 export type ConductorReplaySanitizeStats = {
@@ -108,6 +175,8 @@ export type ConductorReplaySanitizeStats = {
 
 export type SanitizeConductorReplayOptions = {
   aggressive?: boolean;
+  /** Event-log open UI tool calls that should not be marked superseded during replay. */
+  preserveOpenUiToolCallIds?: ReadonlySet<string>;
 };
 
 function findLastUserMessageIndex(messages: UIMessage[]): number {
@@ -141,15 +210,26 @@ export function sanitizeConductorChatMessagesForModelReplay(
 
     let changed = false;
     const parts = (message.parts ?? []).flatMap((rawPart) => {
-      const part = rawPart as { type: string; toolCallId?: string; state?: string };
+      const part = rawPart as { type: string; toolCallId?: string; state?: string; input?: unknown; toolName?: string };
       if (!isUnresolvedToolPart(part)) return [rawPart];
+      const toolCallId = part.toolCallId ?? "";
+      const userText = firstUserTextAfter(messages, index, lastUserIndex);
+      const resolvedFromUser = userText ? repairUiToolWithUserAnswer(rawPart, userText) : null;
+      if (resolvedFromUser) {
+        changed = true;
+        if (toolCallId) stats.repairedToolCallIds.push(toolCallId);
+        return [resolvedFromUser];
+      }
+      if (toolCallId && options.preserveOpenUiToolCallIds?.has(toolCallId)) {
+        return [rawPart];
+      }
       if (options.aggressive) {
         changed = true;
-        if (part.toolCallId) stats.repairedToolCallIds.push(part.toolCallId);
+        if (toolCallId) stats.repairedToolCallIds.push(toolCallId);
         return [];
       }
       changed = true;
-      if (part.toolCallId) stats.repairedToolCallIds.push(part.toolCallId);
+      if (toolCallId) stats.repairedToolCallIds.push(toolCallId);
       return [repairSupersededToolPart(rawPart)];
     });
 
@@ -198,15 +278,16 @@ export function findOrphanedToolCallIdsFromModelMessages(messages: ModelMessage[
 
 export async function prepareConductorModelMessagesForStream(
   messages: UIMessage[],
+  options: SanitizeConductorReplayOptions = {},
 ): Promise<{ modelMessages: ModelMessage[]; replayMessages: UIMessage[]; stats: ConductorReplaySanitizeStats }> {
-  let { messages: replayMessages, stats } = sanitizeConductorChatMessagesForModelReplay(messages);
+  let { messages: replayMessages, stats } = sanitizeConductorChatMessagesForModelReplay(messages, options);
   let modelMessages = await convertToModelMessages(replayMessages);
   let orphaned = findOrphanedToolCallIdsFromModelMessages(modelMessages);
   if (orphaned.length === 0) {
     return { modelMessages, replayMessages, stats };
   }
 
-  const aggressive = sanitizeConductorChatMessagesForModelReplay(messages, { aggressive: true });
+  const aggressive = sanitizeConductorChatMessagesForModelReplay(messages, { ...options, aggressive: true });
   replayMessages = aggressive.messages;
   stats = {
     repairedToolCallIds: [...new Set([...stats.repairedToolCallIds, ...aggressive.stats.repairedToolCallIds])],

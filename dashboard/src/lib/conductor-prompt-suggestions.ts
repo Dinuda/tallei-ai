@@ -1,10 +1,11 @@
 import type { UIMessage } from "ai";
 
 import {
-  CONDUCTOR_CONTINUE_SUGGESTIONS,
-  CONDUCTOR_STALL_QUESTION,
+  CONDUCTOR_BUDGET_EXHAUSTED_QUESTION,
   type ConductorBuildPhase,
 } from "@/lib/conductor-turn-budget";
+import type { PhaseHandoffProgress } from "@/lib/conductor-phase-handoff";
+import { isBuildTerminalForStall } from "@/lib/conductor-stall-recovery";
 
 export type ConductorPromptSuggestion = {
   id: string;
@@ -30,6 +31,8 @@ type DeriveSuggestionsInput = {
   chatBusy: boolean;
   explicitOptions?: ConductorPromptSuggestion[];
   isStalled?: boolean;
+  budgetExhausted?: boolean;
+  phaseProgress?: PhaseHandoffProgress | null;
   buildPhase?: ConductorBuildPhase | null;
 };
 
@@ -71,7 +74,7 @@ function scanToolPipeline(messages: UIMessage[]): {
       const output = toolPart.output as { ok?: boolean } | undefined;
       if (name === "compileLoop" && output?.ok) compileOk = true;
       if (name === "testRunLoop" && output?.ok) testOk = true;
-      if (name === "activateLoop" && output?.ok) activateOk = true;
+      if (name === "activateLoop" && output?.ok !== false) activateOk = true;
     }
   }
 
@@ -164,8 +167,12 @@ export function findPendingPresentReplyOptions(
 export function deriveConductorPromptSuggestionsQuestion(
   messages: UIMessage[],
   isStalled = false,
+  budgetExhausted = false,
+  buildTerminal = false,
 ): string {
-  if (isStalled) return CONDUCTOR_STALL_QUESTION;
+  if (buildTerminal) return "";
+  if (budgetExhausted) return CONDUCTOR_BUDGET_EXHAUSTED_QUESTION;
+  if (isStalled) return "How should I recover this setup step?";
   const text = getLastAssistantText(messages);
   if (!text) return "How would you like to proceed?";
 
@@ -185,8 +192,37 @@ export function deriveConductorPromptSuggestionsQuestion(
 export function deriveConductorPromptSuggestions(input: DeriveSuggestionsInput): ConductorPromptSuggestion[] {
   if (input.hasPendingQuestion || input.chatBusy) return [];
 
-  if (input.isStalled) {
-    return [...CONDUCTOR_CONTINUE_SUGGESTIONS];
+  if (isBuildTerminalForStall({ loopStatus: input.status, phaseProgress: input.phaseProgress })) {
+    return [];
+  }
+
+  const pipeline = scanToolPipeline(input.messages);
+  if (input.status === "active" || pipeline.activateOk) return [];
+
+  if (input.budgetExhausted || input.isStalled) {
+    const phase = input.buildPhase;
+    if (phase === "compile") {
+      return [
+        { id: "retry-compile", label: "Retry compile", message: "Retry the compile phase." },
+        { id: "revise-bindings", label: "Revise bindings", message: "Go back and revise the bindings before compiling again." },
+      ];
+    }
+    if (phase === "test") {
+      return [
+        { id: "retry-test", label: "Retry test", message: "Retry the test phase." },
+        { id: "recompile", label: "Recompile", message: "Rebuild the compiled plan first, then test again." },
+      ];
+    }
+    if (phase === "activation") {
+      return [
+        { id: "activate-now", label: "Activate now", message: "Activate the current tested plan." },
+        { id: "revise-setup", label: "Revise setup", message: "Go back and revise the setup before activating." },
+      ];
+    }
+    return [
+      { id: "fix-setup", label: "Fix setup", message: "Fix the current setup issue and continue." },
+      { id: "revise-setup", label: "Revise setup", message: "Go back and revise the setup." },
+    ];
   }
 
   if (input.explicitOptions?.length) {
@@ -199,7 +235,7 @@ export function deriveConductorPromptSuggestions(input: DeriveSuggestionsInput):
   const text = getLastAssistantText(input.messages);
   const lower = text.toLowerCase();
   const ready = input.missingSlots.length === 0;
-  const { compileOk, testOk, activateOk } = scanToolPipeline(input.messages);
+  const { compileOk, testOk, activateOk } = pipeline;
   const asksUser = /\?/.test(text)
     && /\bwould you\b|\bdo you want\b|\bshould i\b|\bready to\b|\blike me to\b|\bshall i\b/.test(lower);
 

@@ -11,6 +11,7 @@ import {
   projectLoopSpec,
   reviewArtifactSchema,
   type LoopBuildState,
+  type BuildPhase,
 } from "./build-state.js";
 import { computeOutcomeBriefHash } from "./outcome-brief.js";
 import type { IntentAnalysis } from "./intent-discovery.js";
@@ -600,8 +601,10 @@ function isSuccessfulPresentAgentTeam(output: unknown): boolean {
 export function deriveReviewProgress(
   state: LoopBuildState,
   messages: BuildEvidenceSource,
+  options?: { effectivePhase?: BuildPhase },
 ): ReviewProgress | null {
-  if (state.buildPhase !== "review" || !state.artifacts.bindings) return null;
+  const phase = options?.effectivePhase ?? state.buildPhase;
+  if (phase !== "review" || !state.artifacts.bindings) return null;
   const bindingHash = state.artifacts.bindings.artifactHash;
   const rosterTarget = reviewRosterTarget(bindingHash);
   const rosterPrepared = completedToolEvents(messages, "presentAgentTeam").some((event) => {

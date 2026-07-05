@@ -19,6 +19,16 @@ export function isOpenCodeZenChatCompletionsModel(model: string): boolean {
   );
 }
 
+/** OpenCode Zen's Console upstream rejects forced tool choice (HTTP 400). */
+export function resolveConductorToolChoice(
+  activeToolCount: number,
+  model: string,
+): "auto" | "none" | "required" {
+  if (activeToolCount === 0) return "none";
+  if (isOpenCodeZenChatCompletionsModel(model)) return "auto";
+  return "required";
+}
+
 export function looksLikeHostedOpenAiModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   if (!normalized) return false;

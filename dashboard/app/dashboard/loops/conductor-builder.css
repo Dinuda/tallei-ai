@@ -117,6 +117,12 @@
 .conductor-builder-chat .conductor-transcript-stream {
   display: flex;
   flex-direction: column;
+  width: 100%;
+}
+
+/* Tool/reply cards should span the assistant column; Message keeps max-w-[95%] for hierarchy. */
+.conductor-builder-chat [data-transcript-block] {
+  width: 100%;
 }
 
 .conductor-builder-chat .conductor-transcript-stream > * {

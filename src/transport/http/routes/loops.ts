@@ -18,13 +18,19 @@ import {
   prepareConductorModelMessagesForStream,
 } from "../../../loops/conductor-chat.js";
 import {
+  countUncompletedUiToolRequests,
+  derivePendingUiToolFromEvents,
   eventPayloadHash,
+  eventsForConductorPhaseAttempt,
   hasCompletedConductorOperation,
   hasTerminalConductorPhaseResult,
   interruptionEventsForToolCallIds,
   interruptionEventsFromUiMessages,
   isTerminalConductorExecution,
+  makeConductorPhaseTurnEvent,
+  makeConductorToolCompletedEvent,
   projectChatMessages,
+  getLatestConductorOperationAttempt,
 } from "../../../loops/build-events.js";
 import {
   activateLoopInputSchema,
@@ -47,6 +53,7 @@ import {
   resolveBindingsInputSchema,
   testRunLoopInputSchema,
   type ConductorExecutionMetadata,
+  type PhaseExecutionContract,
 } from "../../../loops/conductor-tools.js";
 import { computeOutcomeBriefHash } from "../../../loops/outcome-brief.js";
 import { normalizeAgentTeam } from "../../../loops/present-agent-team.js";
@@ -67,7 +74,9 @@ import {
   archiveLoop,
   compileLoop,
   createLoopInWorkspace,
+  recoverLoopBuildToCompile,
   recordLoopTestResult,
+  reconcileLoopBuildContinuity,
   getLoop,
   listLoopRuns,
   listLoops,
@@ -78,7 +87,8 @@ import {
   resolveLoopAuthWorkspace,
   triggerManualRun,
 } from "../../../loops/service.js";
-import { getLoopRun, getPendingApprovalForRun, listLoopRunSteps, getBuildChatMessages, saveBuildChatMessages, getLoopBuildMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus, getLatestBuildState, commitLoopBuildArtifact, appendBuildEvents, getBuildEvents } from "../../../loops/store.js";
+import { getLoopRun, getPendingApprovalForRun, listLoopRunSteps, saveBuildChatMessages, getLoopBuildMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus, commitLoopBuildArtifact, appendBuildEvents, getBuildEvents, projectLoopBuildFromEvents } from "../../../loops/store.js";
+import type { LoopBuildProjection } from "../../../loops/build-state-projection.js";
 import {
   BUILD_ERROR_CODES,
   BUILD_PHASES,
@@ -86,6 +96,7 @@ import {
   userFacingStageForPhase,
   BuildPhase,
   BuildStateError,
+  testArtifactSchema,
 } from "../../../loops/build-state.js";
 import {
   deriveIntentAndBlueprint,
@@ -96,20 +107,24 @@ import {
   interpretCompletedIntent,
   interpretConnectorSelections,
   interpretReviewConfirmation,
-  deriveReviewProgress,
   connectorSelectionEvidence,
   type InterpretedTriggerList,
   type BindingDiagnostic,
 } from "../../../loops/build-event-interpreter.js";
+import { deriveBuildPhaseProgress } from "../../../loops/build-phase-progress.js";
+import { isActivationConfirmationReply } from "../../../../shared/conductor-activation-confirm.js";
 import { composioWebhookDeliveryUrl, isLocalWebhookUrl } from "../../../integrations/composio/webhook-subscription.js";
 import { deriveLoopNameFromPrompt } from "../../../loops/loop-name.js";
 import { resolveActivationGap } from "../../../loops/activation-status.js";
+import { resolveConductorTurnResolution } from "../../../loops/conductor-turn-resolution.js";
 import {
   CONDUCTOR_TOOL_DESCRIPTIONS,
 } from "../../../loops/conductor-chat-prompts.js";
 import { conductorStepLimitForPhase } from "../../../loops/conductor-turn-budget.js";
 import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
+import { config } from "../../../config/index.js";
 import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
+import { resolveConductorToolChoice } from "../../../services/llm/chat-model-routing.js";
 import { getToolkitConnectionStatus, listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
 import { listComposioTriggerTypes, scoreTriggerSlugMatch } from "../../../integrations/composio/triggers.js";
 import { resolveToolkitSlug } from "../../../integrations/composio/auth.js";
@@ -192,10 +207,16 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
       res.status(404).json({ error: "Loop not found" });
       return;
     }
-    const buildState = await getLatestBuildState(req.authContext!, loopId);
-    const spec = buildState ? projectLoopSpec(buildState) : null;
-    const chatMessages = await getBuildChatMessages(req.authContext!, loopId);
-    const buildChat = await getLoopBuildMeta(req.authContext!, loopId);
+    const [loopBuild, buildChat] = await Promise.all([
+      import("../../../loops/store.js").then((m) => m.getLoopBuildProjection(req.authContext!, loopId, {
+        connectedToolkits: [],
+        loopStatus: loop.status,
+      })),
+      getLoopBuildMeta(req.authContext!, loopId),
+    ]);
+    const buildState = loopBuild.state;
+    const spec = loopBuild.spec;
+    const chatMessages = loopBuild.chatMessages;
     const { getMissingSlots } = await import("../../../loops/patch.js");
     const missingSlots = spec ? getMissingSlots(spec) : [];
     const eventTrigger = await getLoopEventTriggerStatus(loopId);
@@ -216,6 +237,8 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
       buildProgress: buildState ? {
         internalPhase: buildState.buildPhase,
         stage: userFacingStageForPhase(buildState.buildPhase),
+        phaseProgress: loopBuild.phaseProgress,
+        latestPhaseTurn: loopBuild.latestPhaseTurn,
       } : null,
       chatMessages,
       buildChat,
@@ -381,15 +404,112 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
 
     const incomingMessages = prepareConductorChatMessagesForEventLog(body.messages);
     await saveBuildChatMessages(auth, loopId, incomingMessages);
-    let buildEvents = await getBuildEvents(auth, loopId);
-    let chatMessages = projectChatMessages(buildEvents);
 
-    let currentBuildState = await getLatestBuildState(auth, loopId);
+    const connectorToolkitStatus = async () => {
+      const connectors = await listWorkspaceConnectors(auth);
+      return connectors.map((toolkit) => ({
+        slug: toolkit.slug,
+        connected: Boolean(toolkit.connected),
+      }));
+    };
+
+    let buildEvents = await getBuildEvents(auth, loopId);
+    let buildProjection: LoopBuildProjection = projectLoopBuildFromEvents(buildEvents, {
+      connectedToolkits: await connectorToolkitStatus(),
+      loopStatus: loop.status,
+    });
+    let chatMessages = buildProjection.chatMessages;
+    let currentBuildState = buildProjection.state;
     if (!currentBuildState) {
       res.status(400).json({ error: "Loop build state not found" });
       return;
     }
+    const continuity = await reconcileLoopBuildContinuity(auth, loopId);
+    if (continuity.recovered) {
+      buildEvents = await getBuildEvents(auth, loopId);
+      buildProjection = projectLoopBuildFromEvents(buildEvents, {
+        connectedToolkits: await connectorToolkitStatus(),
+        loopStatus: loop.status,
+      });
+      currentBuildState = buildProjection.state!;
+      chatMessages = buildProjection.chatMessages;
+    }
+
     let currentSpec = projectLoopSpec(currentBuildState);
+
+    let currentLoopStatus = loop.status;
+
+    const refreshBuildProjection = async (
+      context: { effectivePhase?: BuildPhase; resumeTool?: string | null } = {},
+    ) => {
+      const freshLoop = await getLoop(auth, loopId);
+      if (freshLoop?.status) currentLoopStatus = freshLoop.status;
+      buildEvents = await getBuildEvents(auth, loopId);
+      buildProjection = projectLoopBuildFromEvents(buildEvents, {
+        connectedToolkits: await connectorToolkitStatus(),
+        effectivePhase: context.effectivePhase,
+        resumeTool: context.resumeTool ?? null,
+        loopStatus: currentLoopStatus,
+      });
+      if (buildProjection.state) {
+        currentBuildState = buildProjection.state;
+        currentSpec = buildProjection.spec ?? projectLoopSpec(buildProjection.state);
+      }
+      chatMessages = buildProjection.chatMessages;
+      return buildProjection;
+    };
+    const carriedHandoff = (() => {
+      const last = incomingMessages.at(-1);
+      if (!last || last.role !== "assistant") return null;
+      for (let index = (last.parts ?? []).length - 1; index >= 0; index -= 1) {
+        const part = last.parts![index] as { state?: string; output?: unknown };
+        if (part.state !== "output-available") continue;
+        const metadata = readConductorExecutionMetadata(part.output);
+        if (metadata?.handoffId
+          && (metadata.continuation === "next_phase" || metadata.continuation === "continue_phase")
+          && metadata.nextPhase) {
+          return metadata;
+        }
+      }
+      return null;
+    })();
+    if (carriedHandoff) {
+      const alreadyConsumed = buildEvents.some((event) =>
+        event.type === "phase_handoff.consumed" && event.payload.handoffId === carriedHandoff.handoffId);
+      const expectedPhase = carriedHandoff.continuation === "continue_phase"
+        ? carriedHandoff.phaseBefore
+        : carriedHandoff.nextPhase;
+      const handoffSuperseded = !continuity.recovered
+        && currentBuildState.buildPhase !== expectedPhase;
+      if (handoffSuperseded) {
+        res.status(409).json({
+          error: "This phase handoff was superseded by newer build state",
+          handoffId: carriedHandoff.handoffId,
+        });
+        return;
+      }
+      if (alreadyConsumed) {
+        // Idempotent resume: consumption may have succeeded while the prior chat turn failed
+        // before streaming the next phase (e.g. transient 500 after append).
+      } else {
+        await appendBuildEvents(auth, loopId, [{
+          eventKey: `phase-handoff-consumed:${carriedHandoff.handoffId}`,
+          type: "phase_handoff.consumed",
+          payload: {
+            handoffId: carriedHandoff.handoffId,
+            phase: carriedHandoff.phaseBefore,
+            nextPhase: carriedHandoff.nextPhase,
+            parentArtifactHash: carriedHandoff.parentArtifactHash,
+            ...(continuity.recovered ? {
+              supersededByRecovery: true,
+              recoveryPhase: continuity.recovery?.phase,
+              recoveryReason: continuity.recovery?.reason,
+            } : {}),
+          },
+        }]);
+        await refreshBuildProjection();
+      }
+    }
 
     const [workspace, initialConnectors, buildMeta] = await Promise.all([
       getWorkspace(auth, loop.workspaceId),
@@ -405,31 +525,41 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       }
     }
 
-    const buildCurrentSystemPrompt = () => buildConductorSystemPrompt({
-      workspaceName: workspace.name,
-      spec: currentSpec!,
-      confirmationHash: currentBuildState!.artifacts.bindings?.artifactHash ?? computeOutcomeBriefHash(currentSpec!),
-      connectedToolkits: initialConnectors.map((t) => ({
-        slug: t.slug,
-        name: t.name,
-        connected: Boolean(t.connected),
-      })),
-      buildPhase: currentBuildState!.buildPhase,
-      reviewProgress: deriveReviewProgress(currentBuildState!, buildEvents),
-      resumeTool: lastToolExecution?.resumeTool ?? null,
-    });
+    const buildCurrentSystemPrompt = () => {
+      const phaseProgress = deriveBuildPhaseProgress(currentBuildState!, buildEvents, {
+        effectivePhase: requestPhaseContract.phase,
+        connectedToolkits: initialConnectors.map((t) => ({
+          slug: t.slug,
+          connected: Boolean(t.connected),
+        })),
+        loopStatus: currentLoopStatus,
+      });
+      return buildConductorSystemPrompt({
+        workspaceName: workspace.name,
+        spec: currentSpec!,
+        confirmationHash: currentBuildState!.artifacts.bindings?.artifactHash ?? computeOutcomeBriefHash(currentSpec!),
+        connectedToolkits: initialConnectors.map((t) => ({
+          slug: t.slug,
+          name: t.name,
+          connected: Boolean(t.connected),
+        })),
+        buildPhase: requestPhaseContract.phase,
+        phaseProgress,
+        phaseContract: requestPhaseContract,
+        resumeTool: null,
+      });
+    };
 
     const recordArtifact = async (phase: Parameters<typeof commitLoopBuildArtifact>[0]["phase"], artifact: unknown, expectedParentHash?: string) => {
       const committed = await commitLoopBuildArtifact({ auth, loopId, phase, artifact, expectedParentHash });
-      currentBuildState = committed.state;
-      currentSpec = projectLoopSpec(committed.state);
+      await refreshBuildProjection();
       latestCompiledPlanId = null;
       latestTestRunPass = null;
       const { getMissingSlots } = await import("../../../loops/patch.js");
       return {
         ok: true as const, ...committed, state: undefined,
         spec: currentSpec,
-        missingSlots: getMissingSlots(currentSpec),
+        missingSlots: getMissingSlots(currentSpec!),
       };
     };
 
@@ -464,8 +594,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         type: "connector.auto_resolved" as const,
         payload: selection,
       })));
-      buildEvents = await getBuildEvents(auth, loopId);
-      chatMessages = projectChatMessages(buildEvents);
+      await refreshBuildProjection();
       const connectorArtifact = interpretConnectorSelections(currentBuildState!, buildEvents);
       if (connectorArtifact
         && currentBuildState!.buildPhase === "connectors"
@@ -502,42 +631,83 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         payload: { diagnostics },
       }]);
     };
-    const requestStartPhase = currentBuildState.buildPhase;
     const parentArtifactHashForPhase = (phase: BuildPhase): string => {
       const phaseIndex = BUILD_PHASES.indexOf(phase);
       if (phaseIndex <= 0) return "root";
       const parent = currentBuildState!.artifacts[BUILD_PHASES[phaseIndex - 1]];
       return parent?.artifactHash ?? "root";
     };
+    const toolsForBuildPhase = (phase: BuildPhase) => {
+      switch (phase) {
+        case "intent": return ["analyzeIntent", "askQuestion"];
+        case "blueprint": return [];
+        case "connectors": return ["discoverConnectorsForBlueprint", "pickConnectorApp", "listWorkspaceConnectors", "connectToolkit"];
+        case "bindings": return ["listTriggers", "listActions", "discoverBindings", "askQuestion", "resolveBindings"];
+        case "review": return ["presentAgentTeam", "confirmOutcomeBrief"];
+        case "compile": return ["compileLoop", "listTriggers", "listActions", "discoverBindings", "askQuestion", "resolveBindings", "listWorkspaceConnectors", "connectToolkit"];
+        case "test": return ["testRunLoop"];
+        case "activation": return ["presentReplyOptions", "activateLoop"];
+      }
+    };
+    const requestStartPhase = currentBuildState.buildPhase;
     const requestStartParentArtifactHash = parentArtifactHashForPhase(requestStartPhase);
+    const requestStepLimit = conductorStepLimitForPhase(requestStartPhase);
+    const requestPhaseProgress = deriveBuildPhaseProgress(currentBuildState, buildEvents, {
+      effectivePhase: requestStartPhase,
+      connectedToolkits: initialConnectors.map((toolkit) => ({
+        slug: toolkit.slug,
+        connected: Boolean(toolkit.connected),
+      })),
+      loopStatus: currentLoopStatus,
+    });
+    const requestAllowedTools = requestPhaseProgress.allowedTools.length > 0
+      ? requestPhaseProgress.allowedTools
+      : requestPhaseProgress.terminal
+        ? []
+        : requestPhaseProgress.nextTool
+          ? [requestPhaseProgress.nextTool]
+          : toolsForBuildPhase(requestStartPhase);
+    const requestPhaseContract: PhaseExecutionContract = Object.freeze({
+      phase: requestStartPhase,
+      parentArtifactHash: requestStartParentArtifactHash,
+      allowedTools: Object.freeze([...requestAllowedTools]),
+      nextTool: requestPhaseProgress.nextTool,
+      compiledPlanId: latestCompiledPlanId,
+      revision: `${requestStartPhase}:${requestStartParentArtifactHash}`,
+    });
+    const resolveLivePhaseProgress = () => deriveBuildPhaseProgress(currentBuildState!, buildEvents, {
+      effectivePhase: requestPhaseContract.phase,
+      connectedToolkits: initialConnectors.map((toolkit) => ({
+        slug: toolkit.slug,
+        connected: Boolean(toolkit.connected),
+      })),
+      loopStatus: currentLoopStatus,
+    });
+    const resolveLiveAuthorizedTools = (): string[] => {
+      const live = resolveLivePhaseProgress();
+      if (live.allowedTools.length > 0) return [...live.allowedTools];
+      if (live.terminal) return [];
+      if (live.nextTool) return [live.nextTool];
+      return [];
+    };
     let lastToolExecution: ConductorExecutionMetadata | null = null;
-    let syntheticToolSequence = buildEvents.at(-1)?.sequence ?? 0;
+    let requestContractSuperseded = false;
+    let turnStepCount = 0;
     const inTurnOperationKeys = new Set<string>();
-    const appendSyntheticToolExecution = (toolName: string, input: unknown, output: unknown) => {
+    const persistToolExecution = async (toolName: string, input: unknown, output: unknown) => {
       const metadata = readConductorExecutionMetadata(output);
       if (!metadata) return;
       inTurnOperationKeys.add(metadata.operationKey);
-      syntheticToolSequence += 1;
-      buildEvents = [...buildEvents, {
-        id: `synthetic:${syntheticToolSequence}`,
-        loopId,
-        threadKind: "build",
-        runId: null,
-        sequence: syntheticToolSequence,
-        eventKey: `synthetic:${metadata.operationKey}:${syntheticToolSequence}`,
-        type: "tool_call.completed",
-        payload: {
-          messageId: `synthetic:${syntheticToolSequence}`,
-          toolName,
-          state: "output-available",
-          input,
-          output,
-          ...metadata,
-        },
-        toolCallId: `synthetic:${syntheticToolSequence}`,
-        createdAt: new Date().toISOString(),
-      }];
+      turnStepCount += 1;
       lastToolExecution = metadata;
+      await appendBuildEvents(auth, loopId, [
+        makeConductorToolCompletedEvent({
+          toolName,
+          input,
+          output: output as Record<string, unknown>,
+        }),
+      ]);
+      await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
     };
     const beginToolExecution = (
       toolName: string,
@@ -547,14 +717,30 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       const phaseBefore = currentBuildState!.buildPhase;
       const parentArtifactHash = parentArtifactHashForPhase(phaseBefore);
       const operationKey = `${phaseBefore}:${parentArtifactHash}:${toolName}:${target}`;
+      const authorizedTools = resolveLiveAuthorizedTools();
+      const contractError = phaseBefore !== requestPhaseContract.phase
+        || parentArtifactHash !== requestPhaseContract.parentArtifactHash
+        ? `The ${requestPhaseContract.phase} phase changed before ${toolName} could run.`
+        : !authorizedTools.includes(toolName)
+          ? `${toolName} is not authorized during the ${requestPhaseContract.phase} phase.`
+          : undefined;
+      if (contractError) {
+        return { duplicate: true as const, operationKey, phaseBefore, parentArtifactHash, contractError };
+      }
       const lookup = { operationKey, parentArtifactHash };
-      if (inTurnOperationKeys.has(operationKey)
-        || ((options?.historicalDedup !== false) && hasCompletedConductorOperation(buildEvents, lookup))) {
+      const attemptEvents = eventsForConductorPhaseAttempt(buildEvents, { phase: phaseBefore, parentArtifactHash });
+      const latestAttempt = getLatestConductorOperationAttempt(attemptEvents, lookup);
+      const historicalDuplicate = (options?.historicalDedup !== false)
+        && (
+          hasCompletedConductorOperation(attemptEvents, lookup)
+          || (latestAttempt?.metadata.ok === false && latestAttempt.metadata.retryAllowed === false)
+        );
+      if (inTurnOperationKeys.has(operationKey) || historicalDuplicate) {
         return { duplicate: true as const, operationKey, phaseBefore, parentArtifactHash };
       }
       return { duplicate: false as const, operationKey, phaseBefore, parentArtifactHash };
     };
-    const finalizeToolExecution = <T extends Record<string, unknown>>(
+    const finalizeToolExecution = async <T extends Record<string, unknown>>(
       toolName: string,
       input: unknown,
       start: { operationKey: string; phaseBefore: BuildPhase; parentArtifactHash: string },
@@ -575,44 +761,99 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         ?? (isConductorBuildPhase(outputRecord.recoverToPhase) ? outputRecord.recoverToPhase : undefined);
       const recoverReason = parsed?.recoverReason
         ?? (typeof outputRecord.recoverReason === "string" ? outputRecord.recoverReason : undefined);
+      const recoveryPhase = parsed?.recoveryPhase
+        ?? (isConductorBuildPhase(outputRecord.recoveryPhase) ? outputRecord.recoveryPhase : recoverToPhase);
+      const recoveryReason = parsed?.recoveryReason
+        ?? (typeof outputRecord.recoveryReason === "string" ? outputRecord.recoveryReason : recoverReason);
       const resumeTool = parsed?.resumeTool
         ?? (typeof outputRecord.resumeTool === "string" ? outputRecord.resumeTool : undefined);
+      const phaseCompleted = parsed?.phaseCompleted ?? phaseAfter !== start.phaseBefore;
+      const stepsUsed = turnStepCount + 1;
+      const outputTurnOutcome = typeof outputRecord.turnOutcome === "string"
+        && ["progress", "phase_complete", "waiting_for_user", "blocked", "budget_exhausted", "build_complete"].includes(outputRecord.turnOutcome)
+        ? outputRecord.turnOutcome as ConductorExecutionMetadata["turnOutcome"]
+        : undefined;
+      const outputContinuation = typeof outputRecord.continuation === "string"
+        && ["continue_phase", "next_phase", "wait_for_user", "stop"].includes(outputRecord.continuation)
+        ? outputRecord.continuation as ConductorExecutionMetadata["continuation"]
+        : undefined;
+      const turnOutcome: ConductorExecutionMetadata["turnOutcome"] = parsed?.turnOutcome
+        ?? outputTurnOutcome
+        ?? (requiresUserInput
+          ? "waiting_for_user"
+          : phaseCompleted
+            ? ((start.phaseBefore === "activation" && ok) ? "build_complete" : "phase_complete")
+            : (!ok && !retryAllowed)
+              ? "blocked"
+              : "progress");
+      const continuation: ConductorExecutionMetadata["continuation"] = parsed?.continuation
+        ?? outputContinuation
+        ?? (turnOutcome === "waiting_for_user"
+          ? "wait_for_user"
+          : turnOutcome === "phase_complete"
+            ? "next_phase"
+            : turnOutcome === "build_complete" || turnOutcome === "blocked" || turnOutcome === "budget_exhausted"
+              ? "stop"
+              : "continue_phase");
+      const nextPhase = parsed?.nextPhase
+        ?? (continuation === "next_phase"
+          ? (recoveryPhase ?? phaseAfter)
+          : undefined);
+      const outputPlan = outputRecord.plan && typeof outputRecord.plan === "object"
+        ? outputRecord.plan as Record<string, unknown>
+        : null;
+      const compileArtifact = currentBuildState!.artifacts.compile?.artifact as { compiledPlanId?: unknown } | undefined;
+      const compiledPlanId = parsed?.compiledPlanId
+        ?? (typeof outputRecord.compiledPlanId === "string" ? outputRecord.compiledPlanId : undefined)
+        ?? (typeof outputPlan?.id === "string" ? outputPlan.id : undefined)
+        ?? (typeof compileArtifact?.compiledPlanId === "string" ? compileArtifact.compiledPlanId : undefined);
+      const handoffId = parsed?.handoffId
+        ?? (continuation === "next_phase" && nextPhase
+          ? eventPayloadHash({ operationKey: start.operationKey, nextPhase, parentArtifactHash: start.parentArtifactHash })
+          : undefined);
       const execution = {
         ok,
         operationKey: start.operationKey,
         phaseBefore: start.phaseBefore,
         phaseAfter,
-        phaseCompleted: parsed?.phaseCompleted ?? phaseAfter !== start.phaseBefore,
+        phaseCompleted,
         requiresUserInput,
         retryAllowed,
         parentArtifactHash: start.parentArtifactHash,
         invalidatedPhases,
+        turnOutcome,
+        continuation,
+        stepsUsed,
+        stepLimit: requestStepLimit,
         ...(error ? { error } : {}),
         ...(recoverToPhase ? { recoverToPhase } : {}),
         ...(recoverReason ? { recoverReason } : {}),
+        ...(recoveryPhase ? { recoveryPhase } : {}),
+        ...(recoveryReason ? { recoveryReason } : {}),
         ...(resumeTool ? { resumeTool } : {}),
+        ...(nextPhase ? { nextPhase } : {}),
+        ...(handoffId ? { handoffId } : {}),
+        ...(compiledPlanId ? { compiledPlanId } : {}),
       } satisfies ConductorExecutionMetadata;
       const merged = { ...output, ...execution };
-      appendSyntheticToolExecution(toolName, input, merged);
+      await persistToolExecution(toolName, input, merged);
       return merged as T & ConductorExecutionMetadata;
     };
-    const duplicateToolExecution = (
+    const duplicateToolExecution = async (
       toolName: string,
       input: unknown,
-      start: { operationKey: string; phaseBefore: BuildPhase; parentArtifactHash: string },
+      start: { operationKey: string; phaseBefore: BuildPhase; parentArtifactHash: string; contractError?: string },
       error: string,
     ) => finalizeToolExecution(toolName, input, start, {
       ok: false as const,
-      error,
-      retryAllowed: false,
+      error: start.contractError ?? error,
+      retryAllowed: Boolean(start.contractError),
       requiresUserInput: false,
       invalidatedPhases: [],
     });
     const shouldStopConductorTurn: StopCondition<any> = ({ steps }) => {
       if (steps.length === 0) return false;
-      if (lastToolExecution && isRecoverableConductorExecution(lastToolExecution)) {
-        return false;
-      }
+      if (requestContractSuperseded) return true;
       if (currentBuildState!.buildPhase !== requestStartPhase) return true;
       if (lastToolExecution
         && lastToolExecution.phaseBefore === requestStartPhase
@@ -620,41 +861,28 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         && isTerminalConductorExecution(lastToolExecution)) {
         return true;
       }
-      return hasTerminalConductorPhaseResult(buildEvents, {
+      if (resolveLiveAuthorizedTools().length === 0) return true;
+      return hasTerminalConductorPhaseResult(eventsForConductorPhaseAttempt(buildEvents, {
+        phase: requestStartPhase,
+        parentArtifactHash: requestStartParentArtifactHash,
+      }), {
         phase: requestStartPhase,
         parentArtifactHash: requestStartParentArtifactHash,
       });
     };
 
-    const toolsForBuildPhase = (phase: BuildPhase) => {
-      switch (phase) {
-        case "intent": return ["analyzeIntent", "askQuestion"];
-        case "blueprint": return [];
-        case "connectors": return ["discoverConnectorsForBlueprint", "pickConnectorApp", "listWorkspaceConnectors", "connectToolkit"];
-        case "bindings": return ["listTriggers", "listActions", "discoverBindings", "askQuestion", "resolveBindings"];
-        case "review": return ["presentAgentTeam", "confirmOutcomeBrief"];
-        case "compile": return ["compileLoop", "listTriggers", "listActions", "discoverBindings", "askQuestion", "resolveBindings", "listWorkspaceConnectors", "connectToolkit"];
-        case "test": return ["testRunLoop"];
-        case "activation": return ["presentReplyOptions", "activateLoop"];
-      }
-    };
     const activeToolsForPhase = () => {
-      const recoveryPhase = lastToolExecution?.recoverToPhase;
-      const effectivePhase = recoveryPhase ?? currentBuildState!.buildPhase;
-      if (effectivePhase === "review") {
-        const reviewProgress = deriveReviewProgress(currentBuildState!, buildEvents);
-        if (reviewProgress?.nextTool) return [reviewProgress.nextTool];
-      }
-      return toolsForBuildPhase(effectivePhase);
+      if (requestContractSuperseded) return [];
+      return resolveLiveAuthorizedTools();
     };
-    const requirePhase = (...allowed: Array<NonNullable<typeof currentBuildState>["buildPhase"]>) => {
-      if (!allowed.includes(currentBuildState!.buildPhase)) {
-        throw new BuildStateError("BUILD_INVALID_TRANSITION", `Tool is not authorized during ${currentBuildState!.buildPhase}`);
-      }
-    };
-
     const startConductorStream = async (replaySourceMessages: UIMessage[]) => {
-      const prepared = await prepareConductorModelMessagesForStream(replaySourceMessages);
+      const pendingUiTool = derivePendingUiToolFromEvents(buildEvents);
+      const preserveOpenUiToolCallIds = pendingUiTool
+        ? new Set([pendingUiTool.toolCallId])
+        : undefined;
+      const prepared = await prepareConductorModelMessagesForStream(replaySourceMessages, {
+        preserveOpenUiToolCallIds,
+      });
       if (prepared.stats.repairedToolCallIds.length > 0) {
         console.warn(`[loops/chat:${loopId}] repaired ${prepared.stats.repairedToolCallIds.length} superseded tool call(s) for model replay`, {
           toolCallIds: prepared.stats.repairedToolCallIds,
@@ -665,16 +893,33 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         ...prepared,
         result: streamText({
           model: getStreamingLanguageModel("conductor", { userId: auth.userId }),
-          stopWhen: [shouldStopConductorTurn, stepCountIs(conductorStepLimitForPhase(requestStartPhase))],
+          stopWhen: [shouldStopConductorTurn, stepCountIs(requestStepLimit)],
           system: buildCurrentSystemPrompt(),
-          prepareStep: () => ({ system: buildCurrentSystemPrompt(), activeTools: activeToolsForPhase() as never[] }),
+          prepareStep: async () => {
+            const projection = await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+            const persistedState = projection.state;
+            if (!persistedState
+              || persistedState.buildPhase !== requestPhaseContract.phase
+              || (() => {
+                const phaseIndex = BUILD_PHASES.indexOf(requestPhaseContract.phase);
+                const parent = phaseIndex > 0 ? persistedState.artifacts[BUILD_PHASES[phaseIndex - 1]] : undefined;
+                return (parent?.artifactHash ?? "root") !== requestPhaseContract.parentArtifactHash;
+              })()) {
+              requestContractSuperseded = true;
+            }
+            const activeTools = activeToolsForPhase();
+            return {
+              system: buildCurrentSystemPrompt(),
+              activeTools: activeTools as never[],
+              toolChoice: resolveConductorToolChoice(activeTools.length, config.conductorModel),
+            };
+          },
           messages: prepared.modelMessages,
           tools: {
         analyzeIntent: tool({
           description: CONDUCTOR_TOOL_DESCRIPTIONS.analyzeIntent,
           inputSchema: analyzeIntentInputSchema,
           execute: async (analysis) => {
-            requirePhase("intent");
             const execution = beginToolExecution("analyzeIntent", "intent");
             if (execution.duplicate) {
               return duplicateToolExecution("analyzeIntent", analysis, execution, "Intent analysis already exists for the current revision");
@@ -698,7 +943,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.discoverConnectorsForBlueprint,
           inputSchema: discoverConnectorsForBlueprintInputSchema,
           execute: async (input) => {
-            requirePhase("connectors");
             const execution = beginToolExecution("discoverConnectorsForBlueprint", "blueprint", { historicalDedup: false });
             if (execution.duplicate) {
               return duplicateToolExecution(
@@ -732,7 +976,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.listTriggers,
           inputSchema: listTriggersInputSchema,
           execute: async ({ toolkit }) => {
-            requirePhase("bindings", "compile");
             const resolved = await resolveToolkitSlug(toolkit);
             const execution = beginToolExecution("listTriggers", `toolkit:${resolved}`, { historicalDedup: false });
             if (execution.duplicate) {
@@ -765,7 +1008,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.listActions,
           inputSchema: listActionsInputSchema,
           execute: async ({ toolkit }) => {
-            requirePhase("bindings", "compile");
             const resolved = await resolveToolkitSlug(toolkit);
             const execution = beginToolExecution("listActions", `toolkit:${resolved}`, { historicalDedup: false });
             if (execution.duplicate) {
@@ -786,7 +1028,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.discoverBindings,
           inputSchema: discoverBindingsInputSchema,
           execute: async (input) => {
-            requirePhase("bindings", "compile");
             const execution = beginToolExecution(
               "discoverBindings",
               `toolkit:${input.toolkit.toLowerCase()}`,
@@ -798,7 +1039,13 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
             const selected = new Set((currentBuildState!.artifacts.connectors?.artifact as { selections?: Array<{ connector: string }> })
               ?.selections?.map((row) => row.connector.toLowerCase()) ?? []);
             if (!selected.has(input.toolkit.toLowerCase())) {
-              throw new BuildStateError("BUILD_UNSELECTED_CONNECTOR", `Cannot discover bindings for unselected connector ${input.toolkit}`);
+              return finalizeToolExecution("discoverBindings", input, execution, {
+                ok: false as const,
+                error: `Cannot discover bindings for unselected connector ${input.toolkit}`,
+                retryAllowed: true,
+                recoverToPhase: "connectors",
+                recoverReason: "connector_not_selected",
+              });
             }
             const expectedOutcomes = bindingActionOutcomesForToolkit(currentSpec!, input.toolkit);
             const discovered = await discoverOutcomeBindings(input.toolkit, expectedOutcomes);
@@ -812,7 +1059,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.resolveBindings,
           inputSchema: resolveBindingsInputSchema,
           execute: async () => {
-            requirePhase("bindings", "compile");
             const blueprintOutcomes = currentSpec!.taskBlueprint?.outcomes ?? [];
             const actionOutcomes = blueprintOutcomes.filter((outcome): outcome is typeof outcome & {
               role: "source" | "destination"; selectedConnector: string;
@@ -944,7 +1190,10 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               return finalizeToolExecution("resolveBindings", {}, execution, {
                 ok: false as const,
                 diagnostics,
-                retryAllowed: false,
+                retryAllowed: true,
+                recoverToPhase: "connectors",
+                recoverReason: "connector_not_connected",
+                resumeTool: "connectToolkit",
               });
             }
             const prepared = prepareBindingResolution(resolutionInput);
@@ -967,7 +1216,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                   connectorHash: currentBuildState!.artifacts.connectors!.artifactHash,
                 },
               }]);
-              buildEvents = await getBuildEvents(auth, loopId);
+              await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
               const artifact = interpretBindingDiscovery(currentBuildState!, buildEvents);
               if (!artifact) throw new Error("Resolved binding event could not be interpreted");
               const committed = await recordArtifact("bindings", artifact, currentBuildState!.artifacts.connectors!.artifactHash);
@@ -1005,7 +1254,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.connectToolkit,
           inputSchema: connectToolkitInputSchema,
           execute: async ({ toolkit, callbackUrl }) => {
-            requirePhase("connectors", "compile");
             const execution = beginToolExecution("connectToolkit", `toolkit:${toolkit.toLowerCase()}`, { historicalDedup: false });
             if (execution.duplicate) {
               return duplicateToolExecution("connectToolkit", { toolkit, callbackUrl }, execution, `${toolkit} connection is already in progress`);
@@ -1023,7 +1271,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.listWorkspaceConnectors,
           inputSchema: listWorkspaceConnectorsInputSchema,
           execute: async () => {
-            requirePhase("connectors", "compile");
             const execution = beginToolExecution("listWorkspaceConnectors", "workspace", { historicalDedup: false });
             if (execution.duplicate) {
               return duplicateToolExecution("listWorkspaceConnectors", {}, execution, "Workspace connectors were already listed in this turn");
@@ -1046,15 +1293,17 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.presentAgentTeam,
           inputSchema: presentAgentTeamInputSchema,
           execute: async (input) => {
-            requirePhase("review");
             const execution = beginToolExecution(
               "presentAgentTeam",
               `review:${currentBuildState!.artifacts.bindings?.artifactHash ?? computeOutcomeBriefHash(currentSpec!)}`,
               { historicalDedup: false },
             );
             if (execution.duplicate) {
-              const progress = deriveReviewProgress(currentBuildState!, buildEvents);
-              if (progress?.nextTool === "confirmOutcomeBrief") {
+              const progress = deriveBuildPhaseProgress(currentBuildState!, buildEvents, {
+                effectivePhase: "review",
+                loopStatus: currentLoopStatus,
+              });
+              if (progress.nextTool === "confirmOutcomeBrief") {
                 return finalizeToolExecution("presentAgentTeam", input, execution, {
                   ok: false as const,
                   error: "The review roster is already prepared. Call confirmOutcomeBrief now.",
@@ -1113,8 +1362,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               compiled = await compileLoop(auth, loopId);
             } catch (error) {
               if (error instanceof BuildStateError) {
-                const reviewPending = error.code === BUILD_ERROR_CODES.INVALID_TRANSITION
-                  && currentBuildState!.buildPhase === "review";
+                const reviewPending = error.code === BUILD_ERROR_CODES.INVALID_TRANSITION;
                 if (reviewPending) {
                   return finalizeToolExecution("compileLoop", {}, execution, {
                     ok: false as const,
@@ -1165,8 +1413,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
             }
             latestCompiledPlanId = compiled.plan!.id;
             latestTestRunPass = null;
-            currentBuildState = await getLatestBuildState(auth, loopId);
-            if (currentBuildState) currentSpec = projectLoopSpec(currentBuildState);
+            await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
             return finalizeToolExecution("compileLoop", {}, execution, {
               ok: true as const,
               plan: {
@@ -1183,37 +1430,138 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.testRunLoop,
           inputSchema: testRunLoopInputSchema,
           execute: async ({ compiledPlanId, scenario }) => {
-            const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;
-            const execution = beginToolExecution(
+            const planId = requestPhaseContract.compiledPlanId;
+            const scenarioHash = eventPayloadHash(scenario);
+            const beginTestExecution = (target: string) => beginToolExecution(
               "testRunLoop",
-              `test:${planId ?? "missing"}:${eventPayloadHash(scenario)}`,
+              target,
+              { historicalDedup: false },
             );
-            if (execution.duplicate) {
-              return duplicateToolExecution("testRunLoop", { compiledPlanId, scenario }, execution, "This test scenario already ran for the current revision");
-            }
-            if (!planId) {
+            const completeTestPhase = (
+              execution: { operationKey: string; phaseBefore: BuildPhase; parentArtifactHash: string },
+              runId: string,
+              extra?: Record<string, unknown>,
+            ) => finalizeToolExecution("testRunLoop", { compiledPlanId: planId, scenario }, execution, {
+              ok: true as const,
+              runId,
+              phaseCompleted: true,
+              turnOutcome: "phase_complete" as const,
+              continuation: "next_phase" as const,
+              nextPhase: "activation" as const,
+              ...extra,
+            });
+
+            if (compiledPlanId && compiledPlanId !== planId) {
+              const execution = beginTestExecution(`test:${planId ?? "missing"}:${scenarioHash}:mismatch`);
               return finalizeToolExecution("testRunLoop", { compiledPlanId, scenario }, execution, {
                 ok: false as const,
-                error: "No compiled plan — call compileLoop first",
+                error: "The requested compiled plan does not match the current test phase.",
                 retryAllowed: false,
               });
+            }
+            if (!planId) {
+              const execution = beginTestExecution(`test:missing:${scenarioHash}`);
+              const recovered = await recoverLoopBuildToCompile(auth, loopId, "compiled_artifact_missing");
+              await refreshBuildProjection({ effectivePhase: "compile" });
+              return finalizeToolExecution("testRunLoop", { compiledPlanId, scenario }, execution, {
+                ok: false as const,
+                error: "The compiled plan is missing. Returning to compilation automatically.",
+                retryAllowed: false,
+                recoveryPhase: "compile" as const,
+                recoveryReason: "compiled_artifact_missing",
+                invalidatedPhases: recovered.invalidatedPhases,
+                turnOutcome: "phase_complete" as const,
+                continuation: "next_phase" as const,
+                nextPhase: "compile" as const,
+              });
+            }
+
+            const compileEnvelope = currentBuildState!.artifacts.compile;
+            const testEnvelope = currentBuildState!.artifacts.test;
+            if (compileEnvelope && testEnvelope) {
+              const parsed = testArtifactSchema.safeParse(testEnvelope.artifact);
+              if (parsed.success && parsed.data.compileHash === compileEnvelope.artifactHash) {
+                const execution = beginTestExecution(`test:${planId}:${scenarioHash}:satisfied`);
+                if (execution.duplicate) {
+                  return duplicateToolExecution(
+                    "testRunLoop",
+                    { compiledPlanId, scenario },
+                    execution,
+                    "This test scenario is already running in the current turn.",
+                  );
+                }
+                return completeTestPhase(execution, parsed.data.runId, { alreadySatisfied: true });
+              }
+            }
+
+            const inMemoryPass = latestTestRunPass?.planId === planId ? latestTestRunPass : null;
+            const storedPass = inMemoryPass
+              ?? await getLatestPassingTestRunForPlan(auth, loopId, planId);
+            if (storedPass && compileEnvelope && currentBuildState!.buildPhase === "test") {
+              const execution = beginTestExecution(`test:${planId}:${scenarioHash}:heal:${storedPass.runId}`);
+              if (execution.duplicate) {
+                return duplicateToolExecution(
+                  "testRunLoop",
+                  { compiledPlanId, scenario },
+                  execution,
+                  "This test scenario is already running in the current turn.",
+                );
+              }
+              latestTestRunPass = { planId, runId: storedPass.runId };
+              await recordLoopTestResult(auth, loopId, {
+                compiledPlanId: planId,
+                runId: storedPass.runId,
+                passed: true,
+              });
+              await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+              return completeTestPhase(execution, storedPass.runId, { recoveredFromStoredPass: true });
+            }
+
+            const execution = beginTestExecution(`test:${planId}:${scenarioHash}:${randomUUID()}`);
+            if (execution.duplicate) {
+              return duplicateToolExecution(
+                "testRunLoop",
+                { compiledPlanId, scenario },
+                execution,
+                "This test scenario is already running in the current turn.",
+              );
             }
             const result = await executeLoopTestRun(auth, {
               loopId,
               compiledPlanId: planId,
               scenario,
             });
+            const recoveryCode = result.steps.find((step) => step.kind === "error"
+              && (step.code === "PLAN_NOT_FOUND" || step.code === "STALE_PLAN"));
+            if (recoveryCode?.kind === "error") {
+              const recoveryReason = recoveryCode.code === "PLAN_NOT_FOUND"
+                ? "compiled_plan_missing"
+                : "compiled_artifact_stale";
+              const recovered = await recoverLoopBuildToCompile(auth, loopId, recoveryReason);
+              await refreshBuildProjection({ effectivePhase: "compile" });
+              return finalizeToolExecution("testRunLoop", { compiledPlanId: planId, scenario }, execution, {
+                ...result,
+                error: "The compiled plan is no longer current. Returning to compilation automatically.",
+                retryAllowed: false,
+                recoveryPhase: "compile" as const,
+                recoveryReason,
+                invalidatedPhases: recovered.invalidatedPhases,
+                turnOutcome: "phase_complete" as const,
+                continuation: "next_phase" as const,
+                nextPhase: "compile" as const,
+              });
+            }
             if (result.ok) {
               latestTestRunPass = { planId, runId: result.runId };
-              const recorded = await recordLoopTestResult(auth, loopId, {
+              await recordLoopTestResult(auth, loopId, {
                 compiledPlanId: planId, runId: result.runId, passed: true,
               });
-              currentBuildState = recorded.state;
-              currentSpec = projectLoopSpec(recorded.state);
+              await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+              return completeTestPhase(execution, result.runId, result);
             }
             return finalizeToolExecution("testRunLoop", { compiledPlanId: planId, scenario }, execution, {
               ...result,
-              ...(result.ok ? {} : { retryAllowed: false }),
+              retryAllowed: true,
             });
           },
         }),
@@ -1221,10 +1569,52 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           description: CONDUCTOR_TOOL_DESCRIPTIONS.activateLoop,
           inputSchema: activateLoopInputSchema,
           execute: async ({ compiledPlanId, confirmedByUser }) => {
-            const planId = compiledPlanId ?? latestCompiledPlanId ?? buildMeta?.compiledPlanId ?? null;
+            const planId = requestPhaseContract.compiledPlanId;
             const execution = beginToolExecution("activateLoop", `activate:${planId ?? "missing"}`);
             if (execution.duplicate) {
-              return duplicateToolExecution("activateLoop", { compiledPlanId, confirmedByUser }, execution, "This compiled plan is already active for the current revision");
+              if (execution.contractError) {
+                await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+                const activeLoop = await getLoop(auth, loopId);
+                const resolvedPlanId = planId ?? activeLoop?.activePlanId ?? compiledPlanId;
+                if (activeLoop?.status === "active" && resolvedPlanId) {
+                  return finalizeToolExecution("activateLoop", { compiledPlanId: resolvedPlanId, confirmedByUser }, execution, {
+                    ok: true as const,
+                    loopId,
+                    activePlanId: resolvedPlanId,
+                    status: "active" as const,
+                    alreadyActive: true,
+                    phaseCompleted: true,
+                    turnOutcome: "build_complete" as const,
+                    continuation: "stop" as const,
+                  });
+                }
+                return duplicateToolExecution(
+                  "activateLoop",
+                  { compiledPlanId, confirmedByUser },
+                  execution,
+                  "This compiled plan is already active for the current revision",
+                );
+              }
+              await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+              const activeLoop = await getLoop(auth, loopId);
+              const resolvedPlanId = planId ?? activeLoop?.activePlanId ?? compiledPlanId;
+              return finalizeToolExecution("activateLoop", { compiledPlanId: planId, confirmedByUser }, execution, {
+                ok: true as const,
+                loopId,
+                activePlanId: resolvedPlanId,
+                status: "active" as const,
+                alreadyActive: true,
+                phaseCompleted: true,
+                turnOutcome: "build_complete" as const,
+                continuation: "stop" as const,
+              });
+            }
+            if (compiledPlanId && compiledPlanId !== planId) {
+              return finalizeToolExecution("activateLoop", { compiledPlanId, confirmedByUser }, execution, {
+                ok: false as const,
+                error: "The requested compiled plan does not match the current activation phase.",
+                retryAllowed: false,
+              });
             }
             if (!planId) {
               return finalizeToolExecution("activateLoop", { compiledPlanId, confirmedByUser }, execution, {
@@ -1244,13 +1634,24 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 retryAllowed: false,
               });
             }
+            const activationApproved = completedToolEvents(buildEvents, "presentReplyOptions").some((event) =>
+              isActivationConfirmationReply(event.output, event.input));
+            if (!activationApproved) {
+              return finalizeToolExecution("activateLoop", { compiledPlanId: planId, confirmedByUser }, execution, {
+                ok: false as const,
+                error: "Call presentReplyOptions and wait for explicit activation approval first.",
+                retryAllowed: true,
+              });
+            }
             const activated = await activateLoop(auth, loopId, planId, confirmedByUser);
-            currentBuildState = await getLatestBuildState(auth, loopId);
-            if (currentBuildState) currentSpec = projectLoopSpec(currentBuildState);
+            await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
             latestCompiledPlanId = activated.activePlanId;
             return finalizeToolExecution("activateLoop", { compiledPlanId: planId, confirmedByUser }, execution, {
               ok: true as const,
               ...activated,
+              phaseCompleted: true,
+              turnOutcome: "build_complete",
+              continuation: "stop",
             });
           },
         }),
@@ -1268,8 +1669,70 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         originalMessages,
         onFinish: async ({ messages, isAborted }) => {
           try {
-            if (isAborted) await appendBuildEvents(auth, loopId, interruptionEventsFromUiMessages(messages));
+            if (isAborted) {
+              await appendBuildEvents(auth, loopId, interruptionEventsFromUiMessages(messages));
+            }
+            // Persist streamed UI-tool calls before resolving the turn. Otherwise a
+            // preceding server tool can incorrectly mask a pending user question.
             await saveBuildChatMessages(auth, loopId, messages);
+            const refreshed = await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+            const terminalExecution = !refreshed.pendingUiTool
+              && lastToolExecution
+              && lastToolExecution.phaseBefore === requestStartPhase
+              && lastToolExecution.parentArtifactHash === requestStartParentArtifactHash
+              && isTerminalConductorExecution(lastToolExecution)
+              ? lastToolExecution
+              : null;
+            let phaseTurnPayload = terminalExecution ? {
+              phase: requestStartPhase,
+              parentArtifactHash: requestStartParentArtifactHash,
+              stepsUsed: terminalExecution.stepsUsed,
+              stepLimit: requestStepLimit,
+              outcome: terminalExecution.turnOutcome,
+              continuation: terminalExecution.continuation,
+              ...(terminalExecution.nextPhase ? { nextPhase: terminalExecution.nextPhase } : {}),
+              ...(terminalExecution.handoffId ? { handoffId: terminalExecution.handoffId } : {}),
+              ...(terminalExecution.compiledPlanId ? { compiledPlanId: terminalExecution.compiledPlanId } : {}),
+              ...(terminalExecution.recoveryPhase ? { recoveryPhase: terminalExecution.recoveryPhase } : {}),
+              ...(terminalExecution.recoveryReason ? { recoveryReason: terminalExecution.recoveryReason } : {}),
+              ...(terminalExecution.noProgressFingerprint ? { noProgressFingerprint: terminalExecution.noProgressFingerprint } : {}),
+            } : null;
+            if (!phaseTurnPayload) {
+              const phaseProgress = refreshed.phaseProgress;
+              if (phaseProgress) {
+                const resolution = resolveConductorTurnResolution({
+                  contract: requestPhaseContract,
+                  currentState: currentBuildState!,
+                  phaseProgress,
+                  latestPhaseTurn: refreshed.latestPhaseTurn,
+                  pendingUiTool: refreshed.pendingUiTool,
+                  loopStatus: currentLoopStatus,
+                  stepsUsed: turnStepCount,
+                  stepLimit: requestStepLimit,
+                });
+                if (resolution) {
+                  phaseTurnPayload = {
+                    phase: requestStartPhase,
+                    parentArtifactHash: requestStartParentArtifactHash,
+                    stepsUsed: turnStepCount,
+                    stepLimit: requestStepLimit,
+                    outcome: resolution.outcome,
+                    continuation: resolution.continuation,
+                    ...(resolution.nextPhase ? { nextPhase: resolution.nextPhase } : {}),
+                    ...(resolution.handoffId ? { handoffId: resolution.handoffId } : {}),
+                    ...(resolution.recoveryPhase ? { recoveryPhase: resolution.recoveryPhase } : {}),
+                    ...(resolution.recoveryReason ? { recoveryReason: resolution.recoveryReason } : {}),
+                    ...(resolution.noProgressFingerprint ? { noProgressFingerprint: resolution.noProgressFingerprint } : {}),
+                    ...(resolution.pendingToolCallId ? { pendingToolCallId: resolution.pendingToolCallId } : {}),
+                    ...(resolution.resumeAfterAnswer !== undefined ? { resumeAfterAnswer: resolution.resumeAfterAnswer } : {}),
+                    resolutionReason: resolution.reason,
+                  };
+                }
+              }
+            }
+            if (phaseTurnPayload) {
+              await appendBuildEvents(auth, loopId, [makeConductorPhaseTurnEvent(phaseTurnPayload)]);
+            }
           } catch (error) {
             console.error(`[loops/chat] failed to persist conductor transcript${isAborted ? " after abort" : ""}:`, error);
           }
@@ -1300,7 +1763,44 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       });
     };
 
+    const shouldBreakConfirmLoop = (): boolean => {
+      const pending = derivePendingUiToolFromEvents(buildEvents);
+      if (pending?.toolName !== "confirmOutcomeBrief") return false;
+      const input = pending.input;
+      const briefHash = input && typeof input === "object" && "briefHash" in input
+        ? String((input as { briefHash?: string }).briefHash ?? "")
+        : "";
+      return countUncompletedUiToolRequests(buildEvents, "confirmOutcomeBrief", briefHash || undefined) >= 3;
+    };
+
+    const pipeConfirmLoopRecovery = async (originalMessages: UIMessage[]) => {
+      const recoveryText = "The confirmation prompt is still waiting for your answer above. Use the Confirm or Change buttons instead of sending another message.";
+      const recoveryMessage: UIMessage = {
+        id: randomUUID(),
+        role: "assistant",
+        parts: [{ type: "text", text: recoveryText }],
+      };
+      const recoveredMessages = [...originalMessages, recoveryMessage];
+      await saveBuildChatMessages(auth, loopId, recoveredMessages);
+      const stream = createUIMessageStream({
+        originalMessages,
+        execute: ({ writer }) => {
+          writer.write({ type: "text-start", id: recoveryMessage.id });
+          writer.write({ type: "text-delta", id: recoveryMessage.id, delta: recoveryText });
+          writer.write({ type: "text-end", id: recoveryMessage.id });
+        },
+      });
+      pipeUIMessageStreamToResponse({
+        response: res,
+        stream,
+      });
+    };
+
     try {
+      if (shouldBreakConfirmLoop()) {
+        await pipeConfirmLoopRecovery(chatMessages);
+        return;
+      }
       pipeConductorStream(await startConductorStream(chatMessages), chatMessages);
     } catch (error) {
       if (!isMissingToolResultsError(error) && !(error instanceof MissingToolResultsError)) {
@@ -1311,8 +1811,8 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
         : [];
       console.warn(`[loops/chat:${loopId}] missing tool results during replay; attempting recovery`, { toolCallIds });
       await appendBuildEvents(auth, loopId, interruptionEventsForToolCallIds(chatMessages, toolCallIds));
-      buildEvents = await getBuildEvents(auth, loopId);
-      chatMessages = projectChatMessages(buildEvents);
+      await refreshBuildProjection();
+      chatMessages = buildProjection.chatMessages;
       try {
         pipeConductorStream(await startConductorStream(chatMessages), chatMessages);
       } catch (retryError) {

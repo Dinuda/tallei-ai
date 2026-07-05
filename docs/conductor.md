@@ -1,10 +1,51 @@
 # Conductor — loop authoring & runtime
 
-**Conductor** is Tallei's conversational loop engine: describe what you want in chat, patch a `loop_spec_v1`, compile to a runnable plan, activate triggers, and execute via Temporal or the same `runAgenticLoop` path inline when Temporal is off.
+**Conductor** is Tallei's conversational loop engine: describe what you want in chat, walk through nine bounded build phases backed by an event log and artifact chain, compile to a runnable plan, activate triggers, and execute via Temporal or the same `runAgenticLoop` path inline when Temporal is off.
 
 The UI lives at `/dashboard/loops/:loopId/conductor`. Backend domain code is in `src/loops/`; connectors in `src/integrations/composio/`; durable execution in `src/temporal/`.
 
 > **Note:** `src/services/conductor/` is a legacy stub from the pre–loop-engine spec-run stack. The active Conductor flow uses `src/loops/` + `/api/loops/`*, not `/api/conductor/`*.
+
+---
+
+## Event-log-first build state
+
+Conductor orchestration reads a **single projection** from the append-only `loop_build_events` table on every turn. The event log is canonical; `loop_specs` revisions are derived from committed artifacts, not patched directly by the model.
+
+| Layer | Role |
+| ----- | ---- |
+| **Event log** | Canonical timeline: messages, tool executions, artifacts, phase turns, handoffs, recoveries |
+| **`projectLoopBuild(events)`** | Projects `LoopBuildState`, `LoopSpec`, chat transcript, `phaseProgress`, pending UI tools, latest phase turn, consumed handoff IDs |
+| **Artifact chain** | Each phase commits an immutable artifact (`intent`, `blueprint`, `connectors`, `bindings`, `review`, `compile`, `test`, `activation`) keyed by `artifactHash` with a `parentHash` link to the prior phase |
+| **Interpreters** | Server-side functions (`interpretCompletedIntent`, `interpretConnectorSelections`, `interpretBindingDiscovery`, `interpretReviewConfirmation`) derive artifacts from tool evidence and commit them before the model's next step |
+| **Phase contracts** | Each `POST /api/loops/:id/chat` request runs **one bounded phase attempt** with an allowed-tool list, optional `nextTool`, and a step budget (`CONDUCTOR_PHASE_STEP_LIMITS`) |
+| **Turn resolution** | `resolveConductorTurnResolution()` decides whether the HTTP turn ends with `next_phase`, `continue_phase`, `wait_for_user`, `budget_exhausted`, or `build_complete` |
+| **Tool evidence** | Server-executed tools append `tool_call.completed` events with execution metadata (`turnOutcome`, `continuation`, `handoffId`, `recoverToPhase`, `noProgressFingerprint`, …) |
+| **Phase turns** | `phase_turn.completed` records terminal outcomes; `phase_handoff.consumed` marks client auto-continues |
+
+**Nine phases:** `intent → blueprint → connectors → bindings → review → compile → test → activation`
+
+| Phase | Step limit | LLM tools | Server auto-commit |
+| ----- | ---------- | --------- | ------------------ |
+| `intent` | 6 | `analyzeIntent`, `askQuestion` | intent + blueprint after all questions answered |
+| `blueprint` | 4 | *(none — wait)* | derived from `analyzeIntent.executionOrder` |
+| `connectors` | 8 | `discoverConnectorsForBlueprint`, `pickConnectorApp`, `listWorkspaceConnectors`, `connectToolkit` | connector selections when all roles picked and connected |
+| `bindings` | 12 | `discoverBindings`, `listTriggers`, `listActions`, `askQuestion`, `resolveBindings` | bindings artifact after successful `resolveBindings` |
+| `review` | 6 | `presentAgentTeam`, `confirmOutcomeBrief` | review artifact after user confirms |
+| `compile` | 8 | `compileLoop` + discovery helpers on compile failure | compile artifact |
+| `test` | 6 | `testRunLoop` | test artifact |
+| `activation` | 6 | `presentReplyOptions`, `activateLoop` | activation artifact |
+
+**User-facing stages** (dashboard progress): `understand` (intent) → `design` (blueprint) → `connect_tools` (connectors + bindings) → `review_and_activate` (review through activation). Mapped by `userFacingStageForPhase()`.
+
+- `blueprint` is server-derived — the model must not call tools during this phase.
+- Phase completion emits `continuation: next_phase` + `handoffId`; the dashboard auto-sends the next request via `shouldAutoSendConductorChat`.
+- Mid-phase bridges (e.g. text after `analyzeIntent` before `askQuestion`) use `handoffPending` + `isPhaseHandoffPending` for the same auto-continue path.
+- Recoverable failures set `recoverToPhase` / `recoveryPhase` and stop the HTTP turn; the next request resumes from persisted state.
+- Budget exhaustion appends `phase_turn.completed` with `budget_exhausted` and surfaces `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` with Continue chips.
+- **Build continuity:** `reconcileLoopBuildContinuity()` detects stale/missing compile artifacts during `test`/`activation` and can recover to `compile` via `phase.recovery_requested`.
+
+Key files: `src/loops/build-state-projection.ts`, `src/loops/build-phase-progress.ts`, `src/loops/build-event-interpreter.ts`, `src/loops/build-events.ts`, `src/loops/conductor-turn-resolution.ts`, `src/loops/build-continuity.ts`, `src/transport/http/routes/loops.ts`.
 
 ---
 
@@ -17,7 +58,7 @@ flowchart TD
   C --> D["/dashboard/loops/:id/conductor"]
 
   D -->|chat stream| E[POST /api/loops/:id/chat]
-  E -->|patchLoopSpec| F[(loop_specs)]
+  E -->|artifact interpreters| F[(loop_build_events → loop_specs)]
 
   D -->|Compile| G[POST /api/loops/:id/compile]
   G -->|Composio tool resolve| H[(compiled_plans)]
@@ -40,8 +81,8 @@ flowchart TD
 
 | Phase              | What happens                                                      | Key tables                                                                           |
 | ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| **Create**         | Loop row + spec draft from template                               | `loops`, `loop_specs`                                                                |
-| **Conductor chat** | LLM patches spec via tools                                        | `loop_specs` (revision++), `loop_chat_threads` (`kind=build`)                        |
+| **Create**         | Loop row + spec draft from template                               | `loops`, `loop_specs`, `loop_build_events` (seed state)                              |
+| **Conductor chat** | LLM calls phase-scoped tools; server commits artifacts            | `loop_build_events`, `loop_specs` (derived), `loop_chat_threads` (`kind=build`)      |
 | **Compile**        | Bind capabilities → Composio actions; freeze trigger slug on plan | `compiled_plans` (no Composio side effects)                                          |
 | **Activate**       | Provision Composio trigger + subscribe loop; mark plan active     | `loops`, `workspace_trigger_channels`, `loop_trigger_subscriptions`                  |
 | **Run**            | Planner loop + tools + optional approval                          | `loop_runs`, `loop_run_steps`, `loop_chat_threads` (`kind=run`), `approval_requests` |
@@ -53,28 +94,30 @@ flowchart TD
 
 **Route:** `POST /api/loops/:loopId/chat` (SSE stream, proxied by `dashboard/app/api/loops/[...path]/route.ts`)
 
-**Model:** `getStreamingLanguageModel("conductor")` → `TALLEI_CONDUCTOR__MODEL` (OpenCode Zen by default). **One model, one stream** — there is no separate intent-analysis, outcome-summary, or planner pre-pass in the build chat. Conductor analyzes intent inline and patches the spec; the dashboard projects the final review directly from that spec.
+**Model:** `getStreamingLanguageModel("conductor")` → `TALLEI_CONDUCTOR__MODEL` (OpenCode Zen by default). **One model, one stream** per phase attempt — there is no separate nested analyst, review summarizer, or planner pre-pass in build chat. The Conductor calls `analyzeIntent` as a tool to produce the execution plan; the server derives and commits intent/blueprint artifacts. Review content comes from `LoopSpec` + `presentAgentTeam`; the model only supplies interaction tools.
 
-**System prompt:** `buildConductorSystemPrompt()` in `src/loops/planning-agent.ts` — ownership-first: Conductor resolves compile blockers autonomously; interrupts the user only when a preference materially changes what the loop does.
+**System prompt:** `buildConductorSystemPrompt()` in `src/loops/planning-agent.ts` — rebuilt on every `prepareStep` from the current in-memory spec, `phaseProgress`, and `phaseContract`. Ownership-first: Conductor resolves compile blockers autonomously; interrupts the user only for material business forks.
 
-**Tools exposed to the LLM:**
+**Tools exposed to the LLM (phase-scoped):**
 
 
-| Tool                                           | Server execute?  | Purpose                                                                                                                                                                                                 |
-| ---------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `patchLoopSpec`                                | yes              | Apply a partial spec patch (`intent`, `taskBlueprint`, bindings, trigger, output, agent, approval). Gated: bindings/triggers/output.connector blocked until blueprint connectors are chosen.            |
-| `discoverConnectorsForBlueprint`               | yes              | Rank apps for the whole blueprint (each app once). Returns `askOptions`, `recommendedOptionIds`, `defaultQuestion`. Connected apps get a ranking boost only — user always picks via `pickConnectorApp`. |
-| `pickConnectorApp`                             | **no** (UI-only) | Present app picker; optional `question` text only — options come from the last discovery output in the transcript.                                                                                      |
-| `discoverBindings`                             | yes              | Search + rank Composio **action candidates** within a **chosen** connector.                                                                                                                             |
-| `resolveBindings`                              | yes              | Resolve the complete trigger/action artifact in one strict, server-schema-constrained model call. Input is an empty object.                                                                             |
-| `listTriggers`                                 | yes              | List Composio event triggers for a toolkit                                                                                                                                                              |
-| `listActions`                                  | yes              | Full action dump for one toolkit                                                                                                                                                                        |
-| `connectToolkit`                               | yes              | Start OAuth for a toolkit                                                                                                                                                                               |
-| `askQuestion`                                  | **no** (UI-only) | **Business forks only** — delivery mode, approval, schedule, ambiguous destination. **Forbidden:** connector app choice, Yes/No to confirm a connected app, Composio/API details.                       |
-| `confirmOutcomeBrief`                          | **no** (UI-only) | Display Confirm/Change buttons for the config-driven review card. Receives the server-computed current-spec hash as an internal value.                                                                  |
-| `presentReplyOptions`                          | **no** (UI-only) | Clickable chips for compile / test / activate confirmations                                                                                                                                             |
-| `compileLoop` / `testRunLoop` / `activateLoop` | yes              | Go-live path after spec is ready                                                                                                                                                                        |
+| Tool                                           | Server execute?  | Phases | Purpose |
+| ---------------------------------------------- | ---------------- | ------ | ------- |
+| `analyzeIntent`                                | yes              | intent | Platform-neutral execution plan: `executionOrder`, scope, approval, 0–4 business questions. Zero questions is valid when behavior is already clear. |
+| `askQuestion`                                  | **no** (UI-only) | intent, bindings | Business forks from `analyzeIntent` or `resolveBindings.pendingQuestions`. **Forbidden:** connector app choice, Yes/No to confirm a connected app, Composio/API details. |
+| `discoverConnectorsForBlueprint`               | yes              | connectors | Rank apps per blueprint outcome group; may auto-resolve prior explicit choices. Returns `groups[]` with `askOptions` per unresolved role. |
+| `pickConnectorApp`                             | **no** (UI-only) | connectors | User picks app per `outcomeId` + `role`; options come from discovery output. |
+| `listWorkspaceConnectors`                      | yes              | connectors, compile | Refresh connected-toolkit status; connection ≠ app-selection consent. |
+| `connectToolkit`                               | yes              | connectors, compile | Start OAuth for a toolkit |
+| `discoverBindings`                             | yes              | bindings, compile | Search + rank Composio action candidates within a chosen connector |
+| `listTriggers` / `listActions`                 | yes              | bindings, compile | Provider catalogues for binding resolution |
+| `resolveBindings`                              | yes              | bindings, compile | Atomic binding resolver: returns `pendingQuestions` or commits validated trigger/bindings/output artifact |
+| `presentAgentTeam`                             | yes              | review | Specialist roster grouped from blueprint outcomes; server normalizes titles and renders `AgentTeamRoster` |
+| `confirmOutcomeBrief`                          | **no** (UI-only) | review | Confirm/Change buttons after roster. Receives server-computed `briefHash`. |
+| `compileLoop` / `testRunLoop` / `activateLoop` | yes              | compile, test, activation | Go-live path |
+| `presentReplyOptions`                          | **no** (UI-only) | activation | Clickable chips for explicit activation approval |
 
+> **Legacy:** `patchLoopSpec` is no longer in the active Conductor tool set. Spec mutations flow through artifact interpreters. Old transcripts with `patchLoopSpec` parts remain readable.
 
 The dashboard shows a **Loop spec** sheet (`ConductorSpecSheet`) when `spec.taskBlueprint` is set — outcome roles, connector choices, missing slots, compile/run actions.
 
@@ -90,32 +133,40 @@ flowchart TB
     Page["/loops/:id/conductor"]
     Bridge["conductor-builder.tsx — useChat bridge"]
     Layout["conductor-builder-layout.tsx — composer"]
-    Shared["conductor-shared.ts — pending prompts, discovery lookup"]
+    Shared["conductor-shared.ts — pending prompts, phase handoff"]
     Suggestions["conductor-prompt-suggestions.ts — reply chips"]
+    Roster["agent-team-roster.tsx — specialist review"]
   end
 
   subgraph api ["API"]
-    Chat["POST /api/loops/:id/chat — streamText"]
-    Prompt["buildConductorSystemPrompt()"]
-    Tools["loops.ts tool definitions + gates"]
+    Chat["POST /api/loops/:id/chat — streamText per phase"]
+    Prompt["buildConductorSystemPrompt() + phaseContract"]
+    Tools["loops.ts — phase-gated tool execute"]
+    Resolve["resolveConductorTurnResolution()"]
   end
 
   subgraph domain ["src/loops/"]
-    Patch["patch.ts — applySpecPatch, getMissingSlots"]
-    Discovery["connector-discovery.ts — rank apps, CONNECTED_TOOLKIT_BOOST"]
+    Projection["build-state-projection.ts — projectLoopBuild"]
+    Progress["build-phase-progress.ts — deriveBuildPhaseProgress"]
+    Interpreter["build-event-interpreter.ts — artifact interpreters"]
+    Discovery["connector-discovery.ts — rank apps"]
     Bindings["binding-discovery.ts — rank actions"]
-    Decomp["task-decomposition.ts — blueprint validation gates"]
+    Continuity["build-continuity.ts — stale compile recovery"]
   end
 
   Page --> Bridge --> Chat
   Layout --> Shared
   Layout --> Suggestions
+  Roster --> Shared
   Chat --> Prompt
   Chat --> Tools
-  Tools --> Patch
+  Chat --> Resolve
+  Tools --> Interpreter
   Tools --> Discovery
   Tools --> Bindings
-  Tools --> Decomp
+  Projection --> Progress
+  Interpreter --> Projection
+  Continuity --> Chat
 ```
 
 
@@ -125,29 +176,57 @@ flowchart TB
 
 | File                                                               | Role                                                                                                                  |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, spec meta sync                                                                                   |
+| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, phase handoff auto-send, spec meta sync                                                          |
 | `dashboard/src/components/conductor/conductor-builder-layout.tsx`  | Composer: pending question vs free-text vs thinking indicator                                                         |
 | `dashboard/src/components/conductor/conductor-builder-chat.tsx`    | Transcript + tool part rendering                                                                                      |
-| `dashboard/src/components/conductor/conductor-shared.ts`           | `findPendingInteractivePrompt`, `findLatestConnectorDiscovery`, blueprint connector checks, Yes/No → app picker remap |
-| `dashboard/src/components/conductor/builder-connector-prompt.tsx`  | App card picker (`questionId: connector-app`)                                                                         |
-| `dashboard/src/components/ai-elements/interactive-prompt-menu.tsx` | Generic `askQuestion` / `pickConnectorApp` answer UI                                                                  |
-| `dashboard/src/lib/conductor-prompt-suggestions.ts`                | Heuristic Yes/compile/test chips when no pending tool prompt                                                          |
+| `dashboard/src/components/conductor/conductor-shared.ts`           | `findPendingInteractivePrompt`, phase handoff detection, `shouldAutoSendConductorChat`, Yes/No → app picker remap     |
+| `dashboard/src/components/conductor/agent-team-roster.tsx`         | Specialist team review card (`presentAgentTeam` output)                                                               |
+| `dashboard/src/components/conductor/builder-connector-prompt.tsx`  | App card picker (`pickConnectorApp`)                                                                                  |
+| `dashboard/src/components/ai-elements/interactive-prompt-menu.tsx` | Generic `askQuestion` / `confirmOutcomeBrief` answer UI                                                               |
+| `dashboard/src/lib/conductor-prompt-suggestions.ts`                | Heuristic compile/test/activate chips; budget-exhausted Continue                                                      |
+| `dashboard/src/lib/conductor-phase-handoff.ts`                     | Client mirror of `shared/conductor-phase-handoff.ts`                                                                  |
+| `dashboard/src/lib/conductor-activation-confirm.ts`                | Activation reply token matching for stall Continue routing                                                            |
+| `shared/conductor-phase-handoff.ts`                                | `isPhaseHandoffPending` — text-only bridge auto-continue gate                                                         |
+| `shared/conductor-activation-confirm.ts`                           | `isActivationConfirmationReply`, `findActivationReplyOption`                                                          |
+| `shared/conductor-stall-recovery.ts`                               | `isPhaseOpenForStallRecovery`, `isBuildTerminalForStall`                                                             |
 
 
 ### Chat transport behavior
 
-- `**sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls**` — after the user answers a UI tool (`pickConnectorApp`, `askQuestion`, `presentReplyOptions`), the stream continues without an extra user message.
-- **PUT `/api/loops/:id/chat`** — debounced transcript persistence (500ms).
-- **GET `/api/loops/:id`** — hydrates `chatMessages` + latest spec on load.
+- **`sendAutomaticallyWhen: shouldAutoSendConductorChat`** — continues the stream after:
+  - User answers a UI tool (`pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, `presentReplyOptions`)
+  - A phase completes with `continuation: next_phase` (cross-phase handoff via `findPendingConductorPhaseHandoff`)
+  - A mid-phase text-only bridge when `isPhaseHandoffPending` is true (e.g. prose after `analyzeIntent` before `askQuestion`)
+- **Phase handoff consumption** — when the client auto-continues, the server appends `phase_handoff.consumed` for the carried `handoffId` before starting the next phase stream. Superseded handoffs return HTTP 409.
+- **PUT `/api/loops/:id/chat`** — debounced transcript persistence (500ms); messages are also mirrored into `loop_build_events`.
+- **GET `/api/loops/:id`** — hydrates `chatMessages`, `buildProgress.phaseProgress`, `buildProgress.latestPhaseTurn`, `buildPhase`, and latest spec on load (polled after each chat revision).
+
+### Phase handoff & budget recovery
+
+When Conductor ends a turn with **`continuation: next_phase`** or a text-only bridge with `handoffPending`, `shouldAutoSendConductorChat` triggers the next HTTP request without user input.
+
+**Authority:** phase progress comes from `buildProgress.phaseProgress` on `GET /api/loops`, projected by `deriveBuildPhaseProgress()` from the event log. `isPhaseHandoffPending()` (`shared/conductor-phase-handoff.ts`) supplements `phaseProgress.handoffPending` with transcript-derived predicates per phase.
+
+| Signal | Client behavior |
+|--------|-----------------|
+| `turnOutcome: phase_complete`, `continuation: next_phase` | Auto-send next phase (after `phase_handoff.consumed`) |
+| `handoffPending: true` + text-only last message | Auto-send to invoke expected `nextTool` |
+| `turnOutcome: budget_exhausted` | Show `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` + Continue chips |
+| `turnOutcome: waiting_for_user` | Wait for UI tool answer |
+| `turnOutcome: build_complete` or `loop.status === active` | No auto-continue |
+
+**Budget exhaustion:** server appends `phase_turn.completed` with `outcome: budget_exhausted`. The dashboard surfaces Continue chips; the next request resumes from persisted `phaseProgress` and event-log state.
+
+**Activation confirmation:** `isActivationConfirmationReply()` (`shared/conductor-activation-confirm.ts`) classifies `presentReplyOptions` replies by option id, label, and message tokens before `activateLoop` is authorized.
 
 ### UI-only tools (no server `execute`)
 
-`pickConnectorApp`, `askQuestion`, and `presentReplyOptions` are **human-in-the-loop** tools:
+`pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, and `presentReplyOptions` are **human-in-the-loop** tools:
 
 1. Conductor calls the tool → part state `input-available`.
-2. Dashboard renders the composer prompt (app picker or question menu).
-3. User selects → `addToolOutput` → stream auto-continues.
-4. Conductor reads `output` on the next step and patches the spec or proceeds.
+2. Dashboard renders the composer prompt (app picker, question menu, confirm buttons, or reply chips).
+3. User selects → `addToolOutput` → stream auto-continues via `shouldAutoSendConductorChat`.
+4. Conductor reads `output` on the next step and proceeds (or the server commits artifacts from the evidence).
 
 **UI remap:** if Conductor wrongly calls `askQuestion` with Yes/No to confirm an app, the dashboard remaps it to the app card picker (`BuilderConnectorPrompt`) using discovery options — user still chooses explicitly.
 
@@ -161,96 +240,118 @@ This is the **intended** behavior the system prompt enforces. Deviations (e.g. `
 sequenceDiagram
   participant U as User
   participant C as Conductor LLM
+  participant S as Server interpreters
+  participant A as analyzeIntent
+  participant Q as askQuestion
   participant D as discoverConnectorsForBlueprint
   participant P as pickConnectorApp
-  participant B as discoverBindings
-  participant S as patchLoopSpec
-  participant Q as confirmOutcomeBrief
+  participant B as resolveBindings
+  participant T as presentAgentTeam
+  participant F as confirmOutcomeBrief
 
   U->>C: Describe outcome (e.g. triage support email, draft replies)
-  C->>S: patchLoopSpec — intent + taskBlueprint + agent.instructions
-  Note over C: If draft AND send both mentioned with no sequence → askQuestion (delivery_mode) first
+  C->>A: analyzeIntent — executionOrder + business questions
+  A-->>C: analysis (0–4 questions)
+  opt questions pending
+    C->>Q: askQuestion × N (same turn)
+    Q-->>C: user answers
+  end
+  S-->>S: commit intent + blueprint artifacts
 
-  C->>D: discoverConnectorsForBlueprint(outcomes)
-  D-->>C: askOptions, recommendedOptionIds (connected apps ranked higher)
+  C->>D: discoverConnectorsForBlueprint
+  D-->>C: groups with askOptions per unresolved role
+  C->>P: pickConnectorApp per pending outcome
+  P-->>C: user picked app (or connectToolkit first)
+  S-->>S: commit connectors artifact
 
-  C->>P: pickConnectorApp (optional question text)
-  P-->>C: user picked app (or connectToolkit first if unconnected)
-  C->>S: patchLoopSpec — selectedConnector on all pending non-transform outcomes
+  C->>B: discoverBindings + listTriggers → resolveBindings
+  B-->>C: bindings artifact or pendingQuestions
+  opt binding questions
+    C->>Q: askQuestion (exact pendingQuestions wording)
+    Q-->>C: user answers
+    C->>B: resolveBindings again
+  end
+  S-->>S: commit bindings artifact
 
-  C->>B: discoverBindings per connector
-  B-->>C: suggestedBindings
-  C->>S: patch bindings, event trigger, output, approval
+  C->>T: presentAgentTeam — specialist roster
+  T-->>U: AgentTeamRoster in transcript
+  C->>F: confirmOutcomeBrief
+  F-->>U: Confirm / Change buttons
+  F-->>C: user confirms
+  S-->>S: commit review artifact
 
-  C->>Q: stream summary fields + current server hash
-  Q-->>U: progressively render review card and confirmation buttons
-  Q-->>C: user confirms or requests a change
-  C->>S: patch confirmation hash, or patch the requested change
+  C->>C: compileLoop → testRunLoop → presentReplyOptions → activateLoop
 ```
 
 
 
 ### Outcome-first planning (unified Conductor)
 
-1. `**patchLoopSpec**` → `intent` (`goal`, `outcome`, `successCriteria`) + `taskBlueprint` outcome roles on the first turn. Conductor derives these directly — no `decomposeTask` / nested analyst.
-2. `**askQuestion**` only when a **business fork** is unresolved — chiefly **draft vs send** when both appear in the user message without clear sequencing.
-3. `**discoverConnectorsForBlueprint`** once → `**pickConnectorApp`** always (user chooses; connected `*` is ranking hint only).
-4. `**discoverBindings**` per chosen connector + `**listTriggers**` gather current provider candidates.
-5. `**resolveBindings**` returns server-owned questions when choices are missing, then atomically commits the validated binding artifact after answers are available.
-6. **Confirmation:** the dashboard renders the current `LoopSpec`, and Conductor calls `confirmOutcomeBrief` only for interaction; there is no review tool, duplicated summary payload, Markdown parsing, or nested summarizer model.
-7. **Compile path:** after confirmation, `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop`.
+1. **`analyzeIntent`** → platform-neutral `executionOrder`, scope, approval, and 0–4 business questions. Never ask which app/platform during intent.
+2. **`askQuestion`** only for returned intent questions or `resolveBindings.pendingQuestions` — chiefly **draft vs send** when both appear without clear sequencing.
+3. **Server** commits intent + blueprint from `deriveIntentAndBlueprint()` once questions are complete (or immediately when zero questions).
+4. **`discoverConnectorsForBlueprint`** → **`pickConnectorApp`** per unresolved role (discovery may auto-resolve prior explicit choices).
+5. **`discoverBindings` / `listTriggers` → `resolveBindings`** atomically commits trigger, bindings, and output. Reproduce `pendingQuestions` exactly with `askQuestion`, then call `resolveBindings` again.
+6. **Review:** one short intro sentence → **`presentAgentTeam`** → **`confirmOutcomeBrief`**. The roster and routing manifest render from server-normalized spec; the model does not generate review summary fields.
+7. **Compile path:** after review artifact committed → `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop`.
 
-**Default connector rule:** one app powers **trigger, receive, draft, and send** unless the user explicitly asked for **separate apps** for receive vs send (e.g. “read from Zendesk, send via Gmail”). `applyPrimaryConnectorToBlueprint()` in `connector-discovery.ts` applies one slug to all pending non-`transform` outcomes.
+**Activation sub-flow:** The `activation` phase requires explicit user approval via `presentReplyOptions`. `deriveActivationProgress()` and `isActivationConfirmationReply()` classify the chip reply before authorizing `activateLoop`. The handler also verifies a confirming `presentReplyOptions` completion exists in the event log.
+
+**Default connector rule:** one app powers **trigger, receive, draft, and send** unless the user explicitly asked for **separate apps** for receive vs send. Discovery may reuse a prior explicit pick for later outcome roles in the same loop.
 
 ---
 
 ## System prompt (`buildConductorSystemPrompt`)
 
-Built fresh on **every** chat request. Structured for clarity without blowing the context window:
+Rebuilt on **every** `prepareStep` from the current in-memory spec, `phaseProgress`, and `phaseContract`. Structured for clarity without blowing the context window.
 
-Before every model step, `prepareStep` rebuilds the system prompt from the request's current in-memory spec. This matters when earlier tools patched the spec during the same request. When the current spec has no compile blockers and is not confirmed, the server computes `computeOutcomeBriefHash(spec)` and supplies it only as the internal `briefHash` for `confirmOutcomeBrief`.
+The prompt includes: core rules, tool ownership index, blueprint & patch flow (artifact-based), execution-order rules, specialist team review guidance, phase goal/completion criteria, step budget, allowed tools, and a single compact `Spec JSON` line.
 
-`buildOutcomeReviewViewModel()` projects the card from `LoopSpec`: title and outcome from intent/blueprint, stages from blueprint outcomes, trigger copy from trigger configuration, approval and reversibility from approval policy, and result from destination/output configuration. The model does not generate or duplicate presentation data. The existing interactive menu remains unchanged in the composer.
+When bindings are committed and review is pending, the server computes `computeOutcomeBriefHash(spec)` and supplies it only as the internal `briefHash` for `confirmOutcomeBrief`.
 
-The card presents this projection as an interactive **routing manifest**, not an implementation graph. It uses the AI Elements `Canvas` with static edges: users can pan, zoom, select a stage, inspect its configured goal, and use a minimap on routes longer than six stages. Connector nodes use the Composio logo service already used by the app picker, Tallei processing nodes use `/tallei.svg`, and approval nodes show the signed-in user's avatar. Styling follows the square-cornered neutral `InteractivePromptMenu` surface. The manifest reference is a short display-only prefix of the confirmation hash.
+### Specialist team review (`presentAgentTeam`)
 
-Tool input examples live only under `test/unit/loops/fixtures`. Production descriptions explain behavior and rely on the Zod `inputSchema` already supplied to the AI SDK; runtime prompts never interpolate example payloads.
+The model groups adjacent blueprint outcomes into coherent specialist personas (trigger outcomes stay separate; never group across the approval boundary). The server normalizes job titles via `normalizeAgentTeam()` and renders `AgentTeamRoster` in the transcript. `OutcomeBriefCard` / routing manifest still project from `LoopSpec` for the confirmation step.
+
+The routing manifest uses AI Elements `Canvas` with static edges: users can pan, zoom, select a stage, inspect its configured goal, and use a minimap on routes longer than six stages. Connector nodes use the Composio logo service; Tallei processing nodes use `/tallei.svg`; approval nodes show the signed-in user's avatar.
+
+Tool input examples live only under `test/unit/loops/fixtures`. Production descriptions explain behavior and rely on the Zod `inputSchema` already supplied to the AI SDK.
 
 ### Confirmation integrity and invalidation
 
 - The hash covers intent, trigger, blueprint, bindings, actions, output, approvals, and guardrails.
-- A Confirm response echoes the internal hash; Conductor patches `intentDiscovery.status=confirmed` and `confirmedBriefHash`.
+- A Confirm response echoes the internal hash; the server commits a `review` artifact with `confirmedByUser: true`.
 - `isOutcomeBriefConfirmed()` recomputes the hash before compilation. A mismatch blocks compilation.
-- Any material `applySpecPatch()` change resets confirmed state and clears the stored hash, requiring a new config-driven review.
+- Re-committing upstream artifacts (e.g. new bindings) invalidates review and requires a new `presentAgentTeam` + `confirmOutcomeBrief` cycle.
 
 ### Latency and legacy transcripts
 
-The old flow called `reviewOutcomeBrief`, waited for a separate planner-model JSON summary, then resumed Conductor to call `confirmOutcomeBrief`. The current flow removes the nested model request and extra review step. Review content now comes from `LoopSpec`; the model supplies only the interaction call.
+The old flow called `reviewOutcomeBrief`, waited for a separate planner-model JSON summary, then resumed Conductor to call `confirmOutcomeBrief`. The current flow removes the nested model request. Review content comes from `LoopSpec` + `presentAgentTeam`; the model supplies only interaction tools.
 
-Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` parts remain readable, unanswered legacy `confirmOutcomeBrief` calls remain resumable, and the dashboard no longer requires a review result before showing confirmation buttons. New transcripts never call `reviewOutcomeBrief`.
+Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` and `patchLoopSpec` parts remain readable; unanswered legacy `confirmOutcomeBrief` calls remain resumable. New builds use `analyzeIntent` and artifact interpreters, not `patchLoopSpec` or `reviewOutcomeBrief`.
 
 
 | Block                       | Purpose                                                               |
 | --------------------------- | --------------------------------------------------------------------- |
-| **First principles**        | Outcome-first, intent/blueprint, draft vs send fork                   |
-| **Ownership**               | Autonomous config, agent.instructions, bindings auto-apply            |
-| **Sequence**                | 5-step build order                                                    |
-| **Connectors & auto-apply** | `autoApplyConnector` fast path vs `pickConnectorApp`                  |
-| **Tool playbook**           | One-line tool index (UI tools included)                               |
-| **Technical defaults**      | Triggers, email.read                                                  |
-| **Dynamic tail**            | Workspace, connected `*`, blockers, **Next** hint, **Spec JSON once** |
+| **Core rules**              | Event-log authority, analyzeIntent contract, no internal IDs exposed    |
+| **Tool ownership**          | One-line index of every Conductor tool                                |
+| **Blueprint & patch flow**  | Six-step artifact-based build order                                   |
+| **Execution order**         | analyzeIntent.executionOrder → taskBlueprint.outcomes                 |
+| **Specialist team review**  | presentAgentTeam grouping rules + confirmOutcomeBrief                   |
+| **Dynamic tail**            | Workspace, blockers, phase contract, Next hint, Spec JSON once          |
 
 
-**Why not spec twice?** An older prompt dumped `taskBlueprint` as its own JSON block *and* the full `LoopSpec` — duplicate tokens with no extra signal. Current prompt includes **one** `Spec JSON:` line (full spec, compact stringify).
+**Why not spec twice?** The prompt includes **one** `Spec JSON:` line (full spec, compact stringify) — no duplicate `taskBlueprint` block.
 
-**UI tools are not in the prompt as replacements for tool calls** — the prompt tells Conductor to invoke `pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, and `presentReplyOptions` as tools. The dashboard renders those tools:
+**UI tools are not in the prompt as replacements for tool calls** — the prompt tells Conductor to invoke interactive tools directly. The dashboard renders them:
 
-- `**pickConnectorApp`** → `BuilderConnectorPrompt` app cards
-- `**askQuestion`** → `InteractivePromptMenu`
-- `**confirmOutcomeBrief**` → streamable review card in the transcript plus confirmation/change buttons in the composer
-- `**presentReplyOptions**` + `**deriveConductorPromptSuggestions**` → suggestion chips above the composer when no pending tool prompt
+- **`pickConnectorApp`** → `BuilderConnectorPrompt` app cards (per `outcomeId` + `role`)
+- **`askQuestion`** → `InteractivePromptMenu`
+- **`presentAgentTeam`** → `AgentTeamRoster` in transcript
+- **`confirmOutcomeBrief`** → routing manifest + Confirm/Change buttons in composer
+- **`presentReplyOptions`** + **`deriveConductorPromptSuggestions`** → suggestion chips when no pending tool prompt
 
-**Auto-apply:** when `discoverConnectorsForBlueprint` returns `autoApplyConnector`, Conductor patches immediately; client may also auto-submit `pickConnectorApp` if the model called it anyway (`findAutoConnectorPromptTarget`).
+**Auto-resolve:** when discovery can reuse a prior explicit connector choice for a later outcome role, the server emits `connector.auto_resolved` events and may commit the connectors artifact without another picker round.
 
 ### When Conductor **should** interrupt the user
 
@@ -270,19 +371,21 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` p
 
 | Situation                                   | What to do instead                                                              |
 | ------------------------------------------- | ------------------------------------------------------------------------------- |
-| Trigger type, Composio slug, fetch strategy | `listTriggers` + `discoverBindings` → patch                                     |
-| Agent instructions                          | Write operational brief from outcome + success criteria                         |
+| Trigger type, Composio slug, fetch strategy | `listTriggers` + `discoverBindings` → `resolveBindings`                         |
+| Agent instructions                          | Derived server-side from `analyzeIntent.executionOrder` in blueprint artifact   |
 | Capability bundles (“Read & Send”)          | Infer from intent; `discoverBindings`                                           |
-| Connected app is top-ranked                 | **Still show `pickConnectorApp`** — connected boosts rank, does not auto-select |
+| Connected app is top-ranked                 | **Still show `pickConnectorApp`** for unresolved roles — auto-resolve only reuses prior explicit picks |
 
 
 ### Anti-patterns (do not do)
 
-- `**askQuestion` with Yes/No to confirm a connected app** — use `pickConnectorApp`; UI remaps if model misbehaves.
-- **Auto-selecting Gmail because it is connected** — user must always confirm via picker.
-- **Per-role connector options** (Trigger: Gmail, Send: Gmail) — one app per loop in the picker.
+- **`askQuestion` with Yes/No to confirm a connected app** — use `pickConnectorApp`; UI remaps if model misbehaves.
+- **Auto-selecting Gmail because it is connected** — user must pick via picker for unresolved roles.
+- **Per-role connector options** (Trigger: Gmail, Send: Gmail) — one app per loop unless user asked for separate apps.
 - **Hand-built connector option lists** — always use `discoverConnectorsForBlueprint` output.
-- **Patching bindings/triggers before blueprint connectors are chosen** — `validateConnectorChoicesBeforeSpecPatch` returns an error.
+- **Calling `patchLoopSpec`, `listTriggers`, or `resolveBindings` during intent** — phase contract blocks unauthorized tools.
+- **Rerunning `analyzeIntent` after questions are emitted** — wait for answers; server commits artifacts automatically.
+- **Summarizing the specialist team in prose instead of calling `presentAgentTeam`** — roster must come from the tool.
 
 ---
 
@@ -293,10 +396,10 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` p
 ### `discoverConnectorsForBlueprint`
 
 1. For each pending non-`transform` outcome, run `discoverConnectorsForOutcome` using Composio tool search and catalogue hints.
-2. Merge candidates **by connector slug** (each app appears once).
-3. Sort by capability score, use connection state as a tie-breaker, and ensure viable connected apps are represented in the top-five `recommendedOptionIds`.
-4. Keep the full connectable catalogue in `askOptions`; compatibility and connection state affect ranking, never visibility or selectability.
-5. **Always** follow with `pickConnectorApp` — connected status affects ranking only; the user chooses the app.
+2. Return **`groups[]`** — one entry per unresolved outcome role with `outcomeId`, `role`, `askOptions`, and `recommendedOptionIds`.
+3. Sort by capability score; connection state is a tie-breaker only.
+4. **Auto-resolve** prior explicit user picks for later roles via `connector.auto_resolved` events when discovery confirms reuse.
+5. **Always** follow with `pickConnectorApp` for remaining unresolved groups — connected status affects ranking, not consent.
 
 ### Default picker question
 
@@ -323,13 +426,13 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` p
 
 ### Execution order
 
-**Primary:** `intentDiscovery.analysis.executionOrder` is the pipeline plan produced by `analyzeIntent`. Each step has a `role` (`trigger`, `source`, `transform`, `destination`) and a plain-language `description` in execution order.
+**Primary:** `analyzeIntent` outputs `executionOrder` — the pipeline plan. Each step has a `role` (`trigger`, `source`, `transform`, `destination`) and a plain-language `description` in execution order.
 
-`patchLoopSpec` should derive `taskBlueprint.outcomes` from `executionOrder` in the **same order**. Array order is execution order for the route diagram and `buildExecutionStrategy`.
+`deriveIntentAndBlueprint()` maps `executionOrder` to `taskBlueprint.outcomes` in the **same order** when the server commits the blueprint artifact. Array order is execution order for the route diagram and `buildExecutionStrategy`.
 
 **Fallback:** When `executionOrder` is missing (legacy specs) or blueprint outcomes diverge from it, the server may apply single-pass role bucket-sort (`trigger → source → transform → destination`) via `normalizeBlueprintOutcomeOrder()`. Multi-phase flows — where a `source` or `trigger` appears after a `destination` — are **never** reordered.
 
-**Shape** (patched via `patchLoopSpec`):
+**Shape** (committed in blueprint artifact):
 
 ```json
 {
@@ -344,11 +447,11 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` p
 }
 ```
 
-After connector pick, pending outcomes get `selectedConnector` + `status: "chosen"`. `transform` outcomes do not require a connector.
+After connector pick, outcomes get `selectedConnector` + `status: "chosen"` on the projected spec. `transform` outcomes do not require a connector.
 
-**Gate:** `validateConnectorChoicesBeforeSpecPatch()` in `task-decomposition.ts` blocks patches that touch `bindings`, `trigger` (event), or `output.connector` until every non-`transform` outcome is `chosen` or `skipped`.
+**Gate:** bindings phase requires a committed `connectors` artifact. Unauthorized tools are blocked by the phase contract, not ad-hoc patch validation.
 
-**Readiness:** `getMissingSlots()` — Conductor shows “Ready to compile” in the spec sheet when empty.
+**Readiness:** `getMissingSlots()` on the projected `LoopSpec` — Conductor shows “Ready to compile” in the spec sheet when empty.
 
 ---
 
@@ -359,15 +462,15 @@ After connector pick, pending outcomes get `selectedConnector` + `status: "chose
 
 | Step | Conductor action                                                                                                               |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------ |
-| 1    | `analyzeIntent` — `intent.outcome`, `executionOrder` (trigger → source → transform → destination), approval                    |
-| 2    | `patchLoopSpec` — `taskBlueprint.outcomes` derived from `executionOrder` in same order; `agent.instructions` operational brief |
+| 1    | `analyzeIntent` — `executionOrder` (trigger → source → transform → destination), approval                                    |
 | 2    | No `askQuestion` — “draft for review” is clear (not send-immediately)                                                          |
-| 3    | `discoverConnectorsForBlueprint` — Gmail connected, top ranked                                                                 |
-| 4    | `pickConnectorApp` — user confirms Gmail (or picks another app)                                                                |
-| 5    | `patchLoopSpec` — `selectedConnector: "gmail"` on trigger/source/destination outcomes                                          |
-| 6    | `listTriggers` + `discoverBindings` → patch bindings, event trigger, output, approval                                          |
-| 7    | Render the review card from `LoopSpec`; call `confirmOutcomeBrief` for the interaction                                         |
-| 8    | After confirmation, patch the current hash and continue to compile/test                                                        |
+| 3    | Server commits intent + blueprint artifacts                                                                                    |
+| 4    | `discoverConnectorsForBlueprint` — Gmail connected, top ranked in group                                                        |
+| 5    | `pickConnectorApp` — user confirms Gmail (or picks another app)                                                                |
+| 6    | Server commits connectors artifact                                                                                             |
+| 7    | `listTriggers` + `discoverBindings` → `resolveBindings` → bindings artifact                                                    |
+| 8    | `presentAgentTeam` → `confirmOutcomeBrief` → review artifact                                                                   |
+| 9    | `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop`                                                         |
 
 
 **User:** Same prompt but also says “and send the email” without sequencing.
@@ -375,9 +478,9 @@ After connector pick, pending outcomes get `selectedConnector` + `status: "chose
 
 | Step | Conductor action                                                                                     |
 | ---- | ---------------------------------------------------------------------------------------------------- |
-| 1    | `patchLoopSpec` — provisional blueprint                                                              |
-| 2    | `**askQuestion`** — “Should replies be sent automatically or saved as drafts for your review first?” |
-| 3    | User answers → patch resolved `intent.outcome`                                                       |
+| 1    | `analyzeIntent` — provisional execution order + draft-vs-send question                             |
+| 2    | **`askQuestion`** — “Should replies be sent automatically or saved as drafts for your review first?” |
+| 3    | User answers → server re-derives intent artifact with resolved outcome                               |
 | 4    | Continue connector discovery as above                                                                |
 
 
@@ -395,7 +498,7 @@ Historical `discoverBindings` and `setBindingConfig` evidence remains readable f
 
 **API:** `GET /api/connectors/catalog` — merged catalogue for UI.
 
-**Conductor ownership:** The model configures triggers, bindings, `agent.instructions`, and output from the user's goal — not a checklist of missing slots.
+**Conductor ownership:** The model plans via `analyzeIntent`, discovers connectors/bindings, and presents review — but trigger slugs, binding artifacts, and output config are committed server-side through interpreters and `resolveBindings`, not authored freely in tool args.
 
 ### Chat persistence (`loop_chat_threads`)
 
@@ -408,7 +511,7 @@ Build and run transcripts share one table with two thread kinds:
 | `run`   | One row per `run_id`                        | `compiled_plan_id`                                                 | `createLoopRun`, `insertRunStep`, `deliverOutputActivity`, `failRunActivity` |
 
 
-- **GET** `/api/loops/:id` returns `chatMessages` + `buildChat: { specRevision, compiledPlanId }`.
+- **GET** `/api/loops/:id` returns `chatMessages`, `buildChat: { specRevision, compiledPlanId }`, `buildPhase`, and `buildProgress: { stage, phaseProgress, latestPhaseTurn }`.
 - **GET** `/api/loops/:id/runs/:runId` returns `chatMessages` (run transcript).
 - Run steps are mirrored into UIMessage-shaped JSON via `stepToChatMessages()` in `src/loops/loop-chat.ts`.
 
@@ -653,7 +756,7 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 | ------ | ----------------------------------- | --------------------------------------------------------- |
 | `GET`  | `/api/loops`                        | List loops                                                |
 | `POST` | `/api/loops`                        | Create loop                                               |
-| `GET`  | `/api/loops/:id`                    | Loop + latest spec                                        |
+| `GET`  | `/api/loops/:id`                    | Loop + spec + `buildProgress` (phase progress, latest phase turn) |
 | `POST` | `/api/loops/:id/chat`               | **Conductor chat stream** (persists transcript on finish) |
 | `PUT`  | `/api/loops/:id/chat`               | Save Conductor chat messages                              |
 | `POST` | `/api/loops/:id/compile`            | Compile spec                                              |
@@ -729,25 +832,38 @@ See also: [temporal-loops.md](./temporal-loops.md), [composio integration guide]
 
 ```
 src/loops/
-  spec.ts              LoopSpec, CompiledPlan, planner decision schemas
-  patch.ts             applySpecPatch, templates, missing slots
-  planning-agent.ts    buildConductorSystemPrompt + runtime planner prompts
-  conductor-tools.ts   Zod schemas for Conductor tools (askQuestion, pickConnectorApp, …)
-  connector-discovery.ts  Blueprint app ranking, applyPrimaryConnectorToBlueprint
-  binding-discovery.ts Composio action ranking for outcomes
-  task-decomposition.ts  Blueprint validation gates (validateConnectorChoicesBeforeSpecPatch)
-  compiler.ts          Spec → compiled plan + Composio resolution
-  service.ts           create, compile, activate, run orchestration
-  store.ts             Postgres CRUD
+  spec.ts                    LoopSpec, CompiledPlan, planner decision schemas
+  build-state.ts             LoopBuildState, artifact schemas, commitLoopBuildArtifact
+  build-state-projection.ts  projectLoopBuild — single read model from event log
+  build-phase-progress.ts    deriveBuildPhaseProgress — phase contracts for prompt + UI
+  build-event-interpreter.ts interpretCompletedIntent, interpretConnectorSelections, …
+  build-events.ts            Event types, chat projection, tool execution dedup
+  build-continuity.ts        Stale compile artifact detection during test/activation
+  conductor-turn-resolution.ts  resolveConductorTurnResolution — turn outcomes
+  conductor-tools.ts         Zod schemas + execution metadata for Conductor tools
+  planning-agent.ts          buildConductorSystemPrompt + runtime planner prompts
+  connector-discovery.ts     Blueprint app ranking, auto-resolve prior picks
+  binding-discovery.ts       Composio action ranking for outcomes
+  patch.ts                   applySpecPatch (legacy), templates, getMissingSlots
+  compiler.ts                Spec → compiled plan + Composio resolution
+  service.ts                 create, compile, activate, reconcileLoopBuildContinuity
+  store.ts                   Postgres CRUD + loop_build_events
 
-src/temporal/            loopRunWorkflow, activities, schedules, worker
-src/integrations/composio/   connectors, tools, execute, triggers, webhooks
-src/transport/http/routes/loops.ts   Conductor chat stream + tool execute handlers
+shared/
+  conductor-phase-handoff.ts     isPhaseHandoffPending
+  conductor-activation-confirm.ts isActivationConfirmationReply
+  conductor-turn-budget.ts       CONDUCTOR_PHASE_STEP_LIMITS
+  conductor-stall-recovery.ts    isBuildTerminalForStall
+
+src/temporal/                  loopRunWorkflow, activities, schedules, worker
+src/integrations/composio/     connectors, tools, execute, triggers, webhooks
+src/transport/http/routes/loops.ts   Conductor chat stream + phase-gated tool handlers
 
 dashboard/
   src/components/conductor-builder.tsx
-  src/components/conductor/   layout, chat, shared prompt logic, connector picker, spec sheet
+  src/components/conductor/      layout, chat, shared, roster, connector picker, spec sheet
   src/lib/conductor-prompt-suggestions.ts
+  src/lib/conductor-phase-handoff.ts
   app/dashboard/loops/[loopId]/conductor/page.tsx
   app/api/loops/
 ```

@@ -46,6 +46,7 @@ import {
   resolveAskQuestionDisplayAnswer,
   resolveConnectorIconSlug,
   resolveOutcomeBriefCardStatus,
+  resolveConductorToolResultStatus,
   resolveToolPartName,
 } from "@/components/conductor/conductor-shared";
 import type { UIMessage } from "ai";
@@ -415,10 +416,27 @@ export function ConductorToolPart({
                 ? formatActivateSummary(part.output)
                 : null;
   const collapsedPreview = summary ?? formatToolInputPreview(toolName, part.input);
+  const executionOutput = part.output && typeof part.output === "object"
+    ? part.output as {
+      ok?: boolean;
+      turnOutcome?: string;
+      recoveryPhase?: string;
+      recoveryReason?: string;
+    }
+    : null;
+  const resultStatus = resolveConductorToolResultStatus(part.output);
+  const hasExecutionEnvelope = Boolean(executionOutput
+    && typeof (executionOutput as { operationKey?: unknown }).operationKey === "string");
 
   return (
     <Tool open={open} onOpenChange={setOpen}>
-      <ToolHeader type="dynamic-tool" toolName={toolName} state={part.state} title={title} />
+      <ToolHeader
+        type="dynamic-tool"
+        toolName={toolName}
+        state={part.state}
+        title={title}
+        resultStatus={resultStatus}
+      />
       {!open && collapsedPreview ? (
         <p className="border-t border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-3 py-2 text-xs leading-relaxed text-[var(--ed-text-2)] line-clamp-3 break-words">
           {collapsedPreview}
@@ -427,7 +445,19 @@ export function ConductorToolPart({
       <ToolContent>
         {summary ? <p className="text-sm text-[var(--ed-text-2)]">{summary}</p> : null}
         <ToolInput input={part.input} />
-        <ToolOutput output={part.output} errorText={part.errorText} />
+        {hasExecutionEnvelope ? (
+          <Collapsible>
+            <CollapsibleTrigger className="group flex items-center gap-1 text-xs font-medium text-[var(--ed-text-2)] underline-offset-2 hover:underline">
+              Technical details
+              <ChevronDown className="size-3 transition-transform group-data-[state=open]:rotate-180" aria-hidden="true" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2">
+              <ToolOutput output={part.output} errorText={part.errorText} />
+            </CollapsibleContent>
+          </Collapsible>
+        ) : (
+          <ToolOutput output={part.output} errorText={part.errorText} />
+        )}
       </ToolContent>
     </Tool>
   );

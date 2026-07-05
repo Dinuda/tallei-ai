@@ -1,6 +1,13 @@
 export function formatCompileSummary(output: unknown): string | null {
   if (!output || typeof output !== "object") return null;
-  const row = output as { ok?: boolean; plan?: { id: string; toolCount?: number }; errors?: unknown[]; error?: string };
+  const row = output as {
+    ok?: boolean;
+    plan?: { id: string; toolCount?: number };
+    errors?: unknown[];
+    error?: string;
+    recoveryPhase?: string;
+  };
+  if (row.recoveryPhase) return `Returning to ${row.recoveryPhase} automatically.`;
   if (row.ok && row.plan) {
     const tools = row.plan.toolCount != null ? `${row.plan.toolCount} tools` : "runnable plan";
     return `Compiled ${tools}. Ready for test run.`;
@@ -18,8 +25,10 @@ export function formatTestRunSummary(output: unknown): string | null {
     status?: string;
     preview?: string;
     error?: string;
+    recoveryPhase?: string;
     steps?: Array<{ kind: string; capability?: string }>;
   };
+  if (row.recoveryPhase) return `Plan changed. Returning to ${row.recoveryPhase} automatically.`;
   if (row.ok) {
     const toolStep = row.steps?.find((step) => step.kind === "tool");
     const toolNote = toolStep?.capability ? ` Simulated ${toolStep.capability}.` : "";
@@ -31,8 +40,11 @@ export function formatTestRunSummary(output: unknown): string | null {
 
 export function formatActivateSummary(output: unknown): string | null {
   if (!output || typeof output !== "object") return null;
-  const row = output as { ok?: boolean; status?: string; error?: string };
-  if (row.ok) return `Loop is ${row.status ?? "active"}.`;
+  const row = output as { ok?: boolean; status?: string; error?: string; alreadyActive?: boolean };
+  if (row.ok) {
+    if (row.alreadyActive) return "Loop is already active.";
+    return `Loop is ${row.status ?? "active"}.`;
+  }
   if (row.error) return row.error;
   return null;
 }

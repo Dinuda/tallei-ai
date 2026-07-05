@@ -265,7 +265,7 @@ test("connector picker searches all apps and verifies before submitting", async 
   assert.match(picker, /\/api\/connectors\/status\//);
   assert.match(picker, /\/api\/connectors\/authorize\//);
   assert.match(picker, /verifyPendingConnection/);
-  assert.match(picker, /Complete authorization.*continue automatically/);
+  assert.match(picker, /Connect \$\{pendingToolkitLabel\} to continue/);
   assert.match(picker, /isn't available to connect yet/);
   assert.match(picker, /window\.location\.assign\(authorization\.redirectUrl\)/);
   assert.doesNotMatch(picker, /window\.open/);
@@ -276,7 +276,7 @@ test("connector picker searches all apps and verifies before submitting", async 
   assert.doesNotMatch(connectCard, /window\.open/);
 });
 
-test("findConductorStall detects text-only mid-phase endings", async () => {
+test("evaluateConductorStall is inert because server turn resolution owns continuation", async () => {
   const { evaluateConductorStall } = await import("../../../shared/conductor-turn-budget.js");
   const stall = evaluateConductorStall({
     chatBusy: false,
@@ -291,12 +291,255 @@ test("findConductorStall detects text-only mid-phase endings", async () => {
     wouldAutoContinue: false,
     hasAssistantParts: true,
   });
+  assert.equal(stall.stalled, false);
+});
+
+test("findConductorStall does not stall when loop status is active", async () => {
+  const { findConductorStall } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "text",
+      text: "Your automation is live.",
+    }],
+  }] satisfies UIMessage[];
+  const stall = findConductorStall({
+    messages,
+    buildPhase: "activation",
+    missingSlots: [],
+    chatBusy: false,
+    loopStatus: "active",
+  });
+  assert.equal(stall.stalled, false);
+});
+
+test("findConductorStall does not stall after activation when phaseProgress is terminal", async () => {
+  const { findConductorStall } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-activateLoop",
+        toolCallId: "activate-1",
+        state: "output-available",
+        input: { confirmedByUser: true },
+        output: {
+          ok: true,
+          turnOutcome: "build_complete",
+          alreadyActive: true,
+          status: "active",
+        },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{
+        type: "text",
+        text: "Your automation is live and ready to run on schedule.",
+      }],
+    },
+  ] satisfies UIMessage[];
+  const stall = findConductorStall({
+    messages,
+    buildPhase: "activation",
+    missingSlots: ["activation"],
+    chatBusy: false,
+    loopStatus: "draft",
+    phaseProgress: {
+      phase: "activation",
+      status: "complete",
+      terminal: true,
+      reason: "activation_complete",
+    },
+  });
+  assert.equal(stall.stalled, false);
+});
+
+test("findConductorStall still stalls mid-phase text-only when phaseProgress is in_progress", async () => {
+  const { findConductorStall } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "text", text: "I'll pick up bindings on the next step." }],
+  }] satisfies UIMessage[];
+  const stall = findConductorStall({
+    messages,
+    buildPhase: "bindings",
+    missingSlots: [],
+    chatBusy: false,
+    loopStatus: "draft",
+    phaseProgress: {
+      phase: "bindings",
+      status: "in_progress",
+      terminal: false,
+      nextTool: "discoverBindings",
+    },
+  });
   assert.equal(stall.stalled, true);
   assert.equal(stall.reason, "text_only_mid_phase");
 });
 
-test("isReviewConfirmationHandoffPending detects roster without confirmation", async () => {
-  const { isReviewConfirmationHandoffPending } = await import("../../../shared/conductor-review-handoff.js");
+test("deriveConductorPromptSuggestions omits continue chips after terminal phaseProgress", async () => {
+  const { deriveConductorPromptSuggestions } = await import(
+    "../../../dashboard/src/lib/conductor-prompt-suggestions.ts"
+  );
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-activateLoop",
+        toolCallId: "activate-1",
+        state: "output-available",
+        output: { ok: true, turnOutcome: "build_complete" },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{ type: "text", text: "All set." }],
+    },
+  ] satisfies UIMessage[];
+  const suggestions = deriveConductorPromptSuggestions({
+    messages,
+    missingSlots: ["activation"],
+    status: "draft",
+    hasPendingQuestion: false,
+    hasPendingReplyOptions: false,
+    chatBusy: false,
+    isStalled: true,
+    buildPhase: "activation",
+    phaseProgress: {
+      phase: "activation",
+      status: "complete",
+      terminal: true,
+      reason: "activation_complete",
+    },
+  });
+  assert.deepEqual(suggestions, []);
+});
+
+test("findConductorStall does not stall when phaseProgress reports activation complete", async () => {
+  const { findConductorStall } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "text", text: "Your automation is live." }],
+  }] satisfies UIMessage[];
+  const stall = findConductorStall({
+    messages,
+    buildPhase: "activation",
+    missingSlots: ["activation"],
+    chatBusy: false,
+    loopStatus: "draft",
+    phaseProgress: {
+      phase: "activation",
+      status: "complete",
+      terminal: true,
+      reason: "activation_complete",
+      nextTool: null,
+    },
+  });
+  assert.equal(stall.stalled, false);
+});
+
+test("deriveConductorPromptSuggestions omits continue chips when build is terminal", async () => {
+  const { deriveConductorPromptSuggestions } = await import(
+    "../../../dashboard/src/lib/conductor-prompt-suggestions.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "text", text: "All set." }],
+  }] satisfies UIMessage[];
+  const suggestions = deriveConductorPromptSuggestions({
+    messages,
+    missingSlots: ["activation"],
+    status: "draft",
+    hasPendingQuestion: false,
+    hasPendingReplyOptions: false,
+    chatBusy: false,
+    isStalled: true,
+    buildPhase: "activation",
+    phaseProgress: {
+      phase: "activation",
+      status: "complete",
+      terminal: true,
+      reason: "activation_complete",
+    },
+  });
+  assert.deepEqual(suggestions, []);
+});
+
+test("findConductorStall does not stall when phaseProgress is unknown", async () => {
+  const { findConductorStall } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "text", text: "Your automation is live." }],
+  }] satisfies UIMessage[];
+  const stall = findConductorStall({
+    messages,
+    buildPhase: "activation",
+    missingSlots: ["activation"],
+    chatBusy: false,
+    loopStatus: "draft",
+    phaseProgress: null,
+  });
+  assert.equal(stall.stalled, false);
+});
+
+test("hasTerminalExecution treats build_complete as terminal", async () => {
+  const { findConductorStall } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-activateLoop",
+      toolCallId: "activate-1",
+      state: "output-available",
+      input: { confirmedByUser: true },
+      output: {
+        ok: true,
+        operationKey: "activation:test:activateLoop:activate:plan",
+        parentArtifactHash: "test-hash",
+        phaseCompleted: false,
+        requiresUserInput: false,
+        retryAllowed: true,
+        turnOutcome: "build_complete",
+        continuation: "stop",
+        alreadyActive: true,
+        status: "active",
+      },
+    }],
+  }] satisfies UIMessage[];
+  const stall = findConductorStall({
+    messages,
+    buildPhase: "activation",
+    missingSlots: [],
+    chatBusy: false,
+    loopStatus: "draft",
+  });
+  assert.equal(stall.stalled, false);
+});
+
+test("isPhaseHandoffPending detects roster without confirmation", async () => {
+  const { isPhaseHandoffPending } = await import("../../../shared/conductor-phase-handoff.js");
   const messages = [
     {
       id: "assistant-1",
@@ -327,12 +570,43 @@ test("isReviewConfirmationHandoffPending detects roster without confirmation", a
     },
   ] satisfies UIMessage[];
 
-  assert.equal(isReviewConfirmationHandoffPending({ messages, buildPhase: "review" }), true);
-  assert.equal(isReviewConfirmationHandoffPending({ messages, buildPhase: "compile" }), false);
+  assert.equal(isPhaseHandoffPending({ messages, buildPhase: "review" }), true);
+  assert.equal(isPhaseHandoffPending({ messages, buildPhase: "compile" }), false);
 });
 
-test("findConductorStall does not stall text summary after roster when confirmation is pending", async () => {
-  const { isReviewConfirmationHandoffPending } = await import("../../../shared/conductor-review-handoff.js");
+test("isPhaseHandoffPending detects connector discovery without pick", async () => {
+  const { isPhaseHandoffPending } = await import("../../../shared/conductor-phase-handoff.js");
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-discoverConnectorsForBlueprint",
+        toolCallId: "discover-1",
+        state: "output-available",
+        input: {},
+        output: {
+          ok: true,
+          groups: [{
+            outcomeId: "read",
+            role: "source",
+            askOptions: [{ id: "gmail", label: "Gmail", value: "gmail" }],
+          }],
+        },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Gmail looks like the right app for reading email." }],
+    },
+  ] satisfies UIMessage[];
+
+  assert.equal(isPhaseHandoffPending({ messages, buildPhase: "connectors" }), true);
+});
+
+test("evaluateConductorStall stays inert while confirmation is pending", async () => {
+  const { isPhaseHandoffPending } = await import("../../../shared/conductor-phase-handoff.js");
   const { evaluateConductorStall } = await import("../../../shared/conductor-turn-budget.js");
   const messages = [
     {
@@ -376,7 +650,7 @@ test("findConductorStall does not stall text summary after roster when confirmat
     hasExecutions: false,
     wouldAutoContinue: false,
     hasAssistantParts: true,
-    reviewConfirmationHandoffPending: isReviewConfirmationHandoffPending({
+    phaseHandoffPending: isPhaseHandoffPending({
       messages,
       buildPhase: "review",
     }),
@@ -391,31 +665,290 @@ test("shouldAutoSendConductorChat blocks stalled auto-continue in source", async
     "utf8",
   );
   assert.match(shared, /findConductorStall\(/);
-  assert.match(shared, /isReviewConfirmationHandoffPending/);
-  assert.match(shared, /reviewConfirmationHandoffPending/);
-  assert.match(shared, /conductor-review-handoff/);
+  assert.match(shared, /isPhaseHandoffPending/);
+  assert.match(shared, /phaseHandoffPending/);
+  assert.match(shared, /@\/lib\/conductor-phase-handoff/);
 });
 
-test("shouldAutoSendConductorChat auto-continues on non-terminal tool output in source", async () => {
+test("shouldAutoSendConductorChat no longer auto-continues on generic non-terminal tool output in source", async () => {
   const fs = await import("node:fs/promises");
   const shared = await fs.readFile(
     new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
     "utf8",
   );
-  assert.match(shared, /phaseCompleted/);
-  assert.match(shared, /requiresUserInput/);
-  assert.match(shared, /isRecoverableConductorExecution/);
+  assert.match(shared, /turnOutcome === "phase_complete"/);
+  assert.match(shared, /continuation === "next_phase"/);
   assert.match(shared, /executions\.length === 0\) return true/);
 });
 
-test("shouldAutoSendConductorChat auto-continues on recoverable compile prerequisite miss in source", async () => {
+test("phase handoff refreshes persisted progress before continuing", async () => {
+  const fs = await import("node:fs/promises");
+  const builder = await fs.readFile(
+    new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(builder, /findPendingConductorPhaseHandoff/);
+  assert.match(builder, /apiFetch\(`\/api\/loops\/\$\{loopId\}`\)/);
+  assert.match(builder, /persistedPhase !== handoff\.nextPhase/);
+  assert.match(builder, /await sendMessage\(\)/);
+});
+
+test("shouldAutoSendConductorChat stops auto-continue on recoverable compile prerequisite miss in source", async () => {
   const fs = await import("node:fs/promises");
   const shared = await fs.readFile(
     new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
     "utf8",
   );
-  assert.match(shared, /if \(recoverable\) return true/);
-  assert.match(shared, /isRecoverableConductorExecution/);
+  assert.doesNotMatch(shared, /if \(recoverable\) return true/);
+  assert.match(shared, /turnOutcome === "phase_complete"/);
+});
+
+test("findPendingOutcomeBrief prefers event-log pendingUiTool over transcript drift", async () => {
+  const { findPendingOutcomeBrief } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-confirmOutcomeBrief",
+      toolCallId: "confirm-1",
+      state: "output-error",
+      input: {
+        briefHash: "a".repeat(64),
+        question: "Ready?",
+        options: [
+          { id: "confirm", label: "Yes", value: "confirm" },
+          { id: "other", label: "No", value: "other" },
+        ],
+      },
+      output: { interrupted: true },
+      errorText: "Superseded",
+    }],
+  }] satisfies UIMessage[];
+
+  const pending = findPendingOutcomeBrief(messages, {
+    pendingUiTool: {
+      toolCallId: "confirm-1",
+      toolName: "confirmOutcomeBrief",
+      input: {
+        briefHash: "a".repeat(64),
+        question: "Ready?",
+        options: [
+          { id: "confirm", label: "Yes", value: "confirm" },
+          { id: "other", label: "No", value: "other" },
+        ],
+      },
+    },
+  });
+  assert.equal(pending?.toolCallId, "confirm-1");
+  assert.equal(pending?.confirmPrompt.question, "Ready?");
+});
+
+test("hasUnansweredUiToolCalls ignores stale phaseProgress when transcript already answered", async () => {
+  const { hasUnansweredUiToolCalls } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-confirmOutcomeBrief",
+      toolCallId: "confirm-1",
+      state: "output-available",
+      input: {
+        briefHash: "a".repeat(64),
+        question: "Ready?",
+        options: [
+          { id: "confirm", label: "Yes", value: "confirm" },
+          { id: "other", label: "No", value: "other" },
+        ],
+      },
+      output: {
+        action: "confirm",
+        briefHash: "a".repeat(64),
+        selectedOptionIds: ["confirm"],
+        selectedValues: ["confirm"],
+        answerText: "Yes",
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.equal(hasUnansweredUiToolCalls(messages, {
+    pendingUiTool: {
+      toolCallId: "confirm-1",
+      toolName: "confirmOutcomeBrief",
+      input: {
+        briefHash: "a".repeat(64),
+        question: "Ready?",
+        options: [
+          { id: "confirm", label: "Yes", value: "confirm" },
+          { id: "other", label: "No", value: "other" },
+        ],
+      },
+    },
+  }), false);
+});
+
+test("shouldAutoSendConductorChat auto-continues after answered confirmOutcomeBrief", async () => {
+  const { shouldAutoSendConductorChat } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-confirmOutcomeBrief",
+      toolCallId: "confirm-1",
+      state: "output-available",
+      input: {
+        briefHash: "a".repeat(64),
+        question: "Ready?",
+        options: [
+          { id: "confirm", label: "Yes", value: "confirm" },
+          { id: "other", label: "No", value: "other" },
+        ],
+      },
+      output: {
+        action: "confirm",
+        briefHash: "a".repeat(64),
+        selectedOptionIds: ["confirm"],
+        selectedValues: ["confirm"],
+        answerText: "Yes",
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.equal(shouldAutoSendConductorChat({
+    messages,
+    buildPhase: "review",
+    missingSlots: [],
+    loopStatus: "draft",
+    phaseProgress: {
+      pendingUiTool: {
+        toolCallId: "confirm-1",
+        toolName: "confirmOutcomeBrief",
+        input: {
+          briefHash: "a".repeat(64),
+          question: "Ready?",
+          options: [
+            { id: "confirm", label: "Yes", value: "confirm" },
+            { id: "other", label: "No", value: "other" },
+          ],
+        },
+      },
+    },
+  }), true);
+});
+
+test("phase-complete handoff waits for the persisted-state refresh effect", async () => {
+  const { findPendingConductorPhaseHandoff, shouldAutoSendConductorChat } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-compileLoop",
+      toolCallId: "compile-1",
+      state: "output-available",
+      input: {},
+      output: {
+        ok: true,
+        operationKey: "compile:review-hash:compileLoop:compile:review-hash",
+        parentArtifactHash: "review-hash",
+        phaseBefore: "compile",
+        phaseAfter: "test",
+        phaseCompleted: true,
+        requiresUserInput: false,
+        retryAllowed: true,
+        invalidatedPhases: [],
+        turnOutcome: "phase_complete",
+        continuation: "next_phase",
+        nextPhase: "test",
+        handoffId: "compile-to-test",
+        compiledPlanId: "22222222-2222-4222-8222-222222222222",
+        stepsUsed: 1,
+        stepLimit: 8,
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.equal(shouldAutoSendConductorChat({
+    messages,
+    buildPhase: "compile",
+    missingSlots: [],
+    loopStatus: "draft",
+  }), false);
+  assert.equal(findPendingConductorPhaseHandoff(messages)?.nextPhase, "test");
+});
+
+test("tool result status follows execution outcome instead of transport completion", async () => {
+  const { resolveConductorToolResultStatus } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  assert.equal(resolveConductorToolResultStatus({ ok: true }), undefined);
+  assert.equal(resolveConductorToolResultStatus({ ok: false, turnOutcome: "blocked" }), "blocked");
+  assert.equal(resolveConductorToolResultStatus({ ok: false }), "failed");
+  assert.equal(resolveConductorToolResultStatus({
+    ok: false,
+    recoveryPhase: "compile",
+    turnOutcome: "phase_complete",
+  }), "recovering");
+});
+
+test("test recovery is summarized as an automatic transition", async () => {
+  const { formatTestRunSummary } = await import(
+    "../../../dashboard/src/components/conductor/conductor-tool-formatters.ts"
+  );
+  assert.equal(formatTestRunSummary({
+    ok: false,
+    recoveryPhase: "compile",
+    error: "stale plan",
+  }), "Plan changed. Returning to compile automatically.");
+});
+
+test("shouldAutoSendConductorChat does not auto-continue on ordinary progress output", async () => {
+  const { shouldAutoSendConductorChat } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-discoverBindings",
+      toolCallId: "discover-1",
+      state: "output-available",
+      input: { toolkit: "gmail" },
+      output: {
+        ok: true,
+        operationKey: "bindings:connector-hash:discoverBindings:toolkit:gmail",
+        parentArtifactHash: "connector-hash",
+        phaseBefore: "bindings",
+        phaseAfter: "bindings",
+        phaseCompleted: false,
+        requiresUserInput: false,
+        retryAllowed: true,
+        invalidatedPhases: [],
+        turnOutcome: "progress",
+        continuation: "continue_phase",
+        stepsUsed: 1,
+        stepLimit: 12,
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.equal(shouldAutoSendConductorChat({
+    messages,
+    buildPhase: "bindings",
+    missingSlots: ["bindings.trigger"],
+    loopStatus: "draft",
+    phaseProgress: {
+      phase: "bindings",
+      status: "in_progress",
+      terminal: false,
+    },
+  }), false);
 });
 
 test("shouldAutoSendConductorChat still blocks unanswered confirmOutcomeBrief in source", async () => {
@@ -424,7 +957,7 @@ test("shouldAutoSendConductorChat still blocks unanswered confirmOutcomeBrief in
     new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
     "utf8",
   );
-  assert.match(shared, /hasUnansweredUiToolCalls\(messages\)\) return false/);
+  assert.match(shared, /hasUnansweredUiToolCalls\(messages, phaseProgress\)\) return false/);
   assert.match(shared, /confirmOutcomeBrief/);
 });
 
@@ -436,7 +969,8 @@ test("conductor builder wires buildPhase and stall-aware auto continue", async (
     fs.readFile(new URL("../../../dashboard/src/lib/conductor-prompt-suggestions.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(builder, /buildProgress\?\.internalPhase/);
+  assert.match(builder, /phaseProgress/);
+  assert.match(builder, /buildProgress\?\.phaseProgress/);
   assert.match(builder, /findConductorStall/);
   assert.match(builder, /isStalled/);
   assert.match(builder, /buildPhase: buildPhaseRef\.current/);

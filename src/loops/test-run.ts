@@ -14,8 +14,9 @@ import {
 } from "./spec.js";
 import { assertAgenticCompiledPlan } from "./plan-validators.js";
 import { validateToolArgsAgainstSchema } from "./tool-schema.js";
-import { createLoopRun, getCompiledPlan, getLatestSpecRevision, updateLoopRun } from "./store.js";
+import { createLoopRun, getCompiledPlan, getLatestBuildState, updateLoopRun } from "./store.js";
 import { resolveComposioActionArgs } from "./composio-action-instructions.js";
+import { isCompiledPlanCurrent } from "./build-continuity.js";
 
 export type TestRunStep =
   | { kind: "plan"; decision: PlannerDecision }
@@ -305,8 +306,8 @@ export async function executeLoopTestRun(
     };
   }
 
-  const latestSpecRevision = await getLatestSpecRevision(input.loopId);
-  if (planRow.specRevision !== latestSpecRevision) {
+  const state = await getLatestBuildState(auth, input.loopId);
+  if (!isCompiledPlanCurrent(state, planRow)) {
     return {
       ok: false,
       runId: "",

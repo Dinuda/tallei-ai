@@ -40,6 +40,7 @@ export type ToolPart = ToolUIPart | DynamicToolUIPart;
 export type ToolHeaderProps = {
   title?: string;
   className?: string;
+  resultStatus?: "failed" | "blocked" | "recovering";
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
   | {
@@ -94,10 +95,21 @@ export function IssueNotice({
   );
 }
 
-export const getStatusBadge = (status: ToolPart["state"]) => (
+export const getStatusBadge = (
+  status: ToolPart["state"],
+  resultStatus?: ToolHeaderProps["resultStatus"],
+) => (
   <Badge className="gap-1.5 text-xs border" variant="secondary">
-    {statusIcons[status]}
-    {statusLabels[status]}
+    {resultStatus
+      ? <AlertCircleIcon className={`size-4 ${resultStatus === "recovering" ? "text-blue-700" : "text-amber-700"}`} />
+      : statusIcons[status]}
+    {resultStatus === "failed"
+      ? "Failed"
+      : resultStatus === "blocked"
+        ? "Blocked"
+        : resultStatus === "recovering"
+          ? "Recovering"
+          : statusLabels[status]}
   </Badge>
 );
 
@@ -107,6 +119,7 @@ export const ToolHeader = ({
   type,
   state,
   toolName,
+  resultStatus,
   ...props
 }: ToolHeaderProps) => {
   const derivedName =
@@ -122,7 +135,7 @@ export const ToolHeader = ({
     >
       <div className="flex min-w-0 flex-1 items-center gap-2">
         <span className="truncate font-medium text-sm">{title ?? derivedName}</span>
-        {getStatusBadge(state)}
+        {getStatusBadge(state, resultStatus)}
       </div>
       <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180" />
     </CollapsibleTrigger>

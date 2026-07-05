@@ -2,7 +2,7 @@ import { generateText } from "ai";
 
 import { config } from "../config/index.js";
 import { getStreamingLanguageModel } from "../providers/ai/streaming/language-model.js";
-import type { TestRunScenario } from "./conductor-tools.js";
+import type { PhaseExecutionContract, TestRunScenario } from "./conductor-tools.js";
 import {
   plannerDecisionSchema,
   type ConnectorPlaybook,
@@ -16,7 +16,7 @@ import { getPendingConnectorOutcomes } from "./task-decomposition.js";
 import { summarizeToolForPlanner } from "./tool-planner-card.js";
 import { compactStepHistoryForPlanner } from "./tool-result-compact.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
-import type { ReviewProgress } from "./build-event-interpreter.js";
+import type { BuildPhaseProgress } from "./build-phase-progress.js";
 
 const DEFAULT_AGENT_INSTRUCTIONS =
   "Achieve the stated outcome using only the bound tools.";
@@ -130,7 +130,8 @@ export function buildConductorSystemPrompt(input: {
   confirmationHash: string;
   connectedToolkits: Array<{ slug: string; name: string; connected: boolean }>;
   buildPhase?: "intent" | "blueprint" | "connectors" | "bindings" | "review" | "compile" | "test" | "activation";
-  reviewProgress?: ReviewProgress | null;
+  phaseProgress?: BuildPhaseProgress | null;
+  phaseContract?: PhaseExecutionContract | null;
   resumeTool?: string | null;
 }): string {
   const missing = getMissingSlots(input.spec);
@@ -142,16 +143,17 @@ export function buildConductorSystemPrompt(input: {
   const exposeImplementationContext = !input.buildPhase
     || !["intent", "blueprint"].includes(input.buildPhase);
 
-  const reviewNextStep = input.reviewProgress?.nextTool === "confirmOutcomeBrief"
-    ? "The specialist team roster is already shown. Call confirmOutcomeBrief now in this step. Do not summarize or repeat the roster."
-    : input.reviewProgress?.nextTool === "presentAgentTeam"
-      ? "Write one short introductory sentence, then call presentAgentTeam only. Do not summarize the team in text."
-      : null;
+  const phaseInstruction = input.phaseProgress?.instruction ?? null;
+  const phaseGoal = input.phaseProgress?.goal?.trim() || null;
+  const completionCriteria = input.phaseProgress?.completionCriteria ?? [];
+  const phaseBudget = input.phaseProgress?.maxSteps ?? null;
+  const autoAdvance = input.phaseProgress?.autoAdvance;
   const compileResumeStep = input.buildPhase === "compile" && input.resumeTool === "compileLoop"
-    ? "compileLoop."
+    && !phaseInstruction
+    ? "Call compileLoop now to build the runnable plan for the confirmed specification."
     : null;
 
-  const nextStep = reviewNextStep
+  const nextStep = phaseInstruction
     ?? compileResumeStep
     ?? (input.buildPhase
     ? ({
@@ -182,7 +184,7 @@ export function buildConductorSystemPrompt(input: {
     "• analyzeIntent must return a complete platform-neutral execution plan and zero to four questions. Ask only independent, material unresolved business choices. Zero questions is correct when the requested business behavior is already clear; never add a generic confirmation or filler question. Ask every returned question in the same assistant turn.  ",
     "• Never expose internal IDs, JSON, confirmation hashes, API slugs, action slugs, trigger slugs, or cron syntax to the user.",
     "• In actionable phases, do not narrate a next action (\"let me…\", \"now I'll…\") without immediately emitting the corresponding tool call in the same step. If you cannot call a tool, stop and wait for the user.",
-    "• When a tool result includes recoverToPhase, complete that earlier phase action in the same thread before retrying the blocked step. Do not ask the user to repeat choices that are already saved.",
+    "• Phase recovery crosses a server handoff. Stop after a recovery result; the next request resumes from persisted state. Do not retry an earlier-phase tool in the current request.",
     "",
     "— Tool ownership (do not omit) —",
     "• **analyzeIntent** – defines the outcome, business trigger, complete execution order, scope, and autonomy without selecting apps or platforms.  ",
@@ -210,7 +212,7 @@ export function buildConductorSystemPrompt(input: {
     "   • The confirmOutcomeBrief answer is the review decision; never request a second confirmation.  ",
     "6. **Build & launch**  ",
     "   • compileLoop → testRunLoop → presentReplyOptions → activateLoop (after user agrees).",
-    "   • If compileLoop returns recoverToPhase review, call presentAgentTeam then confirmOutcomeBrief before compileLoop again.",
+    "   • If a phase reports recovery, stop. The server refreshes persisted state before the recovery phase starts.",
     "",
     "— Execution order —",
     "• analyzeIntent must output executionOrder as the ordered plain-language pipeline.  ",
@@ -243,6 +245,15 @@ export function buildConductorSystemPrompt(input: {
       : exposeImplementationContext ? "Compile blockers: none" : "",
     exposeImplementationContext && !briefConfirmed && missing.length === 0
       ? `Current confirmation hash (tool input only; never display): ${input.confirmationHash}`
+      : "",
+    phaseGoal ? `Phase goal: ${phaseGoal}` : "",
+    completionCriteria.length > 0
+      ? `Completion criteria:\n${completionCriteria.map((criterion) => `- ${criterion}`).join("\n")}`
+      : "",
+    phaseBudget != null ? `Phase step budget: ${phaseBudget}` : "",
+    autoAdvance == null ? "" : `Auto-advance after phase completion: ${autoAdvance ? "yes" : "no"}`,
+    input.phaseContract
+      ? `Phase contract: ${input.phaseContract.phase} revision ${input.phaseContract.revision}\nAllowed tools: ${input.phaseContract.allowedTools.join(", ") || "none"}\nRequired next tool: ${input.phaseContract.nextTool ?? "none"}`
       : "",
     `Next: ${nextStep}`,
     `Spec JSON:\n${JSON.stringify(input.spec)}`,

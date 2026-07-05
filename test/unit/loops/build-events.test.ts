@@ -4,13 +4,16 @@ import type { UIMessage } from "ai";
 
 import {
   appendLoopBuildEventsWithClient,
+  derivePendingUiToolFromEvents,
   eventPayloadHash,
   eventsFromUiMessages,
+  eventsForConductorPhaseAttempt,
   hasCompletedConductorOperation,
   hasTerminalConductorPhaseResult,
   interruptionEventsForToolCallIds,
   interruptionEventsFromUiMessages,
   isTerminalConductorExecution,
+  makeConductorToolCompletedEvent,
   projectChatMessages,
 } from "../../../src/loops/build-events.js";
 import { isRecoverableConductorExecution } from "../../../src/loops/conductor-tools.js";
@@ -105,6 +108,10 @@ test("semantic conductor dedupe matches different toolCallIds in the same revisi
           retryAllowed: false,
           parentArtifactHash: "review-hash",
           invalidatedPhases: [],
+          turnOutcome: "blocked",
+          continuation: "stop",
+          stepsUsed: 1,
+          stepLimit: 8,
           error: "Compilation failed",
         },
       }],
@@ -127,6 +134,10 @@ test("semantic conductor dedupe matches different toolCallIds in the same revisi
           retryAllowed: false,
           parentArtifactHash: "review-hash",
           invalidatedPhases: [],
+          turnOutcome: "blocked",
+          continuation: "stop",
+          stepsUsed: 2,
+          stepLimit: 8,
           error: "Compilation failed",
         },
       }],
@@ -160,6 +171,10 @@ test("semantic conductor dedupe matches different toolCallIds in the same revisi
     retryAllowed: false,
     parentArtifactHash: "review-hash",
     invalidatedPhases: [],
+    turnOutcome: "blocked",
+    continuation: "stop",
+    stepsUsed: 2,
+    stepLimit: 8,
     error: "Compilation failed",
   } : null;
   assert.equal(Boolean(metadata && isTerminalConductorExecution(metadata)), true);
@@ -179,6 +194,10 @@ test("recoverable prerequisite failures are not terminal", () => {
     recoverToPhase: "review" as const,
     recoverReason: "confirm_outcome_brief_pending",
     resumeTool: "compileLoop",
+    turnOutcome: "progress",
+    continuation: "continue_phase",
+    stepsUsed: 1,
+    stepLimit: 8,
     error: "Review isn't complete yet.",
   };
   assert.equal(isRecoverableConductorExecution(metadata), true);
@@ -200,6 +219,10 @@ test("hard compile failures without recovery remain terminal", () => {
     retryAllowed: false,
     parentArtifactHash: "bindings-hash",
     invalidatedPhases: [],
+    turnOutcome: "blocked",
+    continuation: "stop",
+    stepsUsed: 1,
+    stepLimit: 8,
     error: "Compilation failed",
   };
   assert.equal(isRecoverableConductorExecution(metadata), false);
@@ -225,6 +248,10 @@ test("semantic conductor dedupe does not cross revisions", () => {
         retryAllowed: true,
         parentArtifactHash: "new-review-hash",
         invalidatedPhases: [],
+        turnOutcome: "phase_complete",
+        continuation: "next_phase",
+        stepsUsed: 1,
+        stepLimit: 8,
       },
     }],
   }] as UIMessage[];
@@ -240,6 +267,44 @@ test("semantic conductor dedupe does not cross revisions", () => {
   }));
   assert.equal(hasCompletedConductorOperation(events, {
     operationKey: "compile:review-hash:compileLoop:compile:bindings-hash",
+    parentArtifactHash: "review-hash",
+  }), false);
+});
+
+test("recovery starts a fresh semantic-attempt epoch for the same parent artifact", () => {
+  const oldTerminal = {
+    id: "old", loopId: "loop", threadKind: "build" as const, runId: null,
+    sequence: 1, eventKey: "old", type: "tool_call.completed" as const,
+    toolCallId: "compile-old", createdAt: new Date(0).toISOString(),
+    payload: {
+      ok: true,
+      operationKey: "compile:review-hash:compileLoop:compile",
+      phaseBefore: "compile",
+      phaseAfter: "test",
+      phaseCompleted: true,
+      requiresUserInput: false,
+      retryAllowed: true,
+      parentArtifactHash: "review-hash",
+      invalidatedPhases: [],
+      turnOutcome: "phase_complete",
+      continuation: "next_phase",
+      stepsUsed: 1,
+      stepLimit: 8,
+    },
+  };
+  const recovery = {
+    id: "recovery", loopId: "loop", threadKind: "build" as const, runId: null,
+    sequence: 2, eventKey: "recovery", type: "phase.recovery_requested" as const,
+    toolCallId: null, createdAt: new Date(0).toISOString(),
+    payload: { recoveryPhase: "compile", parentArtifactHash: "review-hash" },
+  };
+  const current = eventsForConductorPhaseAttempt([oldTerminal, recovery], {
+    phase: "compile",
+    parentArtifactHash: "review-hash",
+  });
+  assert.deepEqual(current, []);
+  assert.equal(hasTerminalConductorPhaseResult(current, {
+    phase: "compile",
     parentArtifactHash: "review-hash",
   }), false);
 });
@@ -273,4 +338,62 @@ test("interruptionEventsForToolCallIds projects superseded prompts as output-err
   }))))[0]?.parts[0] as { state?: string; errorText?: string };
   assert.equal(part.state, "output-error");
   assert.match(part.errorText ?? "", /Superseded by a later user message/);
+});
+
+test("derivePendingUiToolFromEvents returns the latest open confirmOutcomeBrief call", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-confirmOutcomeBrief",
+      toolCallId: "confirm-1",
+      state: "input-available",
+      input: {
+        briefHash: "a".repeat(64),
+        question: "Ready?",
+        options: [
+          { id: "confirm", label: "Yes", value: "confirm" },
+          { id: "other", label: "No", value: "other" },
+        ],
+      },
+    }],
+  }] satisfies UIMessage[];
+  const events = eventsFromUiMessages(messages).map((event, index) => ({
+    id: String(index),
+    loopId: "loop",
+    threadKind: "build" as const,
+    runId: null,
+    sequence: index + 1,
+    createdAt: new Date(0).toISOString(),
+    toolCallId: event.toolCallId ?? null,
+    ...event,
+  }));
+  const pending = derivePendingUiToolFromEvents(events);
+  assert.equal(pending?.toolCallId, "confirm-1");
+  assert.equal(pending?.toolName, "confirmOutcomeBrief");
+});
+
+test("makeConductorToolCompletedEvent persists execution metadata for projection", () => {
+  const event = makeConductorToolCompletedEvent({
+    toolName: "analyzeIntent",
+    input: { outcome: "Support triage" },
+    output: {
+      ok: true,
+      operationKey: "intent:root:analyzeIntent:intent",
+      phaseBefore: "intent",
+      phaseAfter: "intent",
+      phaseCompleted: false,
+      requiresUserInput: false,
+      retryAllowed: true,
+      parentArtifactHash: "root",
+      invalidatedPhases: [],
+      turnOutcome: "progress",
+      continuation: "continue_phase",
+      stepsUsed: 1,
+      stepLimit: 6,
+    },
+  });
+  assert.equal(event.type, "tool_call.completed");
+  assert.equal(event.payload.toolName, "analyzeIntent");
+  assert.equal(event.payload.turnOutcome, "progress");
 });

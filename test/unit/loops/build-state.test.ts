@@ -9,8 +9,13 @@ import {
   createBuildState,
   hashArtifact,
   loopBuildStateSchema,
+  recoverBuildState,
   userFacingStageForPhase,
 } from "../../../src/loops/build-state.js";
+import {
+  determineBuildContinuityRecovery,
+  isCompiledPlanCurrent,
+} from "../../../src/loops/build-continuity.js";
 import { intentQuestionSchema } from "../../../src/loops/intent-discovery.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -56,6 +61,33 @@ function throughBindings() {
   return { intent, blueprint, connectors, bindings };
 }
 
+function throughCompile() {
+  const base = throughBindings();
+  const review = commitBuildArtifact({
+    state: base.bindings.state,
+    phase: "review",
+    expectedParentHash: base.bindings.envelope.artifactHash,
+    artifact: {
+      bindingHash: base.bindings.envelope.artifactHash,
+      confirmedByUser: true,
+      confirmedAt: new Date().toISOString(),
+    },
+  });
+  const compiledPlanId = "22222222-2222-4222-8222-222222222222";
+  const compiledPlanHash = "compiled-content-hash";
+  const compile = commitBuildArtifact({
+    state: review.state,
+    phase: "compile",
+    expectedParentHash: review.envelope.artifactHash,
+    artifact: {
+      reviewHash: review.envelope.artifactHash,
+      compiledPlanId,
+      compiledPlanHash,
+    },
+  });
+  return { ...base, review, compile, compiledPlanId, compiledPlanHash };
+}
+
 test("commits typed artifacts and exposes four user stages", () => {
   const result = throughBindings();
   assert.equal(result.bindings.state.buildPhase, "review");
@@ -95,6 +127,37 @@ test("revising an upstream artifact invalidates downstream artifacts", () => {
   assert.deepEqual(revised.invalidatedPhases, ["blueprint", "connectors", "bindings"]);
   assert.equal(revised.state.buildPhase, "blueprint");
   assert.equal(revised.state.artifacts.bindings, undefined);
+});
+
+test("compile artifact is the canonical current-plan identity", () => {
+  const result = throughCompile();
+  assert.equal(isCompiledPlanCurrent(result.compile.state, {
+    id: result.compiledPlanId,
+    contentHash: result.compiledPlanHash,
+  }), true);
+  assert.equal(isCompiledPlanCurrent(result.compile.state, {
+    id: result.compiledPlanId,
+    contentHash: "different-plan-content",
+  }), false);
+});
+
+test("continuity supervisor rewinds a missing compiled plan once", () => {
+  const result = throughCompile();
+  const recovery = determineBuildContinuityRecovery(result.compile.state, null);
+  assert.deepEqual(recovery, {
+    phase: "compile",
+    reason: "compiled_plan_missing",
+    parentArtifactHash: result.review.envelope.artifactHash,
+  });
+  const rewound = recoverBuildState({
+    state: result.compile.state,
+    phase: recovery!.phase,
+    reason: recovery!.reason,
+  });
+  assert.equal(rewound.state.buildPhase, "compile");
+  assert.equal(rewound.state.artifacts.compile, undefined);
+  assert.deepEqual(rewound.invalidatedPhases, ["compile"]);
+  assert.equal(determineBuildContinuityRecovery(rewound.state, null), null);
 });
 
 test("rejects bindings to an unselected connector", () => {
