@@ -42,6 +42,10 @@ const CONNECTORS_CACHE_MAX_SIZE = 200;
 const connectorsCache: TtlCacheStore<WorkspaceConnectorView[]> = new Map();
 const authConfigResolutionInFlight = new Map<string, Promise<string>>();
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function connectorsCacheKey(auth: AuthContext): string {
   return `connectors:${auth.tenantId}:${auth.userId}:${auth.workspaceId ?? ""}`;
 }
@@ -135,6 +139,10 @@ async function resolveAuthConfigId(toolkit: string): Promise<string> {
       const refreshed = await composio.authConfigs.list({ toolkit: normalized, isComposioManaged: true, limit: 50 });
       const refreshedEnabled = refreshed.items.filter((item) => item.status.toUpperCase() === "ENABLED");
       if (refreshedEnabled.length > 0) return selectComposioAuthConfigId(normalized, refreshed.items);
+      await sleep(500);
+      const finalAttempt = await composio.authConfigs.list({ toolkit: normalized, isComposioManaged: true, limit: 50 });
+      const finalEnabled = finalAttempt.items.filter((item) => item.status.toUpperCase() === "ENABLED");
+      if (finalEnabled.length > 0) return selectComposioAuthConfigId(normalized, finalAttempt.items);
       throw createError;
     }
   })();
@@ -150,9 +158,11 @@ export function selectComposioAuthConfigId(
   toolkit: string,
   configs: Array<{ id: string; status: string }>,
 ): string {
-  const enabled = configs.filter((item) => item.status.toUpperCase() === "ENABLED");
-  if (enabled.length !== 1) {
-    throw new Error(`Expected one enabled Composio-managed auth config for ${toolkit}; found ${enabled.length}`);
+  const enabled = configs
+    .filter((item) => item.status.toUpperCase() === "ENABLED")
+    .sort((a, b) => a.id.localeCompare(b.id));
+  if (enabled.length === 0) {
+    throw new Error(`Expected one enabled Composio-managed auth config for ${toolkit}; found 0`);
   }
   return enabled[0]!.id;
 }

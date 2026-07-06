@@ -63,10 +63,14 @@ import {
   describeBindingResolutionError,
   filterBindingResolutionAnswers,
   resolvePreparedBindings,
+  findNoFeasibleActionDiagnostics,
+  pinnedTriggerSlugFromInput,
   type BindingResolverAnswer,
   type BindingResolverAction,
   type BindingResolverTrigger,
 } from "../../../loops/binding-resolver.js";
+import { enrichBindingActionCandidate } from "../../../loops/composio-schema-contract.js";
+import { getTriggerFieldNamesForFeasibility } from "../../../integrations/composio/trigger-known-fields.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
 import { executeLoopTestRun } from "../../../loops/test-run.js";
 import {
@@ -1014,13 +1018,35 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               return duplicateToolExecution("listActions", { toolkit: resolved }, execution, `Actions for ${resolved} were already listed for the current revision`);
             }
             const actions = await getAllTools(resolved);
+            const triggerSlug = currentSpec?.trigger?.kind === "event"
+              ? currentSpec.trigger.composioSlug
+              : undefined;
+            const triggerFieldNames = triggerSlug
+              ? getTriggerFieldNamesForFeasibility(triggerSlug)
+              : [];
             return finalizeToolExecution("listActions", { toolkit: resolved }, execution, {
               toolkit: resolved,
-              actions: actions.map((action) => ({
-                slug: action.actionSlug,
-                name: action.name,
-                description: action.description,
-              })),
+              actions: actions.map((action) => {
+                const feasibility = enrichBindingActionCandidate({
+                  actionSlug: action.actionSlug,
+                  name: action.name,
+                  description: action.description,
+                  inputSchema: action.inputSchema ?? { type: "object", properties: {} },
+                  outputSchema: action.outputSchema,
+                  context: {
+                    triggerSlug,
+                    triggerFieldNames,
+                  },
+                });
+                return {
+                  slug: action.actionSlug,
+                  name: action.name,
+                  description: action.description,
+                  requiredFields: feasibility.requiredFields,
+                  feasible: feasibility.feasible,
+                  ...(feasibility.feasibilityReason ? { feasibilityReason: feasibility.feasibilityReason } : {}),
+                };
+              }),
             });
           },
         }),
@@ -1076,31 +1102,6 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
             await Promise.all([...new Set(actionOutcomes.map((outcome) => outcome.selectedConnector.toLowerCase()))]
               .map(async (toolkit) => catalogues.set(toolkit, await getAllTools(toolkit))));
 
-            const actions: BindingResolverAction[] = actionOutcomes.map((outcome) => {
-              const connector = outcome.selectedConnector;
-              const discovery = latestDiscoveryByToolkit.get(connector.toLowerCase());
-              const ambiguities = Array.isArray(discovery?.ambiguities) ? discovery.ambiguities : [];
-              const suggestions = Array.isArray(discovery?.suggestedBindings) ? discovery.suggestedBindings : [];
-              const ambiguity = ambiguities.map(recordValue).find((row) => String(row?.outcomeId ?? "") === outcome.id);
-              const suggestion = suggestions.map(recordValue).find((row) => String(row?.outcomeId ?? "") === outcome.id);
-              const candidateRows = ambiguity && Array.isArray(ambiguity.candidates)
-                ? ambiguity.candidates.map(recordValue).filter((row): row is Record<string, unknown> => Boolean(row))
-                : suggestion ? [{ actionSlug: String(suggestion.actionSlug ?? "") }] : [];
-              const catalogue = catalogues.get(connector.toLowerCase()) ?? [];
-              return {
-                outcomeId: outcome.id,
-                connector,
-                role: outcome.role,
-                description: outcome.description,
-                candidates: candidateRows.flatMap((row) => {
-                  const actionSlug = String(row.actionSlug ?? "");
-                  const live = catalogue.find((candidate) => candidate.actionSlug === actionSlug);
-                  if (!actionSlug || !live) return [];
-                  return [{ actionSlug, name: live.name, description: live.description }];
-                }),
-              };
-            });
-
             let trigger: BindingResolverTrigger | null = null;
             if (triggerOutcome?.selectedConnector) {
               const connector = triggerOutcome.selectedConnector;
@@ -1149,6 +1150,64 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 ...(typeof output.otherText === "string" ? { otherText: output.otherText } : {}),
               }];
             }));
+            const pinnedTriggerSlug = pinnedTriggerSlugFromInput({ actions: [], trigger, answers });
+            const triggerFieldNames = pinnedTriggerSlug
+              ? getTriggerFieldNamesForFeasibility(pinnedTriggerSlug)
+              : [];
+
+            const actions: BindingResolverAction[] = actionOutcomes.map((outcome, outcomeIndex) => {
+              const connector = outcome.selectedConnector;
+              const discovery = latestDiscoveryByToolkit.get(connector.toLowerCase());
+              const ambiguities = Array.isArray(discovery?.ambiguities) ? discovery.ambiguities : [];
+              const suggestions = Array.isArray(discovery?.suggestedBindings) ? discovery.suggestedBindings : [];
+              const ambiguity = ambiguities.map(recordValue).find((row) => String(row?.outcomeId ?? "") === outcome.id);
+              const suggestion = suggestions.map(recordValue).find((row) => String(row?.outcomeId ?? "") === outcome.id);
+              const candidateRows = ambiguity && Array.isArray(ambiguity.candidates)
+                ? ambiguity.candidates.map(recordValue).filter((row): row is Record<string, unknown> => Boolean(row))
+                : suggestion ? [{ actionSlug: String(suggestion.actionSlug ?? "") }] : [];
+              const catalogue = catalogues.get(connector.toLowerCase()) ?? [];
+              const priorActions = actionOutcomes.slice(0, outcomeIndex).flatMap((priorOutcome) => {
+                const priorDiscovery = latestDiscoveryByToolkit.get(priorOutcome.selectedConnector.toLowerCase());
+                const priorSuggestions = Array.isArray(priorDiscovery?.suggestedBindings)
+                  ? priorDiscovery.suggestedBindings
+                  : [];
+                const priorSuggestion = priorSuggestions.map(recordValue)
+                  .find((row) => String(row?.outcomeId ?? "") === priorOutcome.id);
+                const priorSlug = String(priorSuggestion?.actionSlug ?? "");
+                if (!priorSlug) return [];
+                const priorLive = (catalogues.get(priorOutcome.selectedConnector.toLowerCase()) ?? [])
+                  .find((candidate) => candidate.actionSlug === priorSlug);
+                if (!priorLive) return [];
+                return [{
+                  actionSlug: priorSlug,
+                  outputSchema: priorLive.outputSchema,
+                }];
+              });
+              return {
+                outcomeId: outcome.id,
+                connector,
+                role: outcome.role,
+                description: outcome.description,
+                candidates: candidateRows.flatMap((row) => {
+                  const actionSlug = String(row.actionSlug ?? "");
+                  const live = catalogue.find((candidate) => candidate.actionSlug === actionSlug);
+                  if (!actionSlug || !live) return [];
+                  const enriched = enrichBindingActionCandidate({
+                    actionSlug,
+                    name: live.name,
+                    description: live.description,
+                    inputSchema: live.inputSchema ?? { type: "object", properties: {} },
+                    outputSchema: live.outputSchema,
+                    context: {
+                      triggerSlug: pinnedTriggerSlug,
+                      triggerFieldNames,
+                      priorActions,
+                    },
+                  });
+                  return [enriched];
+                }),
+              };
+            });
             const resolutionInput = { actions, trigger, answers, userId: auth.userId };
             const evidenceHash = eventPayloadHash({
               blueprintHash: currentBuildState!.artifacts.blueprint!.artifactHash,
@@ -1196,6 +1255,29 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 resumeTool: "connectToolkit",
               });
             }
+            if (pinnedTriggerSlug) {
+              const infeasibleDiagnostics = findNoFeasibleActionDiagnostics(resolutionInput);
+              if (infeasibleDiagnostics.length > 0) {
+                const diagnostics: BindingDiagnostic[] = infeasibleDiagnostics.map((row) => ({
+                  code: row.code,
+                  message: row.message,
+                  connector: row.connector,
+                  expected: "At least one action whose required fields can be sourced from the selected trigger",
+                  action: row.reason,
+                  technical: {
+                    outcomeId: row.outcomeId,
+                    reason: row.reason,
+                    feasibleAlternatives: row.feasibleAlternatives,
+                  },
+                }));
+                await persistBindingDiagnostics(diagnostics);
+                return finalizeToolExecution("resolveBindings", {}, execution, {
+                  ok: false as const,
+                  diagnostics,
+                  retryAllowed: true,
+                });
+              }
+            }
             const prepared = prepareBindingResolution(resolutionInput);
             if (!prepared.ready) {
               return finalizeToolExecution("resolveBindings", {}, execution, {
@@ -1235,7 +1317,9 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                   ? "Retry binding resolution or configure TALLEI_BINDING_RESOLVER__MODEL to a model that supports structured JSON output."
                   : failure.code === "INVALID_BINDING_SCOPE_ANSWER"
                     ? "Call resolveBindings again and answer the returned pendingQuestions exactly."
-                    : "Retry binding resolution with the same confirmed choices.",
+                    : failure.code === "INVALID_BINDING_SELECTION"
+                      ? "Call resolveBindings again and choose one of the server-offered feasible actions."
+                      : "Retry binding resolution with the same confirmed choices.",
                 technical: {
                   evidenceHash,
                   error: error instanceof Error ? error.message.slice(0, 500) : "Unknown binding resolution error",

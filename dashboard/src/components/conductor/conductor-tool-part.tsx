@@ -18,6 +18,7 @@ import {
 import {
   OutcomeBriefCard,
 } from "@/components/conductor/outcome-brief-card";
+import { TestRunStoryboardCard } from "@/components/conductor/test-run-storyboard-card";
 import {
   buildOutcomeReviewViewModel,
   type LegacyOutcomeReviewSummary,
@@ -43,6 +44,7 @@ import {
   DEFAULT_CONNECTOR_PICK_QUESTION,
   connectorLogoUrl,
   findConnectorPickInputForToolCall,
+  findLatestPresentAgentTeamOutput,
   resolveAskQuestionDisplayAnswer,
   resolveConnectorIconSlug,
   resolveOutcomeBriefCardStatus,
@@ -368,6 +370,22 @@ export function ConductorToolPart({
         />
       );
     }
+  }
+
+  if (toolName === "testRunLoop") {
+    const input = part.input as {
+      scenario?: { label: string; triggerPayload?: Record<string, unknown>; context?: string };
+    } | undefined;
+
+    return (
+      <TestRunStoryboardCard
+        output={part.output}
+        scenario={input?.scenario}
+        streaming={part.state === "input-streaming"}
+        team={findLatestPresentAgentTeamOutput(messages)}
+        toolState={part.state}
+      />
+    );
   }
 
   if (["analyzeIntent", "listWorkspaceConnectors", "listTriggers", "listActions", "discoverBindings", "resolveBindings"].includes(toolName)) {

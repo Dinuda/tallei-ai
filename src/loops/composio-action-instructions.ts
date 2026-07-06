@@ -5,6 +5,7 @@ import type {
   CompiledPlan,
   ResolvedTool,
 } from "./spec.js";
+import { getTriggerOutputFields } from "../integrations/composio/trigger-known-fields.js";
 import { summarizeInputSchema } from "./tool-schema.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -15,6 +16,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function actionKey(toolkit: string, actionSlug: string): string {
   return `${toolkit.toLowerCase()}:${actionSlug.toUpperCase()}`;
+}
+
+function resolveTriggerValue(eventPayload: unknown, path: string | undefined, triggerSlug?: string): unknown {
+  if (!path) return undefined;
+  const keys = new Set<string>([path]);
+  if (triggerSlug) {
+    const spec = getTriggerOutputFields(triggerSlug).find((field) => field.name === path);
+    for (const alias of spec?.aliases ?? []) keys.add(alias);
+  }
+  const payload = asRecord(eventPayload);
+  const nestedPayload = asRecord(payload?.payload);
+  const nestedData = asRecord(payload?.data) ?? asRecord(nestedPayload?.data);
+  for (const key of keys) {
+    const value = firstDefined(
+      valueAtPath(eventPayload, key),
+      valueAtPath(nestedPayload, key),
+      valueAtPath(nestedData, key),
+    );
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
 }
 
 function fieldLooksLikeIdentifier(field: string): boolean {
@@ -286,6 +308,7 @@ export function resolveComposioActionArgs(input: {
 } {
   const instruction = input.tool.composioAction
     ?? input.plan.composioActions.find((row) => actionKey(row.toolkit, row.actionSlug) === actionKey(input.tool.connector, input.tool.actionSlug));
+  const triggerSlug = input.plan.trigger.kind === "event" ? input.plan.trigger.composioSlug : undefined;
   const args: Record<string, unknown> = {};
   const required = summarizeInputSchema(input.tool.originalInputSchema ?? input.tool.inputSchema).required;
   const plannerVisible = new Set(
@@ -301,10 +324,7 @@ export function resolveComposioActionArgs(input: {
   );
   for (const field of inputProperties) {
     if (required.includes(field) || field in args) continue;
-    const triggerValue = firstDefined(
-      valueAtPath(input.eventPayload, field),
-      valueAtPath(asRecord(input.eventPayload)?.payload, field),
-    );
+    const triggerValue = resolveTriggerValue(input.eventPayload, field, triggerSlug);
     if (triggerValue !== undefined) args[field] = triggerValue;
   }
   const missing: Array<{
@@ -320,7 +340,7 @@ export function resolveComposioActionArgs(input: {
 
     for (const source of fieldInstruction?.sources ?? []) {
       if (source.type === "trigger") {
-        resolved = firstDefined(valueAtPath(input.eventPayload, source.path), valueAtPath(asRecord(input.eventPayload)?.payload, source.path));
+        resolved = resolveTriggerValue(input.eventPayload, source.path, triggerSlug);
       } else if (source.type === "static") {
         resolved = source.value;
       } else if (source.type === "previous_action") {

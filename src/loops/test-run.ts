@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import type { AuthContext } from "../domain/auth/index.js";
 import { config } from "../config/index.js";
 import type { TestRunScenario } from "./conductor-tools.js";
+import { buildSampleTriggerPayload } from "../integrations/composio/trigger-known-fields.js";
 import {
   buildTestRunPlannerPrompt,
   runPlannerDecision,
@@ -47,6 +48,16 @@ export type TestRunResult =
     };
 
 const DEFAULT_MAX_STEPS = 2;
+
+function resolveTestRunScenario(scenario: TestRunScenario, plan: CompiledPlan): TestRunScenario {
+  if (scenario.triggerPayload !== undefined) return scenario;
+  const triggerSlug = plan.trigger.kind === "event" ? plan.trigger.composioSlug : undefined;
+  if (!triggerSlug) return scenario;
+  return {
+    ...scenario,
+    triggerPayload: buildSampleTriggerPayload(triggerSlug),
+  };
+}
 
 /** Wall-clock budget for the full simulated test (all planner LLM calls). */
 export function resolveTestRunTimeoutMs(maxSteps: number, overrideMs?: number): number {
@@ -318,6 +329,7 @@ export async function executeLoopTestRun(
   }
 
   const plan = compiledPlanSchema.parse(planRow);
+  const scenario = resolveTestRunScenario(input.scenario, plan);
   const maxSteps = input.maxSteps ?? config.loopTestRunMaxSteps ?? DEFAULT_MAX_STEPS;
   const timeoutMs = resolveTestRunTimeoutMs(maxSteps, input.timeoutMs);
   const plannerTimeoutMs = config.plannerRequestTimeoutMs > 0
@@ -361,7 +373,7 @@ export async function executeLoopTestRun(
     const outcome = await Promise.race([
       runAgenticTestLoop({
         plan,
-        scenario: input.scenario,
+        scenario,
         maxSteps,
         plannerTimeoutMs,
         userId: auth.userId,

@@ -381,6 +381,21 @@ export function isPresentAgentTeamPart(part: { type: string; toolName?: string }
   return resolveToolPartName(part) === "presentAgentTeam";
 }
 
+export function findLatestPresentAgentTeamOutput(messages: UIMessage[]): PresentAgentTeamOutput | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    const parts = message?.parts ?? [];
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = parts[partIndex];
+      if (!part || !isPresentAgentTeamPart(part as { type: string; toolName?: string })) continue;
+      const toolPart = part as PresentAgentTeamToolPart;
+      if (toolPart.state !== "output-available" || !toolPart.output?.specialists?.length) continue;
+      return toolPart.output;
+    }
+  }
+  return null;
+}
+
 export function isConfirmOutcomeBriefPart(part: { type: string; toolName?: string }): part is ConfirmOutcomeBriefToolPart {
   return resolveToolPartName(part) === "confirmOutcomeBrief";
 }

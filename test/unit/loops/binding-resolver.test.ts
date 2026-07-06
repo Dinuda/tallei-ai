@@ -111,10 +111,12 @@ test("binding resolver waits for exact action and trigger-scope answers without 
   assert.equal(prepared.ready, false);
   if (prepared.ready) return;
   assert.deepEqual(prepared.pendingQuestions.map((question) => question.questionId), [
-    "binding-action-step-5",
     "binding-config-step-1-labelIds",
+    "binding-action-step-5",
   ]);
-  assert.deepEqual(prepared.pendingQuestions[0]?.options.map((option) => option.value), [
+  const actionQuestion = prepared.pendingQuestions.find((question) => question.questionId === "binding-action-step-5");
+  assert.ok(actionQuestion);
+  assert.deepEqual(actionQuestion.options.map((option) => option.value), [
     "GMAIL_REPLY_TO_THREAD",
     "GMAIL_SEND_EMAIL",
   ]);

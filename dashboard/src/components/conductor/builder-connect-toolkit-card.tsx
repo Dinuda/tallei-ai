@@ -1,13 +1,15 @@
 "use client";
 
 import { LoaderCircle } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { useMemo, useState } from "react";
 
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
 import { connectorLogoUrl } from "@/components/conductor/conductor-shared";
+import {
+  formatToolkitLabel,
+  useConnectorAuthorization,
+} from "@/components/conductor/use-connector-authorization";
 import { Button } from "@/components/ui/button";
-import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "@/lib/utils";
 
 type ConnectToolkitOutput = {
@@ -26,67 +28,29 @@ export function BuilderConnectToolkitCard({
   output?: ConnectToolkitOutput | null;
   state: string;
 }) {
-  const [connected, setConnected] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [verifyError, setVerifyError] = useState<string | null>(null);
-  const verifyingRef = useRef(false);
-
   const redirectUrl = output?.redirectUrl;
   const connectionRequestId = output?.connectionRequestId;
-  const displayName = toolkit.charAt(0).toUpperCase() + toolkit.slice(1);
-  const pendingStorageKey = connectionRequestId
-    ? `tallei.pendingToolkitAuthorization:${connectionRequestId}`
-    : null;
+  const displayName = formatToolkitLabel(toolkit);
+  const returnedFromAuthKey = useMemo(
+    () => (connectionRequestId ? `tallei.pendingToolkitAuthorization:${connectionRequestId}` : null),
+    [connectionRequestId],
+  );
+  const [connected, setConnected] = useState(false);
 
-  const markConnected = useCallback(() => {
-    setConnected(true);
-    setBusy(false);
-    setVerifyError(null);
-    if (pendingStorageKey) window.sessionStorage.removeItem(pendingStorageKey);
-    verifyingRef.current = false;
-  }, [pendingStorageKey]);
-
-  const verifyConnection = useCallback(async () => {
-    if (verifyingRef.current) return;
-    if (!connectionRequestId) {
-      markConnected();
-      return;
-    }
-    verifyingRef.current = true;
-    setBusy(true);
-    setVerifyError(null);
-    try {
-      const res = await apiFetch(
-        `/api/connectors/authorize/${encodeURIComponent(connectionRequestId)}/verify`,
-        {
-          method: "POST",
-          body: JSON.stringify({ toolkit }),
-        },
-      );
-      const data = await res.json().catch(() => ({})) as { connected?: boolean; error?: string };
-      if (res.ok && data.connected) {
-        markConnected();
-        return;
-      }
-      setVerifyError(data.error ?? "Connection not confirmed yet. Complete authorization and try again.");
-    } catch {
-      setVerifyError("Could not verify the connection. Try again.");
-    } finally {
-      verifyingRef.current = false;
-      setBusy(false);
-    }
-  }, [connectionRequestId, markConnected, toolkit]);
-
-  useEffect(() => {
-    if (pendingStorageKey && window.sessionStorage.getItem(pendingStorageKey)) {
-      void verifyConnection();
-    }
-  }, [pendingStorageKey, verifyConnection]);
-
-  useEffect(() => {
-    if (!verifyError) return;
-    toast.error(verifyError, { id: "connector-verify-error" });
-  }, [verifyError]);
+  const {
+    busy,
+    statusLabel,
+    canRestart,
+    restartConnection,
+  } = useConnectorAuthorization({
+    toolkit,
+    onConnected: () => setConnected(true),
+    initialAuth: redirectUrl && connectionRequestId
+      ? { redirectUrl, connectionRequestId }
+      : undefined,
+    autoStart: state === "output-available" && Boolean(redirectUrl),
+    returnedFromAuthKey,
+  });
 
   if (connected) {
     return (
@@ -102,16 +66,6 @@ export function BuilderConnectToolkitCard({
 
   if (state !== "output-available" || !redirectUrl) {
     return null;
-  }
-
-  function openAuth() {
-    if (!redirectUrl) return;
-    setBusy(true);
-    setVerifyError(null);
-    if (pendingStorageKey) window.sessionStorage.setItem(pendingStorageKey, "1");
-    window.sessionStorage.setItem("tallei.connectorReturnUrl", window.location.href);
-    window.location.assign(redirectUrl);
-    setBusy(false);
   }
 
   return (
@@ -140,21 +94,26 @@ export function BuilderConnectToolkitCard({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3 p-4">
-        <Button
-          className="bg-[var(--builder-indigo-accent)] text-white hover:bg-[var(--builder-indigo-accent-hover)]"
-          disabled={busy}
-          onClick={openAuth}
-          size="sm"
-          style={{ borderRadius: 0 }}
-          type="button"
-        >
-          {busy ? <LoaderCircle className="size-4 animate-spin" /> : `Connect ${displayName}`}
-        </Button>
         {busy ? (
+          <span className={cn("flex items-center gap-2 text-sm text-[var(--builder-indigo-text)]")}>
+            <LoaderCircle className="size-4 animate-spin" />
+            {statusLabel || `Connecting ${displayName}…`}
+          </span>
+        ) : canRestart ? (
+          <Button
+            className="bg-[var(--builder-indigo-accent)] text-white hover:bg-[var(--builder-indigo-accent-hover)]"
+            onClick={restartConnection}
+            size="sm"
+            style={{ borderRadius: 0 }}
+            type="button"
+          >
+            Restart connection
+          </Button>
+        ) : (
           <span className={cn("text-xs text-[var(--builder-indigo-text-muted)]")}>
             Redirecting to authorization…
           </span>
-        ) : null}
+        )}
       </div>
     </div>
   );

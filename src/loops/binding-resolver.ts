@@ -1,8 +1,10 @@
 import { z } from "zod";
 
+import { getTriggerOutputFields } from "../integrations/composio/trigger-known-fields.js";
 import { bindingArtifactSchema } from "./build-state.js";
 import { validateConfigAgainstSchema, type ConfigurableField } from "./binding-discovery.js";
-import type { ToolBinding } from "./spec.js";
+import { buildComposioToolContract, type RequiredFieldSummary } from "./composio-schema-contract.js";
+import type { ComposioActionInstruction, ToolBinding } from "./spec.js";
 import { capabilityForAction } from "./tool-schema.js";
 
 export type BindingResolverAnswer = {
@@ -18,6 +20,12 @@ export type BindingResolverActionCandidate = {
   actionSlug: string;
   name: string;
   description: string;
+  requiredFields?: RequiredFieldSummary[];
+  feasible?: boolean;
+  unresolvableFields?: string[];
+  feasibilityReason?: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 };
 
 export type BindingResolverAction = {
@@ -103,6 +111,27 @@ export class InvalidBindingScopeAnswerError extends Error {
   }
 }
 
+export class InvalidBindingSelectionError extends Error {
+  readonly outcomeId: string;
+  readonly actionSlug: string;
+  readonly reason: string;
+  readonly feasibleAlternatives: string[];
+
+  constructor(input: {
+    outcomeId: string;
+    actionSlug: string;
+    reason: string;
+    feasibleAlternatives: string[];
+  }) {
+    super(`Binding selection ${input.actionSlug} is not feasible for ${input.outcomeId}: ${input.reason}`);
+    this.name = "InvalidBindingSelectionError";
+    this.outcomeId = input.outcomeId;
+    this.actionSlug = input.actionSlug;
+    this.reason = input.reason;
+    this.feasibleAlternatives = input.feasibleAlternatives;
+  }
+}
+
 function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
   const seen = new Set<string>();
   return values.filter((value) => {
@@ -113,17 +142,59 @@ function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
   });
 }
 
+function isFeasibleCandidate(candidate: BindingResolverActionCandidate): boolean {
+  return candidate.feasible !== false;
+}
+
+function feasibleCandidates(candidates: BindingResolverActionCandidate[]): BindingResolverActionCandidate[] {
+  return candidates.filter(isFeasibleCandidate);
+}
+
 function actionAnswerFor(
   answers: BindingResolverAnswer[],
   outcomeId: string,
   candidates: BindingResolverActionCandidate[],
 ): BindingResolverAnswer | undefined {
   const expectedQuestionId = `binding-action-${outcomeId}`;
-  const allowed = new Set(candidates.map((candidate) => candidate.actionSlug.toLowerCase()));
+  const allowed = new Set(feasibleCandidates(candidates).map((candidate) => candidate.actionSlug.toLowerCase()));
   return answers.slice().reverse().find((answer) =>
     answer.questionId === expectedQuestionId
     && [...answer.selectedValues, ...answer.selectedOptionIds]
       .some((value) => allowed.has(value.toLowerCase())));
+}
+
+function verifyFeasibleActionSelection(
+  action: BindingResolverAction,
+  selected: BindingResolverActionCandidate,
+): void {
+  if (isFeasibleCandidate(selected)) return;
+  const alternatives = feasibleCandidates(action.candidates).map((candidate) => candidate.actionSlug);
+  throw new InvalidBindingSelectionError({
+    outcomeId: action.outcomeId,
+    actionSlug: selected.actionSlug,
+    reason: selected.feasibilityReason
+      ?? `Requires ${(selected.unresolvableFields ?? []).join(", ")} which cannot be sourced from the selected trigger.`,
+    feasibleAlternatives: alternatives,
+  });
+}
+
+function pinnedTriggerSlug(
+  trigger: BindingResolverTrigger | null,
+  answers: BindingResolverAnswer[],
+): string | undefined {
+  if (!trigger) return undefined;
+  const candidates = uniqueBy(trigger.candidates, (candidate) => candidate.slug);
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0]!.slug;
+  const answer = triggerAnswerFor(answers, trigger.outcomeId, candidates);
+  const selected = candidates.find((candidate) =>
+    [...(answer?.selectedValues ?? []), ...(answer?.selectedOptionIds ?? [])]
+      .some((value) => value.toLowerCase() === candidate.slug.toLowerCase()));
+  return selected?.slug;
+}
+
+export function pinnedTriggerSlugFromInput(input: BindingResolutionInput): string | undefined {
+  return pinnedTriggerSlug(input.trigger, filterBindingResolutionAnswers(input.answers));
 }
 
 function triggerAnswerFor(
@@ -176,16 +247,28 @@ function configSchemaFor(fields: ConfigurableField[]): z.ZodObject<Record<string
   return z.object(Object.fromEntries(fields.map((field) => [field.key, fieldValueSchema(field)]))).strict();
 }
 
+function formatCandidateDescription(candidate: BindingResolverActionCandidate): string {
+  if (candidate.requiredFields?.length) {
+    return candidate.requiredFields.map((field) => `${field.field} <- ${field.source}`).join("; ");
+  }
+  return candidate.description;
+}
+
 function actionQuestion(action: BindingResolverAction): BindingResolutionQuestion {
+  const options = feasibleCandidates(action.candidates);
+  const recommendedOptionIds = options
+    .filter((candidate) => candidate.requiredFields?.every((field) => field.source.startsWith("trigger.")))
+    .map((candidate) => candidate.actionSlug);
   return {
     questionId: `binding-action-${action.outcomeId}`,
     question: `Which method should ${action.connector} use for ${action.description}?`,
-    options: action.candidates.map((candidate) => ({
+    options: options.map((candidate) => ({
       id: candidate.actionSlug,
       label: candidate.name,
       value: candidate.actionSlug,
-      description: candidate.description,
+      description: formatCandidateDescription(candidate),
     })),
+    ...(recommendedOptionIds.length > 0 ? { recommendedOptionIds } : {}),
     outcomeId: action.outcomeId,
     role: action.role,
   };
@@ -234,28 +317,47 @@ function configQuestion(
   };
 }
 
+export function findNoFeasibleActionDiagnostics(input: BindingResolutionInput): Array<{
+  code: "NO_FEASIBLE_ACTION";
+  message: string;
+  outcomeId: string;
+  connector: string;
+  reason: string;
+  feasibleAlternatives: string[];
+}> {
+  const diagnostics: Array<{
+    code: "NO_FEASIBLE_ACTION";
+    message: string;
+    outcomeId: string;
+    connector: string;
+    reason: string;
+    feasibleAlternatives: string[];
+  }> = [];
+  for (const action of input.actions) {
+    const candidates = uniqueBy(action.candidates, (candidate) => candidate.actionSlug);
+    const feasible = feasibleCandidates(candidates);
+    if (candidates.length > 0 && feasible.length === 0) {
+      const reason = candidates
+        .map((candidate) => candidate.feasibilityReason)
+        .find((value) => Boolean(value))
+        ?? "No action can source all required fields from the selected trigger.";
+      diagnostics.push({
+        code: "NO_FEASIBLE_ACTION",
+        message: `${action.connector} has no feasible action for ${action.description}.`,
+        outcomeId: action.outcomeId,
+        connector: action.connector,
+        reason,
+        feasibleAlternatives: [],
+      });
+    }
+  }
+  return diagnostics;
+}
+
 export function prepareBindingResolution(input: BindingResolutionInput): PreparedBindingResolution {
   const answers = filterBindingResolutionAnswers(input.answers);
   const pendingQuestions: BindingResolutionQuestion[] = [];
   const selectedActions: SelectedBindingResolution["actions"] = [];
-
-  for (const action of input.actions) {
-    const candidates = uniqueBy(action.candidates, (candidate) => candidate.actionSlug);
-    if (candidates.length === 0) continue;
-    const answer = candidates.length > 1
-      ? actionAnswerFor(answers, action.outcomeId, candidates)
-      : undefined;
-    const selected = candidates.length === 1
-      ? candidates[0]
-      : candidates.find((candidate) =>
-        [...(answer?.selectedValues ?? []), ...(answer?.selectedOptionIds ?? [])]
-          .some((value) => value.toLowerCase() === candidate.actionSlug.toLowerCase()));
-    if (!selected) {
-      pendingQuestions.push(actionQuestion({ ...action, candidates }));
-      continue;
-    }
-    selectedActions.push({ ...action, candidates, selected });
-  }
 
   let selectedTrigger: SelectedBindingResolution["trigger"] = null;
   if (input.trigger) {
@@ -269,8 +371,9 @@ export function prepareBindingResolution(input: BindingResolutionInput): Prepare
         [...(answer?.selectedValues ?? []), ...(answer?.selectedOptionIds ?? [])]
           .some((value) => value.toLowerCase() === candidate.slug.toLowerCase()));
     if (!selected && candidates.length > 0) {
-      pendingQuestions.push(triggerQuestion({ ...input.trigger, candidates }));
-    } else if (selected) {
+      return { ready: false, pendingQuestions: [triggerQuestion({ ...input.trigger, candidates })] };
+    }
+    if (selected) {
       const configField = selected.configurableFields[0];
       const configAnswer = configField
         ? configAnswerFor(answers, input.trigger.outcomeId, configField.key)
@@ -280,6 +383,31 @@ export function prepareBindingResolution(input: BindingResolutionInput): Prepare
       }
       selectedTrigger = { ...input.trigger, candidates, selected, ...(configAnswer ? { configAnswer } : {}) };
     }
+  }
+
+  if (input.trigger && !selectedTrigger) {
+    return { ready: false, pendingQuestions };
+  }
+
+  for (const action of input.actions) {
+    const candidates = uniqueBy(action.candidates, (candidate) => candidate.actionSlug);
+    if (candidates.length === 0) continue;
+    const viable = feasibleCandidates(candidates);
+    if (viable.length === 0) continue;
+    const answer = viable.length > 1
+      ? actionAnswerFor(answers, action.outcomeId, candidates)
+      : undefined;
+    const selected = viable.length === 1
+      ? viable[0]
+      : viable.find((candidate) =>
+        [...(answer?.selectedValues ?? []), ...(answer?.selectedOptionIds ?? [])]
+          .some((value) => value.toLowerCase() === candidate.actionSlug.toLowerCase()));
+    if (!selected) {
+      pendingQuestions.push(actionQuestion({ ...action, candidates }));
+      continue;
+    }
+    verifyFeasibleActionSelection(action, selected);
+    selectedActions.push({ ...action, candidates, selected });
   }
 
   if (selectedActions.length !== input.actions.length || (input.trigger && !selectedTrigger)) {
@@ -413,13 +541,23 @@ export function buildResolvedPayload(
 }
 
 export function describeBindingResolutionError(error: unknown): {
-  code: "BINDING_RESOLVER_PROVIDER_ERROR" | "BINDING_RESOLUTION_FAILED" | "INVALID_BINDING_SCOPE_ANSWER";
+  code:
+    | "BINDING_RESOLVER_PROVIDER_ERROR"
+    | "BINDING_RESOLUTION_FAILED"
+    | "INVALID_BINDING_SCOPE_ANSWER"
+    | "INVALID_BINDING_SELECTION";
   message: string;
 } {
   if (error instanceof InvalidBindingScopeAnswerError) {
     return {
       code: "INVALID_BINDING_SCOPE_ANSWER",
       message: "The saved trigger scope answer is not a valid provider option.",
+    };
+  }
+  if (error instanceof InvalidBindingSelectionError) {
+    return {
+      code: "INVALID_BINDING_SELECTION",
+      message: error.reason,
     };
   }
   const text = error instanceof Error ? error.message : String(error);
@@ -455,11 +593,14 @@ export async function resolvePreparedBindings(
     trigger: { outcomeId: string; connector: string; triggerSlug: string; config: Record<string, unknown> } | null;
   };
 
+  const selectedTrigger = prepared.selected.trigger;
+
   const bindings: ToolBinding[] = prepared.selected.actions.map((action) => {
     const actionSlug = parsed.actions[action.outcomeId];
     if (actionSlug !== action.selected.actionSlug) {
       throw new Error(`Binding resolver returned an unavailable action for ${action.outcomeId}`);
     }
+    verifyFeasibleActionSelection(action, action.selected);
     return {
       connector: action.connector,
       capability: capabilityForAction(actionSlug),
@@ -468,7 +609,25 @@ export async function resolvePreparedBindings(
     };
   });
 
-  const selectedTrigger = prepared.selected.trigger;
+  const triggerSlug = selectedTrigger?.selected.slug;
+  const triggerOutputFields = triggerSlug ? getTriggerOutputFields(triggerSlug) : [];
+  const composioActions: ComposioActionInstruction[] = prepared.selected.actions.map((action) => {
+    const inputSchema = action.selected.inputSchema ?? { type: "object", properties: {} };
+    const { composioAction } = buildComposioToolContract({
+      toolkit: action.connector,
+      actionSlug: action.selected.actionSlug,
+      label: action.description,
+      description: action.selected.description,
+      inputSchema,
+      outputSchema: action.selected.outputSchema,
+      feasibilityContext: {
+        triggerSlug,
+        triggerFieldNames: triggerOutputFields.filter((field) => !field.optional).map((field) => field.name),
+      },
+    });
+    return composioAction;
+  });
+
   if (selectedTrigger && !parsed.trigger) throw new Error("Binding resolver omitted the workflow trigger");
   if (!selectedTrigger && parsed.trigger) throw new Error("Binding resolver invented a workflow trigger");
   if (selectedTrigger && parsed.trigger) {
@@ -490,7 +649,13 @@ export async function resolvePreparedBindings(
       }
       : { kind: "manual" },
     bindings,
-    composioActions: [],
+    composioActions,
+    triggerOutputFields: triggerOutputFields.map((field) => ({
+      name: field.name,
+      type: field.type,
+      ...(field.description ? { description: field.description } : {}),
+      ...(field.optional ? { optional: true } : {}),
+    })),
     output: { kind: "none" },
   });
   return { artifact, raw };

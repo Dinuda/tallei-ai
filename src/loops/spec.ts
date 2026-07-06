@@ -149,6 +149,20 @@ export const composioActionOutputInstructionSchema = z.object({
 });
 export type ComposioActionOutputInstruction = z.infer<typeof composioActionOutputInstructionSchema>;
 
+export const composioActionRequiredFieldSchema = z.object({
+  field: z.string().min(1),
+  type: z.string().min(1),
+  description: z.string().optional(),
+  source: z.string().min(1),
+});
+
+export const triggerOutputFieldSchema = z.object({
+  name: z.string().min(1),
+  type: z.string().min(1),
+  description: z.string().optional(),
+  optional: z.boolean().optional(),
+});
+
 export const composioActionInstructionSchema = z.object({
   toolkit: z.string().min(1),
   actionSlug: z.string().min(1),
@@ -156,6 +170,8 @@ export const composioActionInstructionSchema = z.object({
   inputInstructions: z.array(composioActionInputInstructionSchema).default([]),
   outputInstructions: z.array(composioActionOutputInstructionSchema).default([]),
   dependsOn: z.array(z.string().min(1)).default([]),
+  requiredFields: z.array(composioActionRequiredFieldSchema).optional(),
+  feasible: z.boolean().optional(),
 });
 export type ComposioActionInstruction = z.infer<typeof composioActionInstructionSchema>;
 
@@ -166,6 +182,7 @@ export const loopSpecSchema = z.object({
   profile: executionProfileSchema.default("agentic"),
   bindings: z.array(toolBindingSchema).default([]),
   composioActions: z.array(composioActionInstructionSchema).default([]),
+  triggerOutputFields: z.array(triggerOutputFieldSchema).optional(),
   taskBlueprint: taskBlueprintSchema.optional(),
   intentDiscovery: intentDiscoveryStateSchema.default({}),
   agent: agentConfigSchema.optional(),
@@ -183,6 +200,7 @@ export const specPatchSchema = z.object({
   profile: executionProfileSchema.optional(),
   bindings: z.array(toolBindingSchema).optional(),
   composioActions: z.array(composioActionInstructionSchema).optional(),
+  triggerOutputFields: z.array(triggerOutputFieldSchema).optional(),
   taskBlueprint: taskBlueprintSchema.optional(),
   intentDiscovery: intentDiscoveryStateSchema.partial().optional(),
   agent: agentConfigSchema.partial().optional(),

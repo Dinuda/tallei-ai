@@ -37,7 +37,8 @@ test("intent prompt does not expose connector inventory", () => {
     ],
   });
   assert.doesNotMatch(prompt, /Connected \(\*=connected\)/);
-  assert.doesNotMatch(prompt, /\b(?:Gmail|Outlook|Zendesk)\b/);
+  assert.doesNotMatch(prompt, /\b(?:Outlook|Zendesk)\b/);
+  // Static glossary/examples may mention common app names; connected-toolkit inventory must not leak.
 });
 
 test("buildConductorSystemPrompt reports ready when slots filled", () => {
@@ -250,10 +251,15 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
     confirmationHash: computeOutcomeBriefHash(spec),
     connectedToolkits: [],
   });
-  assert.match(prompt, /— Core rules —/);
-  assert.match(prompt, /— Blueprint & patch flow —/);
-  assert.match(prompt, /— Hard stops —/);
-  assert.match(prompt, /— Safety —/);
+  assert.match(prompt, /<role>/);
+  assert.match(prompt, /<capabilities>/);
+  assert.match(prompt, /<workflow>/);
+  assert.match(prompt, /<guidelines>/);
+  assert.match(prompt, /<hard_stops>/);
+  assert.match(prompt, /<safety>/);
+  assert.match(prompt, /<specialist_review>/);
+  assert.match(prompt, /<examples>/);
+  assert.match(prompt, /<response_format>/);
   assert.match(prompt, /Available tools:/);
   assert.match(prompt, /pickConnectorApp/);
   assert.match(prompt, /analyzeIntent/);
@@ -264,6 +270,26 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
   assert.match(prompt, /do not narrate a next action/i);
   assert.match(prompt, /immediately emitting the corresponding tool call/i);
   assert.match(prompt, /Phase recovery crosses a server handoff/);
+});
+
+test("buildConductorSystemPrompt includes glossary, read-before-write, and examples without Spec JSON leak", () => {
+  const spec = createEmptyLoopSpec(workspaceId);
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    connectedToolkits: [],
+  });
+
+  const examplesBlock = prompt.match(/<examples>([\s\S]*?)<\/examples>/)?.[1] ?? "";
+  assert.ok(examplesBlock.length > 0, "expected non-empty examples block");
+  assert.match(prompt, /Trigger → what starts the automation/);
+  assert.match(prompt, /Before activateLoop → a passing testRunLoop/);
+  assert.match(examplesBlock, /analyzeIntent/);
+  assert.match(examplesBlock, /presentAgentTeam/);
+  assert.match(examplesBlock, /confirmOutcomeBrief/);
+  assert.doesNotMatch(examplesBlock, /"workspaceId"/);
+  assert.doesNotMatch(examplesBlock, /\{"intent"/);
+  assert.match(prompt, /before → after/i);
 });
 
 test("buildConductorSystemPrompt steers confirmOutcomeBrief when roster is already prepared", () => {

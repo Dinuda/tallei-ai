@@ -13,6 +13,7 @@ import {
   syncConfigSchema,
   taskBlueprintSchema,
   toolBindingSchema,
+  triggerOutputFieldSchema,
   triggerSchema,
   type LoopSpec,
 } from "./spec.js";
@@ -73,6 +74,7 @@ export const bindingArtifactSchema = z.object({
   trigger: triggerSchema,
   bindings: z.array(toolBindingSchema).min(1),
   composioActions: z.array(composioActionInstructionSchema).default([]),
+  triggerOutputFields: z.array(triggerOutputFieldSchema).optional(),
   output: outputConfigSchema.default({ kind: "none" }),
 }).strict();
 
@@ -329,6 +331,7 @@ export function assembleLoopSpec(state: LoopBuildState): LoopSpec {
   const spec: LoopSpec = {
     workspaceId: intent.workspaceId, intent: intent.intent, trigger: bindings.trigger,
     profile: blueprint.profile, bindings: bindings.bindings, composioActions: bindings.composioActions,
+    ...(bindings.triggerOutputFields ? { triggerOutputFields: bindings.triggerOutputFields } : {}),
     taskBlueprint, intentDiscovery: { status: "confirmed", analysis: intent.analysis, decisions: [], askedQuestionIds: [] },
     agent: blueprint.agent, monitor: blueprint.monitor, sync: blueprint.sync, output: bindings.output,
     approval: blueprint.approval, guardrails: blueprint.guardrails,
@@ -364,7 +367,9 @@ export function projectLoopSpec(state: LoopBuildState): LoopSpec {
     intent: intent?.intent ?? { goal: "Draft loop", outcome: "Draft outcome", successCriteria: [] },
     trigger: binding?.trigger ?? { kind: "manual" },
     profile: blueprint?.profile ?? "agentic",
-    bindings: binding?.bindings ?? [], composioActions: binding?.composioActions ?? [], taskBlueprint,
+    bindings: binding?.bindings ?? [], composioActions: binding?.composioActions ?? [],
+    ...(binding?.triggerOutputFields ? { triggerOutputFields: binding.triggerOutputFields } : {}),
+    taskBlueprint,
     intentDiscovery: {
       status: parsed.artifacts.review ? "confirmed" : parsed.buildPhase === "intent" ? "pending" : "ready",
       analysis: intent?.analysis, decisions: [], askedQuestionIds: [],

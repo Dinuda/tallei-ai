@@ -2,7 +2,6 @@
 
 import { LayoutGrid, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
 
 import {
   InteractivePromptMenu,
@@ -11,30 +10,14 @@ import {
 } from "@/components/ai-elements/interactive-prompt-menu";
 import { Button } from "@/components/ui/button";
 import { connectorLogoUrl } from "@/components/conductor/conductor-shared";
-import { apiFetch } from "@/lib/api-fetch";
+import {
+  CONNECTOR_RETURN_URL_KEY,
+  formatToolkitLabel,
+  PENDING_CONNECTOR_KEY,
+  useConnectorAuthorization,
+} from "@/components/conductor/use-connector-authorization";
 
-type ConnectorStatus = {
-  connected?: boolean;
-  error?: string;
-};
-
-type AuthorizationResult = {
-  redirectUrl?: string;
-  connectionRequestId?: string;
-  error?: string;
-};
-
-const PENDING_CONNECTOR_KEY = "tallei.pendingConnectorAuthorization";
-export const CONNECTOR_RETURN_URL_KEY = "tallei.connectorReturnUrl";
-
-function friendlyConnectionError(error: unknown, toolkit: string): string {
-  const message = error instanceof Error ? error.message : "Could not check this connection.";
-  if (/auth config|configured composio/i.test(message)) {
-    const displayName = toolkit.charAt(0).toUpperCase() + toolkit.slice(1);
-    return `${displayName} isn't available to connect yet. Choose another app.`;
-  }
-  return message;
-}
+export { CONNECTOR_RETURN_URL_KEY };
 
 export function BuilderConnectorPrompt({
   question,
@@ -61,28 +44,11 @@ export function BuilderConnectorPrompt({
 }) {
   const [pendingAnswer, setPendingAnswer] = useState<InteractivePromptAnswer | null>(null);
   const [pendingToolkit, setPendingToolkit] = useState<string | null>(null);
-  const [connectionRequestId, setConnectionRequestId] = useState<string | null>(null);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [connectionBusy, setConnectionBusy] = useState(false);
-  const [returnedFromAuthorization, setReturnedFromAuthorization] = useState(false);
-  const verifyInFlight = useRef(false);
   const restoredPendingRef = useRef(false);
 
   const recommendedCount = recommendedOptionIds.filter((id) =>
     options.some((option) => option.id === id),
   ).length;
-
-  const completeSelection = useCallback((answer: InteractivePromptAnswer) => {
-    setConnectionBusy(false);
-    setPendingAnswer(null);
-    setPendingToolkit(null);
-    setConnectionRequestId(null);
-    setConnectionError(null);
-    setReturnedFromAuthorization(false);
-    window.sessionStorage.removeItem(PENDING_CONNECTOR_KEY);
-    window.sessionStorage.removeItem(CONNECTOR_RETURN_URL_KEY);
-    onSubmit(answer);
-  }, [onSubmit]);
 
   useEffect(() => {
     if (restoredPendingRef.current) return;
@@ -93,133 +59,66 @@ export function BuilderConnectorPrompt({
       const parsed = JSON.parse(stored) as {
         answer?: InteractivePromptAnswer;
         toolkit?: string;
-        connectionRequestId?: string;
       };
-      if (!parsed.answer || !parsed.toolkit || !parsed.connectionRequestId) return;
+      if (!parsed.answer || !parsed.toolkit) return;
       if (!options.some((option) => option.value === parsed.toolkit)) return;
       setPendingAnswer(parsed.answer);
       setPendingToolkit(parsed.toolkit);
-      setConnectionRequestId(parsed.connectionRequestId);
-      setReturnedFromAuthorization(true);
     } catch {
       window.sessionStorage.removeItem(PENDING_CONNECTOR_KEY);
+      window.sessionStorage.removeItem(CONNECTOR_RETURN_URL_KEY);
     }
   }, [options]);
 
-  const verifyPendingConnection = useCallback(async () => {
-    if (!pendingAnswer || !pendingToolkit || verifyInFlight.current) return;
-    verifyInFlight.current = true;
-    setConnectionBusy(true);
-    setConnectionError(null);
-    try {
-      const path = connectionRequestId
-        ? `/api/connectors/authorize/${encodeURIComponent(connectionRequestId)}/verify`
-        : `/api/connectors/status/${encodeURIComponent(pendingToolkit)}`;
-      const response = await apiFetch(path, connectionRequestId
-        ? { method: "POST", body: JSON.stringify({ toolkit: pendingToolkit, timeoutMs: 3_000 }) }
-        : undefined);
-      const status = await response.json().catch(() => ({})) as ConnectorStatus;
-      if (response.ok && status.connected) {
-        completeSelection(pendingAnswer);
-        return;
-      }
-      if (!response.ok) {
-        setConnectionError(status.error ?? "Could not verify this connection.");
-      } else {
-        setReturnedFromAuthorization(false);
-        setConnectionRequestId(null);
-        window.sessionStorage.removeItem(PENDING_CONNECTOR_KEY);
-        window.sessionStorage.removeItem(CONNECTOR_RETURN_URL_KEY);
-        setConnectionError("Connection was not completed. Try again or choose another app.");
-      }
-    } catch {
-      setConnectionError("Could not verify this connection. Try again.");
-    } finally {
-      verifyInFlight.current = false;
-      setConnectionBusy(false);
-    }
-  }, [completeSelection, connectionRequestId, pendingAnswer, pendingToolkit]);
+  const completeSelection = useCallback((answer: InteractivePromptAnswer) => {
+    setPendingAnswer(null);
+    setPendingToolkit(null);
+    onSubmit(answer);
+  }, [onSubmit]);
 
-  useEffect(() => {
-    if (!returnedFromAuthorization || !pendingAnswer || !pendingToolkit || !connectionRequestId) return;
-    void verifyPendingConnection();
-  }, [connectionRequestId, pendingAnswer, pendingToolkit, returnedFromAuthorization, verifyPendingConnection]);
+  const {
+    busy,
+    statusLabel,
+    canRestart,
+    ensureConnected,
+    restartConnection,
+    reset,
+  } = useConnectorAuthorization({
+    toolkit: pendingToolkit,
+    onConnected: () => {
+      if (pendingAnswer) completeSelection(pendingAnswer);
+    },
+    pendingSession: {
+      buildPayload: (toolkit, connectionRequestId) => ({
+        answer: pendingAnswer,
+        toolkit,
+        connectionRequestId,
+      }),
+      canRestore: (payload) => {
+        if (!payload.answer || !payload.toolkit) return false;
+        return options.some((option) => option.value === payload.toolkit);
+      },
+    },
+  });
 
-  const verifyOrConnect = useCallback(async (answer: InteractivePromptAnswer) => {
+  const handleSubmit = useCallback((answer: InteractivePromptAnswer) => {
     const toolkit = answer.selectedValues[0]?.trim();
     if (!toolkit || answer.otherText) {
       onSubmit(answer);
       return;
     }
-
     setPendingAnswer(answer);
     setPendingToolkit(toolkit);
-    setConnectionBusy(true);
-    setConnectionError(null);
-    try {
-      const statusResponse = await apiFetch(`/api/connectors/status/${encodeURIComponent(toolkit)}`);
-      const status = await statusResponse.json().catch(() => ({})) as ConnectorStatus;
-      if (statusResponse.ok && status.connected) {
-        completeSelection(answer);
-        return;
-      }
+    void ensureConnected(toolkit, { answer, toolkit });
+  }, [ensureConnected, onSubmit]);
 
-      const authResponse = await apiFetch(`/api/connectors/${encodeURIComponent(toolkit)}/authorize`, {
-        method: "POST",
-        body: JSON.stringify({ callbackUrl: `${window.location.origin}/connect/complete` }),
-      });
-      const authorization = await authResponse.json().catch(() => ({})) as AuthorizationResult;
-      if (!authResponse.ok || !authorization.redirectUrl || !authorization.connectionRequestId) {
-        throw new Error(authorization.error ?? "Could not start authorization.");
-      }
-      setConnectionRequestId(authorization.connectionRequestId);
-      window.sessionStorage.setItem(PENDING_CONNECTOR_KEY, JSON.stringify({
-        answer,
-        toolkit,
-        connectionRequestId: authorization.connectionRequestId,
-      }));
-      window.sessionStorage.setItem(CONNECTOR_RETURN_URL_KEY, window.location.href);
-      window.location.assign(authorization.redirectUrl);
-    } catch (error) {
-      setConnectionError(friendlyConnectionError(error, toolkit));
-    } finally {
-      setConnectionBusy(false);
-    }
-  }, [completeSelection, onSubmit]);
-
-  const handleRetry = useCallback(() => {
-    if (!pendingAnswer) return;
-    if (connectionError) {
-      setConnectionRequestId(null);
-      setConnectionError(null);
-      void verifyOrConnect(pendingAnswer);
-      return;
-    }
-    if (connectionRequestId) {
-      void verifyPendingConnection();
-      return;
-    }
-    void verifyOrConnect(pendingAnswer);
-  }, [connectionError, connectionRequestId, pendingAnswer, verifyOrConnect, verifyPendingConnection]);
-
-  const resetPending = useCallback(() => {
+  const handleReset = useCallback(() => {
+    reset();
     setPendingAnswer(null);
     setPendingToolkit(null);
-    setConnectionRequestId(null);
-    setConnectionError(null);
-    setReturnedFromAuthorization(false);
-    window.sessionStorage.removeItem(PENDING_CONNECTOR_KEY);
-    window.sessionStorage.removeItem(CONNECTOR_RETURN_URL_KEY);
-  }, []);
+  }, [reset]);
 
-  const pendingToolkitLabel = pendingToolkit
-    ? pendingToolkit.charAt(0).toUpperCase() + pendingToolkit.slice(1)
-    : "";
-
-  useEffect(() => {
-    if (!connectionError) return;
-    toast.error(connectionError, { id: "connector-connection-error" });
-  }, [connectionError]);
+  const pendingToolkitLabel = pendingToolkit ? formatToolkitLabel(pendingToolkit) : "";
 
   return (
     <div className="w-full border border-[var(--builder-indigo-border)] bg-[var(--builder-indigo-bg)]">
@@ -260,36 +159,34 @@ export function BuilderConnectorPrompt({
               />
             </span>
             <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-semibold text-[var(--builder-indigo-text)]">
-              {connectionBusy ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : null}
+              {busy ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : null}
               <span className="truncate">
-                {connectionError
-                  ? `${pendingToolkitLabel} connection not completed`
-                  : connectionRequestId
-                  ? `Connect ${pendingToolkitLabel} to continue`
-                  : `Verifying ${pendingToolkitLabel}…`}
+                {statusLabel || `Connecting ${pendingToolkitLabel}…`}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <Button
                 aria-label="Choose another app"
-                disabled={connectionBusy}
-                onClick={resetPending}
+                disabled={busy}
+                onClick={handleReset}
                 size="icon-sm"
                 type="button"
                 variant="ghost"
               >
                 <LayoutGrid className="size-4" />
               </Button>
-              <Button
-                disabled={connectionBusy}
-                onClick={handleRetry}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <RefreshCw className={connectionBusy ? "animate-spin" : undefined} />
-                {connectionError ? "Try again" : "Refresh"}
-              </Button>
+              {canRestart ? (
+                <Button
+                  disabled={busy}
+                  onClick={restartConnection}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RefreshCw className={busy ? "animate-spin" : undefined} />
+                  Restart connection
+                </Button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -297,9 +194,9 @@ export function BuilderConnectorPrompt({
         <InteractivePromptMenu
           allowMultiple={allowMultiple}
           allowOther={allowOther}
-          disabled={disabled || connectionBusy}
+          disabled={disabled || busy}
           onDismiss={onDismiss}
-          onSubmit={(answer) => void verifyOrConnect(answer)}
+          onSubmit={handleSubmit}
           options={options}
           placement="composer"
           question={question}

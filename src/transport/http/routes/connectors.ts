@@ -18,14 +18,33 @@ import { workspaceMiddleware } from "../middleware/workspace.middleware.js";
 
 const router = Router();
 
+export type ConnectorApiErrorCode =
+  | "COMPOSIO_NOT_CONFIGURED"
+  | "AUTH_CONFIG_UNAVAILABLE"
+  | "VALIDATION_FAILED"
+  | "NOT_FOUND"
+  | "CONNECTOR_ERROR";
+
+function resolveConnectorErrorCode(message: string): ConnectorApiErrorCode {
+  if (/composio is not configured/i.test(message)) return "COMPOSIO_NOT_CONFIGURED";
+  if (/auth config|configured composio/i.test(message)) return "AUTH_CONFIG_UNAVAILABLE";
+  if (/not found/i.test(message)) return "NOT_FOUND";
+  return "CONNECTOR_ERROR";
+}
+
 function sendError(res: Response, error: unknown, fallback: string) {
   if (error instanceof z.ZodError) {
-    res.status(400).json({ error: "Validation failed", details: error.errors });
+    res.status(400).json({ code: "VALIDATION_FAILED" as const, error: "Validation failed", details: error.errors });
     return;
   }
   const message = error instanceof Error ? error.message : fallback;
-  const status = /not found/i.test(message) ? 404 : /not connected|not configured|invalid/i.test(message) ? 400 : 500;
-  res.status(status).json({ error: message });
+  const code = resolveConnectorErrorCode(message);
+  const status = code === "NOT_FOUND"
+    ? 404
+    : code === "COMPOSIO_NOT_CONFIGURED" || code === "AUTH_CONFIG_UNAVAILABLE" || /not connected|invalid/i.test(message)
+      ? 400
+      : 500;
+  res.status(status).json({ code, error: message });
 }
 
 router.use(authMiddleware);

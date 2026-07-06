@@ -12,13 +12,19 @@ test("selectComposioAuthConfigId selects the only enabled managed config", () =>
   ]), "enabled");
 });
 
-test("selectComposioAuthConfigId rejects ambiguous enabled configs", () => {
+test("selectComposioAuthConfigId picks the first enabled config when multiple exist", () => {
+  assert.equal(selectComposioAuthConfigId("gmail", [
+    { id: "two", status: "ENABLED" },
+    { id: "one", status: "ENABLED" },
+  ]), "one");
+});
+
+test("selectComposioAuthConfigId rejects when no enabled configs exist", () => {
   assert.throws(
     () => selectComposioAuthConfigId("gmail", [
-      { id: "one", status: "ENABLED" },
-      { id: "two", status: "ENABLED" },
+      { id: "disabled", status: "DISABLED" },
     ]),
-    /found 2/,
+    /found 0/,
   );
 });
 

@@ -360,7 +360,7 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` a
 | ------------------------------------------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
 | Draft vs send ambiguous                          | `askQuestion`                             | User said “draft and send replies” with no ordering                            |
 | Connector choice (always)                        | `pickConnectorApp`                        | After discovery — show ranked app cards; user picks even if Gmail is connected |
-| User picked unconnected app                      | `connectToolkit` + wait                   | Picker choice has “Needs connection”                                           |
+| User picked unconnected app                      | inline OAuth in picker (auto); `connectToolkit` fallback | Picker auto-redirects to authorize; returns via `/connect/complete` |
 | Binding fork (rare)                              | `askQuestion` with discovery `askOptions` | Send immediately vs save draft — plain-language labels only                    |
 | Ready to go live                                 | `presentReplyOptions`                     | “Compile and test?” chips                                                      |
 | Approval / schedule / unclear output destination | `askQuestion`                             | “Run daily at 9am?”                                                            |

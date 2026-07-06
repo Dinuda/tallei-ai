@@ -34,6 +34,7 @@ import {
   validateComposioActionInstructions,
 } from "./composio-action-instructions.js";
 import { buildComposioToolContract } from "./composio-schema-contract.js";
+import { getTriggerFieldNamesForFeasibility } from "../integrations/composio/trigger-known-fields.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
 import { getPendingConnectorOutcomes } from "./task-decomposition.js";
 import { approvalTargetsRole } from "./approval-policy.js";
@@ -412,6 +413,8 @@ export async function compileLoopSpec(
       instruction,
     ]),
   );
+  const triggerSlug = parsed.trigger.kind === "event" ? parsed.trigger.composioSlug : undefined;
+  const triggerFieldNames = triggerSlug ? getTriggerFieldNamesForFeasibility(triggerSlug) : [];
   const composioActions: ComposioActionInstruction[] = [];
   for (let i = 0; i < toolCatalog.length; i += 1) {
     const tool = toolCatalog[i]!;
@@ -419,7 +422,11 @@ export async function compileLoopSpec(
     const originalInputSchema = playbookEntry?.inputSchema ?? tool.inputSchema;
     const originalOutputSchema = playbookEntry?.outputSchema ?? tool.outputSchema;
     const key = `${tool.connector.toLowerCase()}:${tool.actionSlug.toUpperCase()}`;
-    const { contract, composioAction } = buildComposioToolContract({
+    const priorActionOutputs = toolCatalog.slice(0, i).map((prior) => ({
+      actionSlug: prior.actionSlug,
+      outputSchema: playbookResult.toolsBySlug.get(prior.actionSlug.toUpperCase())?.outputSchema ?? prior.outputSchema,
+    }));
+    const { contract, composioAction, feasibility } = buildComposioToolContract({
       toolkit: tool.connector,
       actionSlug: tool.actionSlug,
       label: tool.capability,
@@ -428,8 +435,26 @@ export async function compileLoopSpec(
       outputSchema: originalOutputSchema,
       existingInstruction: existingInstructions.get(key),
       bindingRole: tool.bindingRole,
+      feasibilityContext: {
+        triggerSlug,
+        triggerFieldNames,
+        priorActions: priorActionOutputs,
+      },
     });
-    composioActions.push(composioAction);
+    if (!feasibility.feasible) {
+      errors.push({
+        code: "INFEASIBLE_ACTION",
+        message: feasibility.feasibilityReason
+          ?? `${tool.actionSlug} cannot source required fields ${feasibility.unresolvableFields.join(", ")}`,
+        binding: `${tool.actionSlug}.${feasibility.unresolvableFields.join(",")}`,
+        toolkit: tool.connector,
+      });
+    }
+    composioActions.push({
+      ...composioAction,
+      requiredFields: feasibility.requiredFields,
+      feasible: feasibility.feasible,
+    });
     toolCatalog[i] = {
       ...tool,
       inputSchema: contract.originalInputSchema,

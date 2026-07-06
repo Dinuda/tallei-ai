@@ -35,6 +35,28 @@ const LIMIT_FIELD_PATTERNS = [
   /^max_?results_?per_?page$/i,
 ];
 
+const PLANNABLE_FIELD_PATTERNS = [
+  /^body$/i,
+  /^subject$/i,
+  /^text$/i,
+  /^message$/i,
+  /^content$/i,
+  /^html$/i,
+  /^query$/i,
+  /^search$/i,
+  /^filter$/i,
+  /^q$/i,
+  /^recipient/i,
+  /^to$/i,
+  /^cc$/i,
+  /^bcc$/i,
+  /^name$/i,
+  /^title$/i,
+  /^description$/i,
+  /^note$/i,
+  /^comment$/i,
+];
+
 function fieldMatches(field: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(field));
 }
@@ -43,16 +65,91 @@ function isOperationalField(field: string): boolean {
   return fieldMatches(field, HIDDEN_FIELD_PATTERNS) || fieldMatches(field, LIMIT_FIELD_PATTERNS);
 }
 
+function isPlannableField(field: string): boolean {
+  return fieldMatches(field, PLANNABLE_FIELD_PATTERNS);
+}
+
+function fieldLooksLikeIdentifier(field: string): boolean {
+  const normalized = field.toLowerCase();
+  return normalized === "id" || normalized.endsWith("_id") || normalized.endsWith("id");
+}
+
 function defaultForField(field: string): unknown {
   if (field in HIDDEN_DEFAULTS) return HIDDEN_DEFAULTS[field];
   if (fieldMatches(field, LIMIT_FIELD_PATTERNS)) return 1;
   return undefined;
 }
 
-function sourceForRequiredField(field: string, existing?: ComposioActionInstruction): ComposioActionInputSource[] {
-  const fromExisting = existing?.inputInstructions.find((row) => row.field === field)?.sources;
-  if (fromExisting?.length) return fromExisting;
+export type PriorActionOutput = {
+  actionSlug: string;
+  outputSchema?: Record<string, unknown>;
+};
 
+export type FeasibilityContext = {
+  triggerSlug?: string;
+  triggerFieldNames?: string[];
+  priorActions?: PriorActionOutput[];
+};
+
+export type RequiredFieldSummary = {
+  field: string;
+  type: string;
+  description: string;
+  source: string;
+};
+
+export type ActionFeasibilityResult = {
+  feasible: boolean;
+  requiredFields: RequiredFieldSummary[];
+  unresolvableFields: string[];
+  feasibilityReason?: string;
+  inputInstructions: ComposioActionInstruction["inputInstructions"];
+};
+
+function outputFieldNames(outputSchema?: Record<string, unknown>): string[] {
+  const row = asRecord(outputSchema) ?? {};
+  const properties = asRecord(row.properties) ?? row;
+  return Object.keys(properties).filter((field) => field !== "type" && field !== "required");
+}
+
+function priorActionProvidesField(field: string, priorActions: PriorActionOutput[] = []): PriorActionOutput | undefined {
+  const normalized = field.toLowerCase();
+  return priorActions.find((action) =>
+    outputFieldNames(action.outputSchema).some((outputField) =>
+      outputField.toLowerCase() === normalized
+      || outputField.toLowerCase().replace(/_/g, "") === normalized.replace(/_/g, ""),
+    ));
+}
+
+function summarizeSource(sources: ComposioActionInputSource[]): string {
+  if (sources.length === 0) return "unavailable";
+  return sources.map((source) => {
+    if (source.type === "trigger") return `trigger.${source.path ?? "?"}`;
+    if (source.type === "previous_action") return `previous_action.${source.path ?? "?"}`;
+    if (source.type === "planner") return "planner";
+    if (source.type === "static") return "static";
+    if (source.type === "user_config") return `user_config.${source.path ?? "?"}`;
+    return source.type;
+  }).join(" | ");
+}
+
+function fieldTypeFromSchema(inputSchema: Record<string, unknown>, field: string): string {
+  const properties = asRecord(inputSchema.properties) ?? {};
+  const prop = asRecord(properties[field]);
+  return typeof prop?.type === "string" ? prop.type : "string";
+}
+
+function fieldDescriptionFromSchema(inputSchema: Record<string, unknown>, field: string): string {
+  const properties = asRecord(inputSchema.properties) ?? {};
+  const prop = asRecord(properties[field]);
+  return typeof prop?.description === "string" ? prop.description : `Required field ${field}`;
+}
+
+export function resolveFieldSources(
+  field: string,
+  inputSchema: Record<string, unknown>,
+  context: FeasibilityContext = {},
+): ComposioActionInputSource[] {
   const defaultValue = defaultForField(field);
   if (defaultValue !== undefined) {
     return [{
@@ -62,26 +159,131 @@ function sourceForRequiredField(field: string, existing?: ComposioActionInstruct
     }];
   }
 
+  const triggerFields = new Set((context.triggerFieldNames ?? []).map((name) => name.toLowerCase()));
   const normalized = field.toLowerCase();
-  if (normalized === "id" || normalized.endsWith("_id") || normalized.endsWith("id")) {
-    return [
-      {
+
+  if (triggerFields.has(normalized)) {
+    return [{
+      type: "trigger",
+      path: field,
+      description: `Use ${field} from the trigger payload.`,
+    }];
+  }
+
+  const prior = priorActionProvidesField(field, context.priorActions);
+  if (prior) {
+    return [{
+      type: "previous_action",
+      path: field,
+      actionSlug: prior.actionSlug,
+      description: `Use ${field} from ${prior.actionSlug} output.`,
+    }];
+  }
+
+  if (isPlannableField(field)) {
+    return [{
+      type: "planner",
+      description: `Construct ${field} from the loop goal, current run context, and prior action outputs.`,
+    }];
+  }
+
+  if (fieldLooksLikeIdentifier(field)) {
+    if (!context.triggerFieldNames || context.triggerFieldNames.length === 0) {
+      return [
+        {
+          type: "trigger",
+          path: field,
+          description: `Use exact ${field} from trigger payload when present.`,
+        },
+        {
+          type: "previous_action",
+          path: field,
+          description: `Use exact ${field} from a previous action output.`,
+        },
+      ];
+    }
+    if (triggerFields.has(normalized)) {
+      return [{
         type: "trigger",
         path: field,
-        description: `Use exact ${field} from trigger payload when present.`,
-      },
-      {
+        description: `Use ${field} from the trigger payload.`,
+      }];
+    }
+    const prior = priorActionProvidesField(field, context.priorActions);
+    if (prior) {
+      return [{
         type: "previous_action",
         path: field,
-        description: `Use exact ${field} from a previous action output.`,
-      },
-    ];
+        actionSlug: prior.actionSlug,
+        description: `Use ${field} from ${prior.actionSlug} output.`,
+      }];
+    }
+    return [];
   }
 
   return [{
     type: "planner",
     description: `Construct ${field} from the loop goal, current run context, and prior action outputs.`,
   }];
+}
+
+export function evaluateActionFeasibility(input: {
+  actionSlug: string;
+  inputSchema: Record<string, unknown>;
+  context?: FeasibilityContext;
+}): ActionFeasibilityResult {
+  const context = input.context ?? {};
+  const summary = summarizeInputSchema(input.inputSchema);
+  const required = summary.required.filter((field) => !isOperationalField(field));
+  const requiredFields: RequiredFieldSummary[] = [];
+  const unresolvableFields: string[] = [];
+  const inputInstructions: ComposioActionInstruction["inputInstructions"] = [];
+
+  for (const field of [...new Set([...required, ...summary.properties])]) {
+    const sources = resolveFieldSources(field, input.inputSchema, context);
+    const isRequired = required.includes(field);
+    inputInstructions.push({
+      field,
+      required: isRequired,
+      description: fieldDescriptionFromSchema(input.inputSchema, field),
+      sources: isRequired ? sources : [],
+    });
+    if (!isRequired) continue;
+    requiredFields.push({
+      field,
+      type: fieldTypeFromSchema(input.inputSchema, field),
+      description: fieldDescriptionFromSchema(input.inputSchema, field),
+      source: summarizeSource(sources),
+    });
+    if (sources.length === 0) unresolvableFields.push(field);
+  }
+
+  const feasible = unresolvableFields.length === 0;
+  const feasibilityReason = feasible
+    ? undefined
+    : `${input.actionSlug} requires ${unresolvableFields.join(", ")} but ${
+      context.triggerSlug
+        ? `trigger ${context.triggerSlug} does not emit ${unresolvableFields.join(", ")}`
+        : "no trigger is configured yet"
+    }`;
+
+  return {
+    feasible,
+    requiredFields,
+    unresolvableFields,
+    feasibilityReason,
+    inputInstructions,
+  };
+}
+
+function sourceForRequiredField(
+  field: string,
+  existing?: ComposioActionInstruction,
+  context?: FeasibilityContext,
+): ComposioActionInputSource[] {
+  const fromExisting = existing?.inputInstructions.find((row) => row.field === field)?.sources;
+  if (fromExisting?.length) return fromExisting;
+  return resolveFieldSources(field, {}, context ?? {});
 }
 
 function schemaWithHiddenOperationalFields(inputSchema: Record<string, unknown>): Record<string, unknown> {
@@ -103,12 +305,6 @@ function schemaWithHiddenOperationalFields(inputSchema: Record<string, unknown>)
     properties: nextProperties,
     required: required.filter((field) => !isOperationalField(field)),
   };
-}
-
-function outputFieldNames(outputSchema?: Record<string, unknown>): string[] {
-  const row = asRecord(outputSchema) ?? {};
-  const properties = asRecord(row.properties) ?? row;
-  return Object.keys(properties).filter((field) => field !== "type" && field !== "required").slice(0, 12);
 }
 
 function buildBehaviorInstructions(input: {
@@ -145,6 +341,7 @@ function buildInstructionFromModifiedSchema(input: {
   originalInputSchema: Record<string, unknown>;
   originalOutputSchema?: Record<string, unknown>;
   existing?: ComposioActionInstruction;
+  context?: FeasibilityContext;
 }): ComposioActionInstruction {
   const base = buildComposioActionInstruction({
     toolkit: input.toolkit,
@@ -159,7 +356,7 @@ function buildInstructionFromModifiedSchema(input: {
     inputInstructions: base.inputInstructions.map((row) => ({
       ...row,
       sources: required.includes(row.field)
-        ? sourceForRequiredField(row.field, input.existing)
+        ? sourceForRequiredField(row.field, input.existing, input.context)
         : [],
     })),
     outputInstructions: input.existing?.outputInstructions?.length
@@ -178,14 +375,21 @@ export function buildComposioToolContract(input: {
   outputSchema?: Record<string, unknown>;
   existingInstruction?: ComposioActionInstruction;
   bindingRole?: "trigger" | "source" | "transform" | "destination";
+  feasibilityContext?: FeasibilityContext;
 }): {
   contract: ComposioToolContract;
   composioAction: ComposioActionInstruction;
+  feasibility: ActionFeasibilityResult;
 } {
   const summary = summarizeInputSchema(input.inputSchema);
   const fields = [...new Set([...summary.required, ...summary.properties])];
   const hiddenFields = fields.filter(isOperationalField);
   const modifiedInputSchema = schemaWithHiddenOperationalFields(input.inputSchema);
+  const feasibility = evaluateActionFeasibility({
+    actionSlug: input.actionSlug,
+    inputSchema: input.inputSchema,
+    context: input.feasibilityContext,
+  });
   const composioAction = buildInstructionFromModifiedSchema({
     toolkit: input.toolkit,
     actionSlug: input.actionSlug,
@@ -193,6 +397,7 @@ export function buildComposioToolContract(input: {
     originalInputSchema: input.inputSchema,
     originalOutputSchema: input.outputSchema,
     existing: input.existingInstruction,
+    context: input.feasibilityContext,
   });
   const outputSufficiencyPaths = composioAction.outputInstructions
     .map((instruction) => instruction.path ?? instruction.name);
@@ -211,5 +416,42 @@ export function buildComposioToolContract(input: {
       outputSufficiencyPaths,
     },
     composioAction,
+    feasibility,
+  };
+}
+
+export function enrichBindingActionCandidate(input: {
+  actionSlug: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  context?: FeasibilityContext;
+}): {
+  actionSlug: string;
+  name: string;
+  description: string;
+  requiredFields: RequiredFieldSummary[];
+  feasible: boolean;
+  unresolvableFields: string[];
+  feasibilityReason?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+} {
+  const feasibility = evaluateActionFeasibility({
+    actionSlug: input.actionSlug,
+    inputSchema: input.inputSchema,
+    context: input.context,
+  });
+  return {
+    actionSlug: input.actionSlug,
+    name: input.name,
+    description: input.description,
+    requiredFields: feasibility.requiredFields,
+    feasible: feasibility.feasible,
+    unresolvableFields: feasibility.unresolvableFields,
+    feasibilityReason: feasibility.feasibilityReason,
+    inputSchema: input.inputSchema,
+    ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
   };
 }

@@ -253,26 +253,33 @@ test("conductor composer validates message length and surfaces sonner toasts", a
 
 test("connector picker searches all apps and verifies before submitting", async () => {
   const fs = await import("node:fs/promises");
-  const [menu, picker, connectCard] = await Promise.all([
+  const [menu, picker, hook, connectCard] = await Promise.all([
     fs.readFile(new URL("../../../dashboard/src/components/ai-elements/interactive-prompt-menu.tsx", import.meta.url), "utf8"),
     fs.readFile(new URL("../../../dashboard/src/components/conductor/builder-connector-prompt.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/use-connector-authorization.ts", import.meta.url), "utf8"),
     fs.readFile(new URL("../../../dashboard/src/components/conductor/builder-connect-toolkit-card.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(menu, /placeholder="Search apps…"/);
   assert.match(menu, /max-h-\[21rem\].*overflow-y-auto/);
   assert.match(menu, /More apps/);
-  assert.match(picker, /\/api\/connectors\/status\//);
-  assert.match(picker, /\/api\/connectors\/authorize\//);
-  assert.match(picker, /verifyPendingConnection/);
-  assert.match(picker, /Connect \$\{pendingToolkitLabel\} to continue/);
-  assert.match(picker, /isn't available to connect yet/);
-  assert.match(picker, /window\.location\.assign\(authorization\.redirectUrl\)/);
-  assert.doesNotMatch(picker, /window\.open/);
-  assert.doesNotMatch(picker, /setInterval/);
-  assert.match(picker, /Connection was not completed/);
+  assert.match(picker, /useConnectorAuthorization/);
+  assert.match(picker, /ensureConnected/);
+  assert.match(picker, /Connecting \$\{pendingToolkitLabel\}/);
+  assert.match(picker, /Restart connection/);
+  assert.doesNotMatch(picker, /toast\.error/);
+  assert.doesNotMatch(picker, /Try again/);
+  assert.match(hook, /\/api\/connectors\/status\//);
+  assert.match(hook, /\/api\/connectors\/authorize\//);
+  assert.match(hook, /pollVerify/);
+  assert.match(hook, /window\.location\.assign\(redirectUrl\)/);
+  assert.match(hook, /isn't available to connect yet/);
+  assert.doesNotMatch(hook, /window\.open/);
+  assert.doesNotMatch(hook, /setInterval/);
   assert.doesNotMatch(picker, /text-red-600/);
-  assert.match(connectCard, /window\.location\.assign\(redirectUrl\)/);
+  assert.match(connectCard, /useConnectorAuthorization/);
+  assert.match(connectCard, /autoStart/);
+  assert.doesNotMatch(connectCard, /toast\.error/);
   assert.doesNotMatch(connectCard, /window\.open/);
 });
 
