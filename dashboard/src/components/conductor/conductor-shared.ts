@@ -628,29 +628,10 @@ export function shouldAutoSendConductorChat({
 }): boolean {
   if (hasUnansweredUiToolCalls(messages, phaseProgress)) return false;
   if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) return false;
-  if (lastAssistantEndedWithAnsweredUiTool(messages)) return true;
-  const last = messages.at(-1);
-  if (!last || last.role !== "assistant") return false;
-  if (isPhaseHandoffPending({ messages, buildPhase, phaseProgress })
-    && lastAssistantIsTextOnly(messages)) {
-    return true;
-  }
-  const executions = (last.parts ?? []).flatMap((part) => {
-    if (!isToolPart(part.type)) return [];
-    const toolPart = part as DynamicToolUIPart & { output?: unknown };
-    if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") return [];
-    const parsed = readExecutionFromOutput(toolPart.output as Record<string, unknown>);
-    return parsed ? [parsed] : [];
-  });
-  if (executions.length === 0) return false;
-  return executions.every((execution) => {
-    if (execution.turnOutcome === "waiting_for_user") return false;
-    if (execution.turnOutcome === "build_complete") return false;
-    if (execution.turnOutcome === "blocked") return false;
-    if (execution.turnOutcome === "budget_exhausted") return false;
-    if (execution.turnOutcome === "phase_complete" && execution.continuation === "next_phase") return true;
-    return false;
-  });
+  void buildPhase;
+  void missingSlots;
+  void loopStatus;
+  return lastAssistantEndedWithAnsweredUiTool(messages);
 }
 
 function hasPriorTerminalExecutionForOperation(

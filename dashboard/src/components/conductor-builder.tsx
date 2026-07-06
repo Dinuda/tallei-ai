@@ -61,6 +61,8 @@ type ConductorChatBridgeProps = {
     continuation?: string;
     nextPhase?: string;
     handoffId?: string;
+    pendingToolCallId?: string;
+    resumeAfterAnswer?: boolean;
   } | null;
   missingSlots: string[];
   loopStatus: string;
@@ -79,6 +81,8 @@ type ConductorChatBridgeProps = {
       continuation?: string;
       nextPhase?: string;
       handoffId?: string;
+      pendingToolCallId?: string;
+      resumeAfterAnswer?: boolean;
     } | null;
   }) => void;
   children: React.ReactNode;
@@ -106,6 +110,8 @@ function ConductorChatBridge({
     continuation?: string;
     nextPhase?: string;
     handoffId?: string;
+    pendingToolCallId?: string;
+    resumeAfterAnswer?: boolean;
   } | null>(null);
   const missingSlotsRef = useRef(missingSlots);
   const loopStatusRef = useRef(loopStatus);
@@ -693,6 +699,8 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
     continuation?: string;
     nextPhase?: string;
     handoffId?: string;
+    pendingToolCallId?: string;
+    resumeAfterAnswer?: boolean;
   } | null>(null);
   const [eventTrigger, setEventTrigger] = useState<LoopEventTriggerStatus | null>(null);
   const [input, setInput] = useState("");
@@ -717,6 +725,8 @@ function ConductorBuilderSession({ initialLoopId }: { initialLoopId?: string }) 
       continuation?: string;
       nextPhase?: string;
       handoffId?: string;
+      pendingToolCallId?: string;
+      resumeAfterAnswer?: boolean;
     } | null;
   }) => {
     if (meta.loopName !== undefined) setLoopName(meta.loopName);

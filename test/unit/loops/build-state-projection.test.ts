@@ -167,3 +167,30 @@ test("projectLoopBuild projects phase turn and consumed handoffs", () => {
   assert.equal(projectLatestPhaseTurn(events)?.stepsUsed, 6);
   assert.equal(projection.state?.buildPhase, "blueprint");
 });
+
+test("projectLatestPhaseTurn preserves pending user-input metadata", () => {
+  const event: LoopBuildEvent = {
+    id: "event-waiting",
+    loopId: "loop-1",
+    threadKind: "build",
+    runId: null,
+    sequence: 1,
+    eventKey: "phase-turn:intent:root:waiting",
+    type: "phase_turn.completed",
+    payload: {
+      phase: "intent",
+      parentArtifactHash: "root",
+      stepsUsed: 1,
+      stepLimit: 6,
+      outcome: "waiting_for_user",
+      continuation: "wait_for_user",
+      pendingToolCallId: "question-1",
+      resumeAfterAnswer: true,
+    },
+    toolCallId: null,
+    createdAt: new Date().toISOString(),
+  };
+
+  assert.equal(projectLatestPhaseTurn([event])?.pendingToolCallId, "question-1");
+  assert.equal(projectLatestPhaseTurn([event])?.resumeAfterAnswer, true);
+});
