@@ -214,10 +214,10 @@ All SVG code is included in the bundled HTML file.
 
 ```
 /Users/dinudayaggahavita/Documents/work/tallei-ai/
-├── INTEGRATIONS_INDEX.md (this file)
-├── INTEGRATIONS_DESIGN.md
-├── INTEGRATIONS_COMPONENT_STRUCTURE.md
-├── INTEGRATIONS_QUICK_REFERENCE.md
+├── docs/INTEGRATIONS_INDEX.md (this file)
+├── docs/INTEGRATIONS_DESIGN.md
+├── docs/INTEGRATIONS_COMPONENT_STRUCTURE.md
+├── docs/INTEGRATIONS_QUICK_REFERENCE.md
 ├── dashboard/
 │   └── app/
 │       └── (future: integrations route)

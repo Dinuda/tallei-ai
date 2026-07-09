@@ -267,7 +267,7 @@ async function runLogout() {
 async function runConnect(mcpUrl) {
   let session = readSession();
   if (!session) {
-    throw new Error("Missing OAuth session. Run `node mcp-bridge.js login` first.");
+    throw new Error("Missing OAuth session. Run `node scripts/mcp-bridge.js login` first.");
   }
 
   if (mcpUrl && session.mcpUrl !== mcpUrl) {
@@ -330,10 +330,10 @@ function printHelp() {
   console.log("Tallei MCP OAuth bridge");
   console.log("");
   console.log("Usage:");
-  console.log("  node mcp-bridge.js login      # Browser OAuth login (device + PKCE)");
-  console.log("  node mcp-bridge.js status     # Session status");
-  console.log("  node mcp-bridge.js logout     # Revoke local session");
-  console.log("  node mcp-bridge.js connect    # Start stdio<->HTTP MCP bridge");
+  console.log("  node scripts/mcp-bridge.js login      # Browser OAuth login (device + PKCE)");
+  console.log("  node scripts/mcp-bridge.js status     # Session status");
+  console.log("  node scripts/mcp-bridge.js logout     # Revoke local session");
+  console.log("  node scripts/mcp-bridge.js connect    # Start stdio<->HTTP MCP bridge");
   console.log("");
   console.log("Environment:");
   console.log("  MCP_URL=https://your-domain/mcp");

@@ -1,8 +1,8 @@
 # Tallei Integrations Section — Quick Reference
 
 ## File Locations
-- **Design Analysis**: `/INTEGRATIONS_DESIGN.md` (detailed breakdown)
-- **Component Structure**: `/INTEGRATIONS_COMPONENT_STRUCTURE.md` (React recommendations)
+- **Design Analysis**: `docs/INTEGRATIONS_DESIGN.md` (detailed breakdown)
+- **Component Structure**: `docs/INTEGRATIONS_COMPONENT_STRUCTURE.md` (React recommendations)
 - **Original HTML**: `/Downloads/Tallei Integrations.html` (bundled design file)
 
 ---
