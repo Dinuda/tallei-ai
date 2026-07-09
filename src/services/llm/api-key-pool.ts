@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 
 import { config } from "../../config/index.js";
 
-export type LlmKeyPoolName = "opencode" | "openai";
+export type LlmKeyPoolName = "opencode" | "openai" | "nvidia";
 
 const rateLimitedUntilMs = new Map<string, number>();
 
@@ -76,12 +76,20 @@ export class LlmApiKeyPool {
 
 let openCodePool: LlmApiKeyPool | null = null;
 let openAiPool: LlmApiKeyPool | null = null;
+let nvidiaPool: LlmApiKeyPool | null = null;
 
 export function getOpenCodeApiKeyPool(): LlmApiKeyPool {
   if (!openCodePool) {
     openCodePool = new LlmApiKeyPool(config.opencodeApiKeys);
   }
   return openCodePool;
+}
+
+export function getNvidiaApiKeyPool(): LlmApiKeyPool {
+  if (!nvidiaPool) {
+    nvidiaPool = new LlmApiKeyPool(config.nvidiaApiKeys);
+  }
+  return nvidiaPool;
 }
 
 export function getOpenAiApiKeyPool(): LlmApiKeyPool {
@@ -95,6 +103,7 @@ export function getOpenAiApiKeyPool(): LlmApiKeyPool {
 export function resetLlmApiKeyPoolsForTests(): void {
   openCodePool = null;
   openAiPool = null;
+  nvidiaPool = null;
   rateLimitedUntilMs.clear();
 }
 

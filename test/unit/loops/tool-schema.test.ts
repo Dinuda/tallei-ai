@@ -9,7 +9,7 @@ import {
   summarizeInputSchema,
   toolIdForAction,
   validateToolArgsAgainstSchema,
-} from "../../../src/loops/tool-schema.js";
+} from "@tallei/composio-tools/tool-schema.js";
 
 test("toolIdForAction derives stable ids from Composio slugs", () => {
   assert.equal(toolIdForAction("GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID"), "tool_gmail_fetch_message_by_message_id");

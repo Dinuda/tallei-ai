@@ -17,6 +17,7 @@ import {
   prepareConductorChatMessagesForEventLog,
   prepareConductorModelMessagesForStream,
 } from "../../../loops/conductor-chat.js";
+import { ensurePendingPickConnectorApp } from "../../../loops/conductor-pick-recovery.js";
 import {
   countUncompletedUiToolRequests,
   derivePendingUiToolFromEvents,
@@ -69,8 +70,8 @@ import {
   type BindingResolverAction,
   type BindingResolverTrigger,
 } from "../../../loops/binding-resolver.js";
-import { enrichBindingActionCandidate } from "../../../loops/composio-schema-contract.js";
-import { getTriggerFieldNamesForFeasibility } from "../../../integrations/composio/trigger-known-fields.js";
+import { enrichBindingActionCandidate } from "@tallei/composio-tools/schema-contract.js";
+import { getTriggerFieldNamesForFeasibility } from "@tallei/composio-tools/trigger-known-fields.js";
 import { discoverConnectorsForBlueprint } from "../../../loops/connector-discovery.js";
 import { executeLoopTestRun } from "../../../loops/test-run.js";
 import {
@@ -91,7 +92,7 @@ import {
   resolveLoopAuthWorkspace,
   triggerManualRun,
 } from "../../../loops/service.js";
-import { getLoopRun, getPendingApprovalForRun, listLoopRunSteps, saveBuildChatMessages, getLoopBuildMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus, commitLoopBuildArtifact, appendBuildEvents, getBuildEvents, projectLoopBuildFromEvents } from "../../../loops/store.js";
+import { getLoopRun, getPendingApprovalForRun, listLoopRunSteps, saveBuildChatMessages, getLoopBuildMeta, getRunChatMessages, getLatestPassingTestRunForPlan, getLoopEventTriggerStatus, commitLoopBuildArtifact, appendBuildEvents, getBuildEvents, projectLoopBuildFromEvents, buildLoopBuildMetaFromProjection } from "../../../loops/store.js";
 import type { LoopBuildProjection } from "../../../loops/build-state-projection.js";
 import {
   BUILD_ERROR_CODES,
@@ -116,19 +117,31 @@ import {
   type BindingDiagnostic,
 } from "../../../loops/build-event-interpreter.js";
 import { deriveBuildPhaseProgress } from "../../../loops/build-phase-progress.js";
-import { isActivationConfirmationReply } from "../../../../shared/conductor-activation-confirm.js";
+import { isActivationConfirmationReply } from "@tallei/shared/conductor-activation-confirm.js";
 import { composioWebhookDeliveryUrl, isLocalWebhookUrl } from "../../../integrations/composio/webhook-subscription.js";
 import { deriveLoopNameFromPrompt } from "../../../loops/loop-name.js";
 import { resolveActivationGap } from "../../../loops/activation-status.js";
 import { resolveConductorTurnResolution } from "../../../loops/conductor-turn-resolution.js";
 import {
+  formatConductorStreamError,
+} from "../../../loops/conductor-stream-diagnostics.js";
+import { finalizeConductorTurnBookkeeping } from "../../../loops/conductor-turn-finalize.js";
+import {
+  buildMandatoryNextToolInstruction,
   CONDUCTOR_TOOL_DESCRIPTIONS,
-} from "../../../loops/conductor-chat-prompts.js";
-import { conductorStepLimitForPhase } from "../../../loops/conductor-turn-budget.js";
+} from "@tallei/conductor-tools/descriptions.js";
+import { conductorStepLimitForPhase } from "@tallei/shared/conductor-turn-budget.js";
+import {
+  buildConductorSessionUsage,
+  emptyConductorChatUsage,
+  finalizeConductorChatUsage,
+  sumConductorChatUsage,
+  sumConductorUsageFromMessages,
+  usageFromLanguageModelStep,
+} from "../../../loops/conductor-usage.js";
 import { buildConductorSystemPrompt } from "../../../loops/planning-agent.js";
 import { config } from "../../../config/index.js";
-import { getStreamingLanguageModel } from "../../../providers/ai/streaming/language-model.js";
-import { resolveConductorToolChoice } from "../../../services/llm/chat-model-routing.js";
+import { modelGateway } from "../../../model/index.js";
 import { getToolkitConnectionStatus, listWorkspaceConnectors, startToolkitAuthorization } from "../../../integrations/composio/accounts.js";
 import { listComposioTriggerTypes, scoreTriggerSlugMatch } from "../../../integrations/composio/triggers.js";
 import { resolveToolkitSlug } from "../../../integrations/composio/auth.js";
@@ -205,25 +218,58 @@ router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: 
 
 router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {
+    const requestStarted = performance.now();
+    const timings: Record<string, number> = {};
+    const mark = (label: string, startedAt: number) => {
+      timings[label] = performance.now() - startedAt;
+    };
+
     const { loopId } = loopIdSchema.parse(req.params);
+    const loopStarted = performance.now();
     const loop = await getLoop(req.authContext!, loopId);
+    mark("getLoop", loopStarted);
     if (!loop) {
       res.status(404).json({ error: "Loop not found" });
       return;
     }
-    const [loopBuild, buildChat] = await Promise.all([
-      import("../../../loops/store.js").then((m) => m.getLoopBuildProjection(req.authContext!, loopId, {
-        connectedToolkits: [],
-        loopStatus: loop.status,
-      })),
-      getLoopBuildMeta(req.authContext!, loopId),
-    ]);
+    const projectionStarted = performance.now();
+    let loopBuild = await import("../../../loops/store.js").then((m) => m.getLoopBuildProjection(req.authContext!, loopId, {
+      connectedToolkits: [],
+      loopStatus: loop.status,
+    }));
+    // Heal stuck connectors sessions on load: if the phase needs pickConnectorApp
+    // but the transcript has no open picker, inject one so refresh recovers without
+    // waiting for the model to call the tool.
+    if (loopBuild.state?.buildPhase === "connectors"
+      && loopBuild.phaseProgress?.nextTool === "pickConnectorApp"
+      && !loopBuild.pendingUiTool) {
+      const healed = ensurePendingPickConnectorApp({
+        messages: loopBuild.chatMessages,
+        state: loopBuild.state,
+        pendingUiTool: loopBuild.pendingUiTool,
+        nextTool: loopBuild.phaseProgress.nextTool,
+        phase: "connectors",
+      });
+      if (healed.injected) {
+        await saveBuildChatMessages(req.authContext!, loopId, healed.messages);
+        loopBuild = await import("../../../loops/store.js").then((m) => m.getLoopBuildProjection(req.authContext!, loopId, {
+          connectedToolkits: [],
+          loopStatus: loop.status,
+        }));
+      }
+    }
+    mark("projection", projectionStarted);
+    const buildChat = buildLoopBuildMetaFromProjection(loopBuild);
     const buildState = loopBuild.state;
     const spec = loopBuild.spec;
     const chatMessages = loopBuild.chatMessages;
+    const missingSlotsStarted = performance.now();
     const { getMissingSlots } = await import("../../../loops/patch.js");
     const missingSlots = spec ? getMissingSlots(spec) : [];
+    mark("missingSlots", missingSlotsStarted);
+    const eventTriggerStarted = performance.now();
     const eventTrigger = await getLoopEventTriggerStatus(loopId);
+    mark("eventTrigger", eventTriggerStarted);
     const webhookUrl = composioWebhookDeliveryUrl();
     const triggerKind = spec?.trigger && typeof spec.trigger === "object" && !Array.isArray(spec.trigger)
       ? String((spec.trigger as Record<string, unknown>).kind ?? "")
@@ -234,6 +280,10 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
       hasCompiledPlan: Boolean(buildChat?.compiledPlanId || loop.activePlanId),
       eventTrigger,
     });
+    timings.total = performance.now() - requestStarted;
+    if (process.env.NODE_ENV !== "production") {
+      console.debug(`[loops/get:${loopId}] timings`, timings);
+    }
     res.json({
       loop,
       spec,
@@ -243,6 +293,8 @@ router.get("/:loopId", requireScopes(["memory:read"]), async (req: AuthRequest, 
         stage: userFacingStageForPhase(buildState.buildPhase),
         phaseProgress: loopBuild.phaseProgress,
         latestPhaseTurn: loopBuild.latestPhaseTurn,
+        consumedHandoffIds: loopBuild.consumedHandoffIds,
+        continuationIntent: loopBuild.continuationIntent,
       } : null,
       chatMessages,
       buildChat,
@@ -697,6 +749,9 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
     let lastToolExecution: ConductorExecutionMetadata | null = null;
     let requestContractSuperseded = false;
     let turnStepCount = 0;
+    let turnStreamError: string | null = null;
+    let turnStreamStartedAt = 0;
+    const turnStepTimingsMs: number[] = [];
     const inTurnOperationKeys = new Set<string>();
     const persistToolExecution = async (toolName: string, input: unknown, output: unknown) => {
       const metadata = readConductorExecutionMetadata(output);
@@ -879,7 +934,12 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       if (requestContractSuperseded) return [];
       return resolveLiveAuthorizedTools();
     };
+    const usageEmitRef: { emit?: () => void } = {};
+    const streamErrorEmitRef: { emit?: (message: string) => void } = {};
     const startConductorStream = async (replaySourceMessages: UIMessage[]) => {
+      turnStreamError = null;
+      turnStreamStartedAt = performance.now();
+      turnStepTimingsMs.length = 0;
       const pendingUiTool = derivePendingUiToolFromEvents(buildEvents);
       const preserveOpenUiToolCallIds = pendingUiTool
         ? new Set([pendingUiTool.toolCallId])
@@ -893,12 +953,54 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
           prunedMessageIds: prepared.stats.prunedMessageIds,
         });
       }
+      const sessionUsageBase = sumConductorUsageFromMessages(replaySourceMessages);
+      const turnUsageState = { current: emptyConductorChatUsage() };
+      const resolvedConductorModel = modelGateway.resolveStreaming("conductor", { userId: auth.userId });
       return {
         ...prepared,
+        sessionUsageBase,
+        turnUsageState,
+        modelId: resolvedConductorModel.modelId,
+        surface: resolvedConductorModel.surface,
         result: streamText({
-          model: getStreamingLanguageModel("conductor", { userId: auth.userId }),
+          model: resolvedConductorModel.model,
+          ...(resolvedConductorModel.providerOptions
+            ? { providerOptions: resolvedConductorModel.providerOptions }
+            : {}),
           stopWhen: [shouldStopConductorTurn, stepCountIs(requestStepLimit)],
           system: buildCurrentSystemPrompt(),
+          onError: ({ error }) => {
+            turnStreamError = formatConductorStreamError(error);
+            console.error(`[loops/chat:${loopId}] CONDUCTOR STREAM ERROR`, {
+              loopId,
+              phase: requestStartPhase,
+              requiredNextTool: requestPhaseContract.nextTool,
+              modelId: resolvedConductorModel.modelId,
+              message: turnStreamError,
+              error,
+            });
+            streamErrorEmitRef.emit?.(turnStreamError);
+          },
+          onStepFinish: ({ usage, toolCalls, finishReason, text }) => {
+            if (turnStreamStartedAt > 0) {
+              turnStepTimingsMs.push(Math.round(performance.now() - turnStreamStartedAt));
+            }
+            if (toolCalls.length === 0) {
+              console.warn(`[loops/chat:${loopId}] step finished with no tool calls`, {
+                loopId,
+                phase: requestStartPhase,
+                requiredNextTool: requestPhaseContract.nextTool,
+                modelId: resolvedConductorModel.modelId,
+                finishReason,
+                textLength: text?.length ?? 0,
+              });
+            }
+            turnUsageState.current = sumConductorChatUsage(
+              turnUsageState.current,
+              usageFromLanguageModelStep(usage, resolvedConductorModel.modelId),
+            );
+            usageEmitRef.emit?.();
+          },
           prepareStep: async () => {
             const projection = await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
             const persistedState = projection.state;
@@ -912,10 +1014,22 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
               requestContractSuperseded = true;
             }
             const activeTools = activeToolsForPhase();
+            const liveProgress = deriveBuildPhaseProgress(currentBuildState!, buildEvents, {
+              effectivePhase: requestPhaseContract.phase,
+              connectedToolkits: initialConnectors.map((t) => ({
+                slug: t.slug,
+                connected: Boolean(t.connected),
+              })),
+              loopStatus: currentLoopStatus,
+            });
+            const mandatoryToolInstruction = buildMandatoryNextToolInstruction(liveProgress.nextTool);
+            const systemPrompt = mandatoryToolInstruction
+              ? `${buildCurrentSystemPrompt()}\n\n${mandatoryToolInstruction}`
+              : buildCurrentSystemPrompt();
             return {
-              system: buildCurrentSystemPrompt(),
+              system: systemPrompt,
               activeTools: activeTools as never[],
-              toolChoice: resolveConductorToolChoice(activeTools.length, config.conductorModel),
+              toolChoice: modelGateway.resolveToolChoice(activeTools.length),
             };
           },
           messages: prepared.modelMessages,
@@ -1314,7 +1428,7 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
                 message: failure.message,
                 expected: "One schema-valid binding artifact using the current provider catalogue",
                 action: failure.code === "BINDING_RESOLVER_PROVIDER_ERROR"
-                  ? "Retry binding resolution or configure TALLEI_BINDING_RESOLVER__MODEL to a model that supports structured JSON output."
+                  ? "Retry binding resolution or configure TALLEI_CONDUCTOR__MODEL to a model that supports structured JSON output."
                   : failure.code === "INVALID_BINDING_SCOPE_ANSWER"
                     ? "Call resolveBindings again and answer the returned pendingQuestions exactly."
                     : failure.code === "INVALID_BINDING_SELECTION"
@@ -1748,80 +1862,90 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       prepared: Awaited<ReturnType<typeof startConductorStream>>,
       originalMessages: UIMessage[],
     ) => {
-      prepared.result.pipeUIMessageStreamToResponse(res, {
-        sendReasoning: true,
+      const currentSessionUsage = () => buildConductorSessionUsage(
+        prepared.sessionUsageBase,
+        prepared.turnUsageState.current,
+      );
+      const emitLiveUsage = (writer: { write: (chunk: { type: "data-usage"; data: ReturnType<typeof buildConductorSessionUsage>; transient: true }) => void }) => {
+        writer.write({
+          type: "data-usage",
+          data: currentSessionUsage(),
+          transient: true,
+        });
+      };
+      const stream = createUIMessageStream({
         originalMessages,
-        onFinish: async ({ messages, isAborted }) => {
-          try {
-            if (isAborted) {
-              await appendBuildEvents(auth, loopId, interruptionEventsFromUiMessages(messages));
-            }
-            // Persist streamed UI-tool calls before resolving the turn. Otherwise a
-            // preceding server tool can incorrectly mask a pending user question.
-            await saveBuildChatMessages(auth, loopId, messages);
-            const refreshed = await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
-            const terminalExecution = !refreshed.pendingUiTool
-              && lastToolExecution
-              && lastToolExecution.phaseBefore === requestStartPhase
-              && lastToolExecution.parentArtifactHash === requestStartParentArtifactHash
-              && isTerminalConductorExecution(lastToolExecution)
-              ? lastToolExecution
-              : null;
-            let phaseTurnPayload = terminalExecution ? {
-              phase: requestStartPhase,
-              parentArtifactHash: requestStartParentArtifactHash,
-              stepsUsed: terminalExecution.stepsUsed,
-              stepLimit: requestStepLimit,
-              outcome: terminalExecution.turnOutcome,
-              continuation: terminalExecution.continuation,
-              ...(terminalExecution.nextPhase ? { nextPhase: terminalExecution.nextPhase } : {}),
-              ...(terminalExecution.handoffId ? { handoffId: terminalExecution.handoffId } : {}),
-              ...(terminalExecution.compiledPlanId ? { compiledPlanId: terminalExecution.compiledPlanId } : {}),
-              ...(terminalExecution.recoveryPhase ? { recoveryPhase: terminalExecution.recoveryPhase } : {}),
-              ...(terminalExecution.recoveryReason ? { recoveryReason: terminalExecution.recoveryReason } : {}),
-              ...(terminalExecution.noProgressFingerprint ? { noProgressFingerprint: terminalExecution.noProgressFingerprint } : {}),
-            } : null;
-            if (!phaseTurnPayload) {
-              const phaseProgress = refreshed.phaseProgress;
-              if (phaseProgress) {
-                const resolution = resolveConductorTurnResolution({
-                  contract: requestPhaseContract,
-                  currentState: currentBuildState!,
-                  phaseProgress,
-                  latestPhaseTurn: refreshed.latestPhaseTurn,
-                  pendingUiTool: refreshed.pendingUiTool,
-                  loopStatus: currentLoopStatus,
-                  stepsUsed: turnStepCount,
-                  stepLimit: requestStepLimit,
-                });
-                if (resolution) {
-                  phaseTurnPayload = {
-                    phase: requestStartPhase,
-                    parentArtifactHash: requestStartParentArtifactHash,
-                    stepsUsed: turnStepCount,
-                    stepLimit: requestStepLimit,
-                    outcome: resolution.outcome,
-                    continuation: resolution.continuation,
-                    ...(resolution.nextPhase ? { nextPhase: resolution.nextPhase } : {}),
-                    ...(resolution.handoffId ? { handoffId: resolution.handoffId } : {}),
-                    ...(resolution.recoveryPhase ? { recoveryPhase: resolution.recoveryPhase } : {}),
-                    ...(resolution.recoveryReason ? { recoveryReason: resolution.recoveryReason } : {}),
-                    ...(resolution.noProgressFingerprint ? { noProgressFingerprint: resolution.noProgressFingerprint } : {}),
-                    ...(resolution.pendingToolCallId ? { pendingToolCallId: resolution.pendingToolCallId } : {}),
-                    ...(resolution.resumeAfterAnswer !== undefined ? { resumeAfterAnswer: resolution.resumeAfterAnswer } : {}),
-                    resolutionReason: resolution.reason,
-                  };
+        execute: ({ writer }) => {
+          usageEmitRef.emit = () => emitLiveUsage(writer);
+          streamErrorEmitRef.emit = (message) => {
+            writer.write({
+              type: "data-conductor-error",
+              data: { message },
+              transient: true,
+            });
+          };
+          usageEmitRef.emit();
+          writer.merge(prepared.result.toUIMessageStream({
+            originalMessages,
+            sendReasoning: modelGateway.shouldSendReasoning(prepared.surface),
+            messageMetadata: () => {
+              const turnUsage = finalizeConductorChatUsage(prepared.turnUsageState.current);
+              return {
+                usage: turnUsage,
+                sessionUsage: currentSessionUsage(),
+              };
+            },
+            onFinish: async ({ messages, isAborted }) => {
+              const streamElapsedMs = turnStreamStartedAt > 0
+                ? Math.round(performance.now() - turnStreamStartedAt)
+                : 0;
+              usageEmitRef.emit?.();
+              try {
+                if (isAborted) {
+                  await appendBuildEvents(auth, loopId, interruptionEventsFromUiMessages(messages));
                 }
+                const saveStarted = performance.now();
+                await saveBuildChatMessages(auth, loopId, messages);
+                const saveMs = Math.round(performance.now() - saveStarted);
+                // Await bookkeeping so pickConnectorApp recovery is persisted before the
+                // client marks the stream ready and refreshes loop meta / messages.
+                const bookkeepingTimings = await finalizeConductorTurnBookkeeping({
+                  auth,
+                  loopId,
+                  messages,
+                  isAborted,
+                  streamElapsedMs,
+                  stepTimingsMs: [...turnStepTimingsMs],
+                  requestPhaseContract,
+                  requestStartPhase,
+                  requestStartParentArtifactHash,
+                  requestStepLimit,
+                  turnStepCount,
+                  turnStreamError,
+                  lastToolExecution,
+                  modelId: prepared.modelId,
+                  currentBuildState: currentBuildState!,
+                  currentLoopStatus,
+                  refreshBuildProjection,
+                  appendBuildEvents,
+                  saveBuildChatMessages,
+                });
+                if (process.env.NODE_ENV !== "production") {
+                  console.debug(`[loops/chat:${loopId}] onFinish timings`, {
+                    saveMs,
+                    streamElapsedMs,
+                    stepTimingsMs: [...turnStepTimingsMs],
+                    bookkeepingTimings,
+                  });
+                }
+              } catch (error) {
+                console.error(`[loops/chat] failed to persist conductor transcript${isAborted ? " after abort" : ""}:`, error);
               }
-            }
-            if (phaseTurnPayload) {
-              await appendBuildEvents(auth, loopId, [makeConductorPhaseTurnEvent(phaseTurnPayload)]);
-            }
-          } catch (error) {
-            console.error(`[loops/chat] failed to persist conductor transcript${isAborted ? " after abort" : ""}:`, error);
-          }
+            },
+          }));
         },
       });
+      pipeUIMessageStreamToResponse({ response: res, stream });
     };
 
     const pipeConductorRecoveryMessage = async (originalMessages: UIMessage[]) => {
@@ -1880,9 +2004,64 @@ router.post("/:loopId/chat", requireScopes(["memory:write"]), async (req: AuthRe
       });
     };
 
+    const pipeServerOwnedPickConnectorApp = async (originalMessages: UIMessage[]) => {
+      const ensured = ensurePendingPickConnectorApp({
+        messages: originalMessages,
+        state: currentBuildState!,
+        pendingUiTool: derivePendingUiToolFromEvents(buildEvents),
+        nextTool: requestPhaseContract.nextTool,
+        phase: requestStartPhase,
+      });
+      if (!ensured.injected || !ensured.toolCallId || !ensured.outcomeId) return false;
+
+      const role = (() => {
+        const last = ensured.messages.at(-1);
+        for (const part of [...(last?.parts ?? [])].reverse()) {
+          if (part.type !== "tool-pickConnectorApp") continue;
+          const input = (part as { input?: { role?: string } }).input;
+          if (input?.role === "trigger" || input?.role === "source" || input?.role === "destination") {
+            return input.role;
+          }
+        }
+        return "destination" as const;
+      })();
+
+      await saveBuildChatMessages(auth, loopId, ensured.messages);
+      await refreshBuildProjection({ effectivePhase: requestPhaseContract.phase });
+      console.info(`[loops/chat:${loopId}] presenting server-owned pickConnectorApp`, {
+        loopId,
+        toolCallId: ensured.toolCallId,
+        outcomeId: ensured.outcomeId,
+        role,
+      });
+
+      const stream = createUIMessageStream({
+        originalMessages,
+        execute: ({ writer }) => {
+          writer.write({
+            type: "tool-input-available",
+            toolCallId: ensured.toolCallId!,
+            toolName: "pickConnectorApp",
+            input: {
+              outcomeId: ensured.outcomeId,
+              role,
+            },
+          });
+        },
+      });
+      pipeUIMessageStreamToResponse({ response: res, stream });
+      return true;
+    };
+
     try {
       if (shouldBreakConfirmLoop()) {
         await pipeConfirmLoopRecovery(chatMessages);
+        return;
+      }
+      // Don't ask the model to call pickConnectorApp — providers with toolChoice
+      // "auto" often reason about it and stall. Present the picker server-side.
+      if (requestPhaseContract.nextTool === "pickConnectorApp"
+        && await pipeServerOwnedPickConnectorApp(chatMessages)) {
         return;
       }
       pipeConductorStream(await startConductorStream(chatMessages), chatMessages);

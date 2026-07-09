@@ -1,8 +1,10 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
+/** npm workspaces hoist `next` to the repo root — Turbopack must root there to resolve it. */
+const workspaceRoot = join(projectRoot, "..");
 const defaultBackend =
   process.env.NODE_ENV === "production" ? "https://api.tallei.com" : "http://127.0.0.1:3000";
 const BACKEND = (
@@ -35,14 +37,19 @@ const allowedDevOrigins = Array.from(new Set([
 const nextConfig: NextConfig = {
   output: "standalone",
   allowedDevOrigins,
-  outputFileTracingRoot: projectRoot,
+  // Standalone tracing must include workspace packages under packages/.
+  outputFileTracingRoot: workspaceRoot,
   experimental: {
     externalDir: true,
   },
   turbopack: {
-    root: projectRoot,
+    root: workspaceRoot,
   },
-  transpilePackages: ["@react-email/editor"],
+  transpilePackages: [
+    "@react-email/editor",
+    "@tallei/shared",
+    "@tallei/conductor-tools",
+  ],
 
   async rewrites() {
     return {

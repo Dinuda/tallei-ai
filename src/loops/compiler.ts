@@ -28,13 +28,13 @@ import {
 } from "./store.js";
 import { validateAgenticCompileArtifacts } from "./plan-validators.js";
 import { resolveEventTriggerLocallyForCompile, validateEventTriggerForCompile } from "./event-trigger.js";
-import { capabilityForAction, summarizeInputSchema, toolIdForAction } from "./tool-schema.js";
+import { capabilityForAction, summarizeInputSchema, toolIdForAction } from "@tallei/composio-tools/tool-schema.js";
 import {
   attachComposioActionInstructionsToTools,
   validateComposioActionInstructions,
-} from "./composio-action-instructions.js";
-import { buildComposioToolContract } from "./composio-schema-contract.js";
-import { getTriggerFieldNamesForFeasibility } from "../integrations/composio/trigger-known-fields.js";
+} from "@tallei/composio-tools/action-instructions.js";
+import { buildComposioToolContract } from "@tallei/composio-tools/schema-contract.js";
+import { getTriggerFieldNamesForFeasibility } from "@tallei/composio-tools/trigger-known-fields.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
 import { getPendingConnectorOutcomes } from "./task-decomposition.js";
 import { approvalTargetsRole } from "./approval-policy.js";

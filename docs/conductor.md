@@ -39,8 +39,9 @@ Conductor orchestration reads a **single projection** from the append-only `loop
 **User-facing stages** (dashboard progress): `understand` (intent) → `design` (blueprint) → `connect_tools` (connectors + bindings) → `review_and_activate` (review through activation). Mapped by `userFacingStageForPhase()`.
 
 - `blueprint` is server-derived — the model must not call tools during this phase.
-- Phase completion emits `continuation: next_phase` + `handoffId`; the dashboard auto-sends the next request via `shouldAutoSendConductorChat`.
-- Mid-phase bridges (e.g. text after `analyzeIntent` before `askQuestion`) use `handoffPending` + `isPhaseHandoffPending` for the same auto-continue path.
+- Phase completion emits `continuation: next_phase` + `handoffId`; a dedicated **phase handoff effect** in `conductor-builder.tsx` auto-sends the next request (not `shouldAutoSendConductorChat`).
+- Mid-phase work remaining emits `continuation: continue_phase` on `phase_turn.completed`; the same handoff effect resumes the bounded phase when `latestPhaseTurn` or transcript tool metadata carries the handoff.
+- `isPhaseHandoffPending()` (`@tallei/shared/conductor-phase-handoff`) mirrors `phaseProgress.handoffPending` from transcript evidence for diagnostics; it does not drive auto-continue directly.
 - Recoverable failures set `recoverToPhase` / `recoveryPhase` and stop the HTTP turn; the next request resumes from persisted state.
 - Budget exhaustion appends `phase_turn.completed` with `budget_exhausted` and surfaces `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` with Continue chips.
 - **Build continuity:** `reconcileLoopBuildContinuity()` detects stale/missing compile artifacts during `test`/`activation` and can recover to `compile` via `phase.recovery_requested`.
@@ -76,9 +77,6 @@ flowchart TD
   P --> Q
 ```
 
-
-
-
 | Phase              | What happens                                                      | Key tables                                                                           |
 | ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | **Create**         | Loop row + spec draft from template                               | `loops`, `loop_specs`, `loop_build_events` (seed state)                              |
@@ -87,19 +85,17 @@ flowchart TD
 | **Activate**       | Provision Composio trigger + subscribe loop; mark plan active     | `loops`, `workspace_trigger_channels`, `loop_trigger_subscriptions`                  |
 | **Run**            | Planner loop + tools + optional approval                          | `loop_runs`, `loop_run_steps`, `loop_chat_threads` (`kind=run`), `approval_requests` |
 
-
 ---
 
 ## Conductor chat
 
 **Route:** `POST /api/loops/:loopId/chat` (SSE stream, proxied by `dashboard/app/api/loops/[...path]/route.ts`)
 
-**Model:** `getStreamingLanguageModel("conductor")` → `TALLEI_CONDUCTOR__MODEL` (OpenCode Zen by default). **One model, one stream** per phase attempt — there is no separate nested analyst, review summarizer, or planner pre-pass in build chat. The Conductor calls `analyzeIntent` as a tool to produce the execution plan; the server derives and commits intent/blueprint artifacts. Review content comes from `LoopSpec` + `presentAgentTeam`; the model only supplies interaction tools.
+**Model:** `modelGateway.resolveStreaming("conductor")` (via `src/model/`) picks the model by provider and reasoning tier on OpenAI: `gpt-5-nano` when `TALLEI_CONDUCTOR__REASONING_EFFORT` is `none|minimal|low`, otherwise `TALLEI_CONDUCTOR__MODEL` (default `gpt-5-mini`). Optional `TALLEI_CONDUCTOR__LOW_REASONING_MODEL` overrides the nano tier. OpenCode uses `TALLEI_CONDUCTOR__MODEL` / `TALLEI_LLM__OPENCODE_MODEL` as before. Provider-specific SDK details stay inside the Model Gateway adapters.
 
 **System prompt:** `buildConductorSystemPrompt()` in `src/loops/planning-agent.ts` — rebuilt on every `prepareStep` from the current in-memory spec, `phaseProgress`, and `phaseContract`. Ownership-first: Conductor resolves compile blockers autonomously; interrupts the user only for material business forks.
 
 **Tools exposed to the LLM (phase-scoped):**
-
 
 | Tool                                           | Server execute?  | Phases | Purpose |
 | ---------------------------------------------- | ---------------- | ------ | ------- |
@@ -131,9 +127,9 @@ The dashboard shows a **Loop spec** sheet (`ConductorSpecSheet`) when `spec.task
 flowchart TB
   subgraph ui ["Dashboard UI"]
     Page["/loops/:id/conductor"]
-    Bridge["conductor-builder.tsx — useChat bridge"]
+    Bridge["conductor-builder.tsx — useChat, hydration, handoff effect"]
     Layout["conductor-builder-layout.tsx — composer"]
-    Shared["conductor-shared.ts — pending prompts, phase handoff"]
+    Shared["conductor-shared.ts — UI auto-send, pending prompts"]
     Suggestions["conductor-prompt-suggestions.ts — reply chips"]
     Roster["agent-team-roster.tsx — specialist review"]
   end
@@ -169,55 +165,69 @@ flowchart TB
   Continuity --> Chat
 ```
 
-
-
 ### Key UI files
-
 
 | File                                                               | Role                                                                                                                  |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, phase handoff auto-send, spec meta sync                                                          |
+| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, hydration, `useConductorContinuation`, spec meta sync                                            |
+| `dashboard/src/components/conductor/use-conductor-continuation.ts` | Server-projected phase handoff auto-continue after in-session stream completion                                       |
 | `dashboard/src/components/conductor/conductor-builder-layout.tsx`  | Composer: pending question vs free-text vs thinking indicator                                                         |
 | `dashboard/src/components/conductor/conductor-builder-chat.tsx`    | Transcript + tool part rendering                                                                                      |
-| `dashboard/src/components/conductor/conductor-shared.ts`           | `findPendingInteractivePrompt`, phase handoff detection, `shouldAutoSendConductorChat`, Yes/No → app picker remap     |
+| `dashboard/src/components/conductor/conductor-shared.ts`           | `findPendingInteractivePrompt`, pending UI detection, Yes/No → app picker remap                                       |
+| `src/loops/conductor-continuation-intent.ts`                     | `projectConductorClientAction` — authoritative continuation intent from event log                                     |
+| `dashboard/src/lib/conductor-continuation-intent.ts`             | Client types + `parseContinuationIntent` for `GET /api/loops/:id`                                                     |
 | `dashboard/src/components/conductor/agent-team-roster.tsx`         | Specialist team review card (`presentAgentTeam` output)                                                               |
 | `dashboard/src/components/conductor/builder-connector-prompt.tsx`  | App card picker (`pickConnectorApp`)                                                                                  |
 | `dashboard/src/components/ai-elements/interactive-prompt-menu.tsx` | Generic `askQuestion` / `confirmOutcomeBrief` answer UI                                                               |
 | `dashboard/src/lib/conductor-prompt-suggestions.ts`                | Heuristic compile/test/activate chips; budget-exhausted Continue                                                      |
-| `dashboard/src/lib/conductor-phase-handoff.ts`                     | Client mirror of `shared/conductor-phase-handoff.ts`                                                                  |
-| `dashboard/src/lib/conductor-activation-confirm.ts`                | Activation reply token matching for stall Continue routing                                                            |
-| `shared/conductor-phase-handoff.ts`                                | `isPhaseHandoffPending` — text-only bridge auto-continue gate                                                         |
-| `shared/conductor-activation-confirm.ts`                           | `isActivationConfirmationReply`, `findActivationReplyOption`                                                          |
-| `shared/conductor-stall-recovery.ts`                               | `isPhaseOpenForStallRecovery`, `isBuildTerminalForStall`                                                             |
-
+| `@tallei/shared/conductor-phase-handoff`                           | `isPhaseHandoffPending` — transcript-derived `handoffPending` mirror per phase                                        |
+| `@tallei/shared/conductor-activation-confirm`                     | `isActivationConfirmationReply`, `findActivationReplyOption`                                                          |
+| `@tallei/shared/conductor-stall-recovery`                          | `isBuildTerminalForStall` — blocks auto-continue when loop is active or phase is terminal                             |
 
 ### Chat transport behavior
 
-- **`sendAutomaticallyWhen: shouldAutoSendConductorChat`** — continues the stream after:
-  - User answers a UI tool (`pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, `presentReplyOptions`)
-  - A phase completes with `continuation: next_phase` (cross-phase handoff via `findPendingConductorPhaseHandoff`)
-  - A mid-phase text-only bridge when `isPhaseHandoffPending` is true (e.g. prose after `analyzeIntent` before `askQuestion`)
-- **Phase handoff consumption** — when the client auto-continues, the server appends `phase_handoff.consumed` for the carried `handoffId` before starting the next phase stream. Superseded handoffs return HTTP 409.
+Continuation is **server-authoritative**. The event log projects `buildProgress.continuationIntent` on `GET /api/loops/:id`; the client never infers auto-continue from the transcript on hydration.
+
+#### Server projection (`projectConductorClientAction`)
+
+[`src/loops/conductor-continuation-intent.ts`](src/loops/conductor-continuation-intent.ts) derives:
+
+| `action` | When |
+|----------|------|
+| `wait` | Build terminal (`loop.status === active` or `phaseProgress.terminal`), idle, or consumed handoff |
+| `wait_for_user` | `pendingUiTool` unanswered |
+| `auto_continue` | Pending phase handoff (`latestPhaseTurn.continuation` is `next_phase` / `continue_phase` and `handoffId` not consumed) or `phaseProgress.handoffPending`, or UI tool answered and next server tool not yet run |
+
+`trigger` is `phase_handoff`, `ui_tool_answered`, `budget_exhausted`, or `null`.
+
+#### Client execution (`useConductorContinuation`)
+
+[`dashboard/src/components/conductor/use-conductor-continuation.ts`](dashboard/src/components/conductor/use-conductor-continuation.ts):
+
+1. **Hydration** — `GET /api/loops/:id` seeds messages, build progress, and `continuationIntent` before `hydrationReady` is set. No POST on load.
+2. **UI tool answers** — `addToolOutput` persists the answer locally, then calls `sendMessage()` directly (user-initiated).
+3. **Phase handoffs** — after a stream completes (`streaming` → `ready`), if `continuationIntent.action === "auto_continue"` and `trigger === "phase_handoff"`, the hook calls `sendMessage()` once.
+
+**Phase handoff consumption** — when the client continues a handoff, the server appends `phase_handoff.consumed` for the carried `handoffId` before starting the next phase stream. Superseded handoffs return HTTP 409.
+
 - **PUT `/api/loops/:id/chat`** — debounced transcript persistence (500ms); messages are also mirrored into `loop_build_events`.
-- **GET `/api/loops/:id`** — hydrates `chatMessages`, `buildProgress.phaseProgress`, `buildProgress.latestPhaseTurn`, `buildPhase`, and latest spec on load (polled after each chat revision).
+- **GET `/api/loops/:id`** — hydrates `chatMessages`, `buildProgress.phaseProgress`, `buildProgress.latestPhaseTurn`, `buildProgress.continuationIntent`, `buildProgress.consumedHandoffIds`, `buildPhase`, and latest spec on load (polled after each chat revision).
 
 ### Phase handoff & budget recovery
 
-When Conductor ends a turn with **`continuation: next_phase`** or a text-only bridge with `handoffPending`, `shouldAutoSendConductorChat` triggers the next HTTP request without user input.
-
-**Authority:** phase progress comes from `buildProgress.phaseProgress` on `GET /api/loops`, projected by `deriveBuildPhaseProgress()` from the event log. `isPhaseHandoffPending()` (`shared/conductor-phase-handoff.ts`) supplements `phaseProgress.handoffPending` with transcript-derived predicates per phase.
+**Authority:** phase progress and continuation intent come from the event log via `projectLoopBuild()`.
 
 | Signal | Client behavior |
 |--------|-----------------|
-| `turnOutcome: phase_complete`, `continuation: next_phase` | Auto-send next phase (after `phase_handoff.consumed`) |
-| `handoffPending: true` + text-only last message | Auto-send to invoke expected `nextTool` |
-| `turnOutcome: budget_exhausted` | Show `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` + Continue chips |
-| `turnOutcome: waiting_for_user` | Wait for UI tool answer |
-| `turnOutcome: build_complete` or `loop.status === active` | No auto-continue |
+| `continuationIntent.action: auto_continue`, `trigger: phase_handoff` | `useConductorContinuation` auto-sends after stream completes in session |
+| User answers UI tool | `addToolOutput` then `sendMessage()` |
+| `continuationIntent.trigger: budget_exhausted` | Show `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` + Continue chips (explicit user send) |
+| `continuationIntent.action: wait_for_user` | Wait for UI tool answer |
+| `continuationIntent.action: wait`, build terminal | No auto-continue (refresh-safe) |
 
 **Budget exhaustion:** server appends `phase_turn.completed` with `outcome: budget_exhausted`. The dashboard surfaces Continue chips; the next request resumes from persisted `phaseProgress` and event-log state.
 
-**Activation confirmation:** `isActivationConfirmationReply()` (`shared/conductor-activation-confirm.ts`) classifies `presentReplyOptions` replies by option id, label, and message tokens before `activateLoop` is authorized.
+**Activation confirmation:** `isActivationConfirmationReply()` (`@tallei/shared/conductor-activation-confirm`) classifies `presentReplyOptions` replies by option id, label, and message tokens before `activateLoop` is authorized.
 
 ### UI-only tools (no server `execute`)
 
@@ -225,7 +235,7 @@ When Conductor ends a turn with **`continuation: next_phase`** or a text-only br
 
 1. Conductor calls the tool → part state `input-available`.
 2. Dashboard renders the composer prompt (app picker, question menu, confirm buttons, or reply chips).
-3. User selects → `addToolOutput` → stream auto-continues via `shouldAutoSendConductorChat`.
+3. User selects → `addToolOutput` → `sendMessage()` continues the turn.
 4. Conductor reads `output` on the next step and proceeds (or the server commits artifacts from the evidence).
 
 **UI remap:** if Conductor wrongly calls `askQuestion` with Yes/No to confirm an app, the dashboard remaps it to the app card picker (`BuilderConnectorPrompt`) using discovery options — user still chooses explicitly.
@@ -283,8 +293,6 @@ sequenceDiagram
   C->>C: compileLoop → testRunLoop → presentReplyOptions → activateLoop
 ```
 
-
-
 ### Outcome-first planning (unified Conductor)
 
 1. **`analyzeIntent`** → platform-neutral `executionOrder`, scope, approval, and 0–4 business questions. Never ask which app/platform during intent.
@@ -330,7 +338,6 @@ The old flow called `reviewOutcomeBrief`, waited for a separate planner-model JS
 
 Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` and `patchLoopSpec` parts remain readable; unanswered legacy `confirmOutcomeBrief` calls remain resumable. New builds use `analyzeIntent` and artifact interpreters, not `patchLoopSpec` or `reviewOutcomeBrief`.
 
-
 | Block                       | Purpose                                                               |
 | --------------------------- | --------------------------------------------------------------------- |
 | **Core rules**              | Event-log authority, analyzeIntent contract, no internal IDs exposed    |
@@ -339,7 +346,6 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` a
 | **Execution order**         | analyzeIntent.executionOrder → taskBlueprint.outcomes                 |
 | **Specialist team review**  | presentAgentTeam grouping rules + confirmOutcomeBrief                   |
 | **Dynamic tail**            | Workspace, blockers, phase contract, Next hint, Spec JSON once          |
-
 
 **Why not spec twice?** The prompt includes **one** `Spec JSON:` line (full spec, compact stringify) — no duplicate `taskBlueprint` block.
 
@@ -350,11 +356,11 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` a
 - **`presentAgentTeam`** → `AgentTeamRoster` in transcript
 - **`confirmOutcomeBrief`** → routing manifest + Confirm/Change buttons in composer
 - **`presentReplyOptions`** + **`deriveConductorPromptSuggestions`** → suggestion chips when no pending tool prompt
+- **`activateLoop`** → `ActivationSummaryCard` in transcript (Step / What happens / Who table + preferences). After success, Conductor must not recap the workflow in prose.
 
 **Auto-resolve:** when discovery can reuse a prior explicit connector choice for a later outcome role, the server emits `connector.auto_resolved` events and may commit the connectors artifact without another picker round.
 
 ### When Conductor **should** interrupt the user
-
 
 | Situation                                        | Tool                                      | Example                                                                        |
 | ------------------------------------------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
@@ -365,9 +371,7 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` a
 | Ready to go live                                 | `presentReplyOptions`                     | “Compile and test?” chips                                                      |
 | Approval / schedule / unclear output destination | `askQuestion`                             | “Run daily at 9am?”                                                            |
 
-
 ### When Conductor **should not** interrupt (resolve autonomously)
-
 
 | Situation                                   | What to do instead                                                              |
 | ------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -375,7 +379,6 @@ Persisted transcripts remain compatible: completed legacy `reviewOutcomeBrief` a
 | Agent instructions                          | Derived server-side from `analyzeIntent.executionOrder` in blueprint artifact   |
 | Capability bundles (“Read & Send”)          | Infer from intent; `discoverBindings`                                           |
 | Connected app is top-ranked                 | **Still show `pickConnectorApp`** for unresolved roles — auto-resolve only reuses prior explicit picks |
-
 
 ### Anti-patterns (do not do)
 
@@ -459,7 +462,6 @@ After connector pick, outcomes get `selectedConnector` + `status: "chosen"` on t
 
 **User:** “Automatically classify incoming support tickets by priority and draft personalized replies for review.”
 
-
 | Step | Conductor action                                                                                                               |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------ |
 | 1    | `analyzeIntent` — `executionOrder` (trigger → source → transform → destination), approval                                    |
@@ -472,9 +474,7 @@ After connector pick, outcomes get `selectedConnector` + `status: "chosen"` on t
 | 8    | `presentAgentTeam` → `confirmOutcomeBrief` → review artifact                                                                   |
 | 9    | `compileLoop` → `testRunLoop` → `presentReplyOptions` → `activateLoop`                                                         |
 
-
 **User:** Same prompt but also says “and send the email” without sequencing.
-
 
 | Step | Conductor action                                                                                     |
 | ---- | ---------------------------------------------------------------------------------------------------- |
@@ -482,7 +482,6 @@ After connector pick, outcomes get `selectedConnector` + `status: "chosen"` on t
 | 2    | **`askQuestion`** — “Should replies be sent automatically or saved as drafts for your review first?” |
 | 3    | User answers → server re-derives intent artifact with resolved outcome                               |
 | 4    | Continue connector discovery as above                                                                |
-
 
 ---
 
@@ -504,14 +503,12 @@ Historical `discoverBindings` and `setBindingConfig` evidence remains readable f
 
 Build and run transcripts share one table with two thread kinds:
 
-
 | `kind`  | Scope                                       | Linked fields                                                      | Written by                                                                   |
 | ------- | ------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `build` | One row per `(loop_id, tenant_id, user_id)` | `spec_revision`, `compiled_plan_id` updated on spec save / compile | Conductor `POST`/`PUT` chat, `saveSpecDraft`, `saveCompiledPlan`             |
 | `run`   | One row per `run_id`                        | `compiled_plan_id`                                                 | `createLoopRun`, `insertRunStep`, `deliverOutputActivity`, `failRunActivity` |
 
-
-- **GET** `/api/loops/:id` returns `chatMessages`, `buildChat: { specRevision, compiledPlanId }`, `buildPhase`, and `buildProgress: { stage, phaseProgress, latestPhaseTurn }`.
+- **GET** `/api/loops/:id` returns `chatMessages`, `buildChat: { specRevision, compiledPlanId }`, `buildPhase`, and `buildProgress: { stage, phaseProgress, latestPhaseTurn, consumedHandoffIds }`.
 - **GET** `/api/loops/:id/runs/:runId` returns `chatMessages` (run transcript).
 - Run steps are mirrored into UIMessage-shaped JSON via `stepToChatMessages()` in `src/loops/loop-chat.ts`.
 
@@ -523,7 +520,6 @@ Legacy `loop_conductor_chats` rows migrate into `loop_chat_threads` on schema in
 
 Defined in `src/loops/spec.ts`.
 
-
 | Area               | Fields                                                                                                              |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
 | **Intent**         | `goal`, optional `constraints`                                                                                      |
@@ -534,7 +530,6 @@ Defined in `src/loops/spec.ts`.
 | **Agent**          | `instructions`, `maxSteps`                                                                                          |
 | **Approval**       | `mode`, `sensitiveCapabilities`, `onTimeout`                                                                        |
 | **Output**         | `kind`, `target`                                                                                                    |
-
 
 **Starter templates** (`seedSpecFromTemplate` in `src/loops/patch.ts`): `research_digest`, `newsletter_loop`, `lead_scoring`, `support_auto_reply`, `smart_alerts`, `crm_sync`.
 
@@ -565,12 +560,10 @@ Common errors: `CONNECTOR_NOT_CONNECTED`, `UNSUPPORTED_CAPABILITY`, `INVALID_CRO
 
 Two fields, two meanings — enforced in `src/loops/event-trigger.ts`:
 
-
 | Field                  | Meaning                    | Example                   |
 | ---------------------- | -------------------------- | ------------------------- |
 | `trigger.source`       | Connector / toolkit        | `gmail`                   |
 | `trigger.composioSlug` | Composio trigger type slug | `GMAIL_NEW_GMAIL_MESSAGE` |
-
 
 **Three layers (defense in depth):**
 
@@ -623,13 +616,11 @@ Table `workspace_trigger_channels` is unique on:
 (workspace_id, connected_account_id, composio_trigger_slug)
 ```
 
-
 | Layer            | Table                        | Role                                                                               |
 | ---------------- | ---------------------------- | ---------------------------------------------------------------------------------- |
 | **Channel**      | `workspace_trigger_channels` | One Composio `triggerInstances.upsert` per channel; `ref_count` tracks subscribers |
 | **Subscription** | `loop_trigger_subscriptions` | Each active event loop points at a channel (`loop_id` unique)                      |
 | **Idempotency**  | `webhook_event_deliveries`   | Skip duplicate runs for `(external_event_id, loop_id)` on Composio retries         |
-
 
 **Activate** (`provisionEventTrigger`): creates or reuses a channel. If a channel row exists but `composio_instance_id` is null (e.g. after pause released the instance), Composio `triggerInstances.upsert` runs again. If the channel is healthy, increment `ref_count` only.
 
@@ -660,14 +651,10 @@ sequenceDiagram
   Tallei->>WsB: fan-out to subscribed loops in Work only
 ```
 
-
-
-
 | Workspace | Composio entity suffix | Gmail account                             | Trigger instance | Webhook `entityId`        |
 | --------- | ---------------------- | ----------------------------------------- | ---------------- | ------------------------- |
 | Personal  | `…:personal-ws-id`     | [alice@gmail.com](mailto:alice@gmail.com) | Instance A       | `tallei:…:personal-ws-id` |
 | Work      | `…:work-ws-id`         | [bob@company.com](mailto:bob@company.com) | Instance B       | `tallei:…:work-ws-id`     |
-
 
 Both hit the **same** endpoint (`POST /api/webhooks/composio`), but Composio sends **separate events** per trigger instance / connected account. `dispatchComposioTriggerToLoops` resolves the workspace from `entityId` and only starts loops in that workspace.
 
@@ -704,25 +691,21 @@ See [temporal-loops.md](./temporal-loops.md#webhooks) for endpoint URLs, signatu
 
 ### Triggers
 
-
 | Kind       | Source                                                                                                                                              |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `manual`   | Conductor **Run now** or `POST /api/loops/:id/runs`                                                                                                 |
 | `schedule` | Temporal Schedule on cron                                                                                                                           |
 | `event`    | Composio webhook → `dispatchComposioTriggerToLoops` (fan-out to subscribed loops in the **same workspace**; deduped via `webhook_event_deliveries`) |
 
-
 ### Execution
 
 All profiles share the same entrypoint (`loopRunWorkflow` when Temporal is on, `executeLoopRunHeadless` when off).
-
 
 | Profile   | Runner                                                                                                         |
 | --------- | -------------------------------------------------------------------------------------------------------------- |
 | `agentic` | `runAgenticLoop` (`src/loops/agentic-run.ts`) — planner → optional approval (DB poll) → tool execute → deliver |
 | `monitor` | Rule evaluation on metric sample + optional notify                                                             |
 | `sync`    | Preview read both sides (full sync v2)                                                                         |
-
 
 **Agentic loop** (single implementation for Temporal and headless):
 
@@ -739,24 +722,21 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 
 ### Profiles
 
-
 | Profile   | Runtime                                            |
 | --------- | -------------------------------------------------- |
 | `agentic` | Planner + tools + approvals                        |
 | `monitor` | Rule evaluation on metric sample + optional notify |
 | `sync`    | Preview read both sides (full sync v2)             |
 
-
 ---
 
 ## HTTP API summary
-
 
 | Method | Path                                | Purpose                                                   |
 | ------ | ----------------------------------- | --------------------------------------------------------- |
 | `GET`  | `/api/loops`                        | List loops                                                |
 | `POST` | `/api/loops`                        | Create loop                                               |
-| `GET`  | `/api/loops/:id`                    | Loop + spec + `buildProgress` (phase progress, latest phase turn) |
+| `GET`  | `/api/loops/:id`                    | Loop + spec + `buildProgress` (phase progress, latest phase turn, consumed handoff IDs) |
 | `POST` | `/api/loops/:id/chat`               | **Conductor chat stream** (persists transcript on finish) |
 | `PUT`  | `/api/loops/:id/chat`               | Save Conductor chat messages                              |
 | `POST` | `/api/loops/:id/compile`            | Compile spec                                              |
@@ -771,11 +751,9 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 | `GET`  | `/api/approvals`                    | Pending approvals                                         |
 | `POST` | `/api/approvals/:id/decide`         | Approve / reject / edit                                   |
 
-
 ---
 
 ## Dashboard routes
-
 
 | Path                                   | Page                                               |
 | -------------------------------------- | -------------------------------------------------- |
@@ -786,7 +764,6 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 | `/dashboard/loops/:loopId/runs/:runId` | Run detail                                         |
 | `/dashboard/approvals`                 | Approval inbox                                     |
 
-
 `/dashboard/loops/:loopId/builder` redirects to `conductor` for old bookmarks.
 
 ---
@@ -796,15 +773,22 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 ### Conductor & LLM
 
 ```env
+# OpenCode
 TALLEI_LLM__PROVIDER=opencode
 TALLEI_LLM__OPENCODE_API_KEY=...
 TALLEI_LLM__OPENCODE_BASE_URL=https://opencode.ai/zen/v1
-TALLEI_CONDUCTOR__MODEL=gpt-5.3-codex          # Conductor chat (tools + streaming)
-TALLEI_BINDING_RESOLVER__MODEL=gpt-5.3-codex   # Strict binding structured output; defaults to Conductor
-TALLEI_LLM__OPENCODE_MODEL=deepseek-v4-flash   # Runtime planner
+TALLEI_CONDUCTOR__MODEL=big-pickle              # Conductor chat (tools + streaming)
+TALLEI_LLM__OPENCODE_MODEL=deepseek-v4-flash    # Runtime planner on OpenCode
+
+# OpenAI (direct)
+# TALLEI_LLM__PROVIDER=openai
+# TALLEI_LLM__OPENAI_API_KEY=sk-...
+# TALLEI_CONDUCTOR__MODEL=gpt-5-mini
+# TALLEI_CONDUCTOR__REASONING_EFFORT=high
+# TALLEI_PLANNER__REASONING_EFFORT=low
 ```
 
-`TALLEI_CONDUCTOR__MODEL` falls back to legacy `TALLEI_LOOP_BUILDER__OPENAI_MODEL` if set. `TALLEI_BINDING_RESOLVER__MODEL` defaults to the resolved Conductor model.
+`TALLEI_CONDUCTOR__MODEL` defaults to a provider-aware model (`gpt-5-mini` for OpenAI, `TALLEI_LLM__OPENCODE_MODEL` for OpenCode). Legacy `TALLEI_LOOP_BUILDER__OPENAI_MODEL` is aliased at boot to `TALLEI_CONDUCTOR__MODEL`. Chat, embeddings, structured planner output, and Conductor streaming all route through the **Model Gateway** in `src/model/` (`modelGateway`, `modelRegistry`).
 
 ### Temporal
 
@@ -850,10 +834,10 @@ src/loops/
   store.ts                   Postgres CRUD + loop_build_events
 
 shared/
-  conductor-phase-handoff.ts     isPhaseHandoffPending
+  conductor-phase-handoff.ts     isPhaseHandoffPending (transcript mirror)
   conductor-activation-confirm.ts isActivationConfirmationReply
   conductor-turn-budget.ts       CONDUCTOR_PHASE_STEP_LIMITS
-  conductor-stall-recovery.ts    isBuildTerminalForStall
+  conductor-stall-recovery.ts    isBuildTerminalForStall (auto-continue terminal gate)
 
 src/temporal/                  loopRunWorkflow, activities, schedules, worker
 src/integrations/composio/     connectors, tools, execute, triggers, webhooks

@@ -1,4 +1,4 @@
-import type { ChatCompletionRequest, ChatCompletionResponse } from "../../providers/ai/types.js";
+import type { AppModelRequest, AppModelResponse } from "../../model/types.js";
 import type { CleanupAiUsage } from "./types.js";
 
 type Pricing = { inputPerMillion: number; outputPerMillion: number };
@@ -44,11 +44,16 @@ function pricingForModel(model: string): Pricing | null {
 
 export function recordCleanupAiUsage(
   usage: CleanupAiUsage,
-  request: ChatCompletionRequest,
-  response: ChatCompletionResponse
+  request: Pick<AppModelRequest, "messages" | "model">,
+  response: AppModelResponse,
 ): void {
-  const promptEstimate = request.messages.reduce((sum, message) => sum + estimateTokens(message.content), 0);
-  const completionEstimate = estimateTokens(response.text);
+  const promptEstimate = request.messages.reduce((sum, message) => {
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    return sum + estimateTokens(content);
+  }, 0);
+  const completionEstimate = estimateTokens(response.text ?? "");
   const promptTokens = response.usage?.promptTokens ?? 0;
   const completionTokens = response.usage?.completionTokens ?? 0;
   const totalTokens = response.usage?.totalTokens ?? (promptTokens + completionTokens);

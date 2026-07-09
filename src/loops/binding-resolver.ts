@@ -1,11 +1,11 @@
 import { z } from "zod";
 
-import { getTriggerOutputFields } from "../integrations/composio/trigger-known-fields.js";
+import { getTriggerOutputFields } from "@tallei/composio-tools/trigger-known-fields.js";
 import { bindingArtifactSchema } from "./build-state.js";
 import { validateConfigAgainstSchema, type ConfigurableField } from "./binding-discovery.js";
-import { buildComposioToolContract, type RequiredFieldSummary } from "./composio-schema-contract.js";
+import { buildComposioToolContract, type RequiredFieldSummary } from "@tallei/composio-tools/schema-contract.js";
 import type { ComposioActionInstruction, ToolBinding } from "./spec.js";
-import { capabilityForAction } from "./tool-schema.js";
+import { capabilityForAction } from "@tallei/composio-tools/tool-schema.js";
 
 export type BindingResolverAnswer = {
   questionId: string;

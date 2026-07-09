@@ -101,10 +101,11 @@ fi
 echo "Submitting Cloud Build for dashboard image..."
 build_id="$(gcloud builds submit \
   --project "$PROJECT_ID" \
-  --tag "$IMAGE_URI" \
+  --config deploy/cloudrun/cloudbuild-dashboard.yaml \
+  --substitutions="_IMAGE_URI=${IMAGE_URI},_API_PROXY_TARGET=${API_PROXY_TARGET:-https://api.tallei.com},_BACKEND_URL=${BACKEND_URL:-https://api.tallei.com}" \
   --async \
   --format='value(id)' \
-  ./dashboard)"
+  .)"
 
 if [[ -z "$build_id" ]]; then
   echo "Failed to capture Cloud Build ID for dashboard deploy." >&2

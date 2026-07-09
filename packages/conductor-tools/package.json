@@ -1,0 +1,30 @@
+{
+  "name": "@tallei/conductor-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "exports": {
+    "./build-phase": "./dist/conductor-build-phase.js",
+    "./build-phase.js": "./dist/conductor-build-phase.js",
+    "./execution-metadata": "./dist/conductor-execution-metadata.js",
+    "./execution-metadata.js": "./dist/conductor-execution-metadata.js",
+    "./descriptions": "./dist/conductor-tool-descriptions.js",
+    "./descriptions.js": "./dist/conductor-tool-descriptions.js",
+    "./input-schemas": "./dist/conductor-tool-input-schemas.js",
+    "./input-schemas.js": "./dist/conductor-tool-input-schemas.js",
+    "./tool-names": "./dist/conductor-tool-names.js",
+    "./tool-names.js": "./dist/conductor-tool-names.js"
+  },
+  "dependencies": {
+    "@tallei/shared": "0.1.0"
+  },
+  "peerDependencies": {
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "zod": "^3.24.2"
+  }
+}

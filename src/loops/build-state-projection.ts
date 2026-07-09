@@ -16,7 +16,10 @@ import {
   projectLoopSpec,
   type LoopBuildState,
 } from "./build-state.js";
+import { projectConductorClientAction, type ConductorContinuationIntent } from "./conductor-continuation-intent.js";
 import type { LoopSpec } from "./spec.js";
+
+export type { ConductorContinuationIntent };
 
 export type LoopBuildProjectionContext = {
   connectedToolkits?: Array<{ slug: string; connected: boolean }>;
@@ -34,6 +37,7 @@ export type LoopBuildProjection = {
   pendingUiTool: PendingUiToolCall | null;
   latestTerminalExecution: ConductorExecutionMetadata | null;
   consumedHandoffIds: string[];
+  continuationIntent: ConductorContinuationIntent | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,14 +141,28 @@ export function projectLoopBuild(
       loopStatus: context.loopStatus,
     })
     : null;
+  const latestPhaseTurn = projectLatestPhaseTurn(events);
+  const consumedHandoffIds = projectConsumedHandoffIds(events);
+  const continuationIntent = state && phaseProgress
+    ? projectConductorClientAction({
+      loopStatus: context.loopStatus ?? "draft",
+      phaseProgress,
+      latestPhaseTurn,
+      pendingUiTool,
+      consumedHandoffIds,
+      events,
+    })
+    : null;
+
   return {
     state,
     spec: state ? projectLoopSpec(state) : null,
     chatMessages,
     phaseProgress,
-    latestPhaseTurn: projectLatestPhaseTurn(events),
+    latestPhaseTurn,
     pendingUiTool,
     latestTerminalExecution: projectLatestTerminalExecution(events),
-    consumedHandoffIds: projectConsumedHandoffIds(events),
+    consumedHandoffIds,
+    continuationIntent,
   };
 }

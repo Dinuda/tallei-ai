@@ -14,6 +14,7 @@ export type ConductorTurnResolution =
     reason: string;
     pendingToolCallId?: string;
     resumeAfterAnswer?: boolean;
+    noProgressFingerprint?: string;
   }
   | {
     outcome: "phase_complete" | "progress";
@@ -132,14 +133,28 @@ export function resolveConductorTurnResolution(input: {
     contract: input.contract,
     phaseProgress: input.phaseProgress,
   });
-  if (input.latestPhaseTurn?.phase === input.contract.phase
+
+  const sameRevisionNoProgress = input.latestPhaseTurn?.phase === input.contract.phase
     && input.latestPhaseTurn.parentArtifactHash === input.contract.parentArtifactHash
-    && input.latestPhaseTurn.noProgressFingerprint === noProgressFingerprint
-    && input.latestPhaseTurn.continuation === "continue_phase") {
+    && input.latestPhaseTurn.noProgressFingerprint === noProgressFingerprint;
+
+  if (sameRevisionNoProgress
+    && (input.latestPhaseTurn?.outcome === "blocked"
+      || input.latestPhaseTurn?.continuation === "continue_phase")) {
     return {
       outcome: "blocked",
       continuation: "stop",
       reason: "repeated_no_progress",
+      noProgressFingerprint,
+    };
+  }
+
+  if (input.stepsUsed === 0) {
+    return {
+      outcome: "blocked",
+      continuation: "stop",
+      reason: "required_tool_not_called",
+      noProgressFingerprint,
     };
   }
 
@@ -147,6 +162,7 @@ export function resolveConductorTurnResolution(input: {
     kind: "continue_phase",
     revision: input.contract.revision,
     fingerprint: noProgressFingerprint,
+    stepsUsed: input.stepsUsed,
   });
   return {
     outcome: "progress",

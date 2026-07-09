@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { approvalSensitiveRoleSchema, intentDiscoveryStateSchema } from "./intent-discovery.js";
 
+
 export const executionProfileSchema = z.enum(["agentic", "monitor", "sync"]);
 export type ExecutionProfile = z.infer<typeof executionProfileSchema>;
 

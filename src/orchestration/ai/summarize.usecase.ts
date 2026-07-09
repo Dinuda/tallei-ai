@@ -1,4 +1,4 @@
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 import type { MemoryType } from "../memory/memory-types.js";
 
 export interface ConversationSummary {
@@ -32,13 +32,14 @@ export async function summarizeConversation(
   content: string
 ): Promise<ConversationSummary> {
   const boundedContent = content.slice(0, SUMMARY_INPUT_CHAR_LIMIT);
-  const response = await aiProviderRegistry.chat({
-    model: aiProviderRegistry.chatModelName(),
+  const response = await modelGateway.chat({
+    purpose: "chat",
+    model: modelGateway.chatModelName(),
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `Summarize this conversation:\n\n${boundedContent}` },
     ],
-    responseFormat: "json_object",
+    responseFormat: "json",
     maxTokens: SUMMARY_MAX_TOKENS,
   });
 

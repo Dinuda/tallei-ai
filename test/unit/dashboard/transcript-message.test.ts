@@ -3,22 +3,18 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const transcriptPath = new URL(
-  "../../../dashboard/src/components/ai-elements/transcript-message.tsx",
+  "../../../dashboard/src/components/conductor/conductor-builder-chat.tsx",
   import.meta.url,
 );
 
-test("transcript message renderer handles text, reasoning, tools, and agent persona", async () => {
+test("conductor builder chat renders reasoning, text, and tool transcript parts", async () => {
   const source = await readFile(transcriptPath, "utf8");
-  assert.match(source, /renderMessagePart/);
-  assert.match(source, /TranscriptMessageContent/);
-  assert.match(source, /coalesceAdjacentTextParts/);
-  assert.match(source, /ExpandedReasoningBlock|expandReasoning/);
-  assert.match(source, /AgentTurnHeader/);
-  assert.match(source, /phase === "working"\s*\?\s*null/);
-  assert.doesNotMatch(source, /statusText === "Running"/);
-  assert.match(source, /isDataAgentPart/);
-  assert.match(source, /CollapsibleTool/);
-  assert.match(source, /findActiveToolPart/);
+  assert.match(source, /renderTranscriptPart/);
+  assert.match(source, /ConductorReasoningPart/);
+  assert.match(source, /ConductorToolPart/);
+  assert.match(source, /MessageResponse/);
+  assert.match(source, /buildTranscriptSegments/);
+  assert.match(source, /AssistantTranscriptTurn/);
   const toolSource = await readFile(
     new URL("../../../dashboard/src/components/ai-elements/tool.tsx", import.meta.url),
     "utf8",
@@ -32,8 +28,18 @@ test("message response batches streamed text to animation frames", async () => {
     "utf8",
   );
   assert.match(source, /useAnimationFrameText/);
+  assert.match(source, /isAnimating && isText/);
+  assert.match(source, /whitespace-pre-wrap break-words/);
+});
+
+test("animation frame text hook batches via requestAnimationFrame without deferring transitions", async () => {
+  const source = await readFile(
+    new URL("../../../dashboard/src/hooks/use-animation-frame-text.ts", import.meta.url),
+    "utf8",
+  );
   assert.match(source, /requestAnimationFrame/);
   assert.match(source, /cancelAnimationFrame/);
+  assert.doesNotMatch(source, /startTransition\s*\(/);
 });
 
 test("code block highlighter does not set state during render", async () => {

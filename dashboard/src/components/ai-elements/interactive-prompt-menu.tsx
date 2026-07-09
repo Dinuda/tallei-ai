@@ -50,6 +50,9 @@ type PromptTheme = {
   logoDefault: string;
 };
 
+/** Primary options stay visible; additional options scroll below. */
+const MAX_PRIMARY_OPTIONS = 4;
+
 const PROMPT_THEMES: Record<InteractivePromptVariant, PromptTheme> = {
   neutral: {
     outerBorder: "border-[var(--ed-border)]",
@@ -147,14 +150,19 @@ function ProviderLogo({
   selected,
   index,
   theme,
+  useConnectorLogos,
 }: {
   icon?: string;
   label: string;
   selected: boolean;
   index: number;
   theme: PromptTheme;
+  useConnectorLogos: boolean;
 }) {
-  const src = icon ? `https://logos.composio.dev/api/${icon}` : undefined;
+  const [imageFailed, setImageFailed] = useState(false);
+  const src = useConnectorLogos && icon && !imageFailed
+    ? `https://logos.composio.dev/api/${icon}`
+    : undefined;
 
   if (!src) {
     return (
@@ -181,7 +189,13 @@ function ProviderLogo({
       {selected ? (
         <Check className="size-4 text-white" />
       ) : (
-        <img alt={label} className="size-5 object-contain" draggable={false} src={src} />
+        <img
+          alt={label}
+          className="size-5 object-contain"
+          draggable={false}
+          onError={() => setImageFailed(true)}
+          src={src}
+        />
       )}
     </span>
   );
@@ -222,6 +236,7 @@ export function InteractivePromptMenu({
   onDismiss?: () => void;
 }) {
   const theme = PROMPT_THEMES[variant];
+  const useConnectorLogos = variant === "connector" || rankedAppsLayout;
   const [selectedIds, setSelectedIds] = useState<string[]>(() => {
     if (submittedAnswer?.selectedOptionIds?.length) return submittedAnswer.selectedOptionIds;
     if (!allowMultiple && recommendedOptionIds.length === 1) {
@@ -236,7 +251,18 @@ export function InteractivePromptMenu({
     () => new Set(recommendedOptionIds),
     [recommendedOptionIds]
   );
-  const isSubmitted = Boolean(submittedAnswer);
+  const [submittedLocally, setSubmittedLocally] = useState(false);
+  const isSubmitted = Boolean(submittedAnswer) || submittedLocally;
+  // Content fingerprint — parent often passes a fresh `options` array reference
+  // with the same rows; depend on identity of the question + option ids only.
+  const optionsRevision = useMemo(
+    () => `${question}\0${options.map((option) => option.id).join("\0")}`,
+    [question, options],
+  );
+
+  useEffect(() => {
+    setSubmittedLocally(false);
+  }, [optionsRevision]);
 
   const hasOutcomeGroups = useMemo(
     () => options.some((option) => Boolean(option.outcomeId)),
@@ -286,6 +312,19 @@ export function InteractivePromptMenu({
   const isSearching = rankedAppsLayout && appSearch.trim().length > 0;
   const showRankedMoreLabel = rankedAppsLayout && !isSearching && moreOptions.length > 0;
 
+  const { primaryOptions, overflowOptions } = useMemo(() => {
+    if (rankedAppsLayout || options.length <= MAX_PRIMARY_OPTIONS) {
+      return {
+        primaryOptions: options,
+        overflowOptions: [] as InteractivePromptOption[],
+      };
+    }
+    return {
+      primaryOptions: options.slice(0, MAX_PRIMARY_OPTIONS),
+      overflowOptions: options.slice(MAX_PRIMARY_OPTIONS),
+    };
+  }, [options, rankedAppsLayout]);
+
   function renderOption(option: InteractivePromptOption, index: number) {
     const selected = selectedIds.includes(option.id);
     return (
@@ -307,6 +346,7 @@ export function InteractivePromptMenu({
           label={option.label}
           selected={selected}
           theme={theme}
+          useConnectorLogos={useConnectorLogos}
         />
         <span className="min-w-0 flex-1">
           <span className={cn("flex flex-wrap items-center gap-2 text-sm font-semibold", theme.optionTitle)} style={{ fontFamily: "var(--font-title)" }}>
@@ -374,6 +414,7 @@ export function InteractivePromptMenu({
       ...(custom ? [custom] : []),
     ].join("; ");
     if (!answerText) return;
+    setSubmittedLocally(true);
     onSubmit({
       selectedOptionIds: selectedOptions.map((option) => option.id),
       selectedValues: selectedOptions.map((option) => option.value),
@@ -443,7 +484,19 @@ export function InteractivePromptMenu({
           </div>
         ) : (
           <div className="space-y-1">
-            {options.map((option, index) => renderOption(option, index))}
+            {primaryOptions.map((option, index) => renderOption(option, index))}
+            {overflowOptions.length > 0 ? (
+              <>
+                <p className={cn("sticky top-0 z-10 bg-white px-3 py-2 text-[11px] font-medium uppercase tracking-wide", theme.divider)}>
+                  More options
+                </p>
+                <div className="max-h-[11rem] space-y-1 overflow-y-auto">
+                  {overflowOptions.map((option, index) =>
+                    renderOption(option, index + primaryOptions.length)
+                  )}
+                </div>
+              </>
+            ) : null}
           </div>
         )}
       </div>

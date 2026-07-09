@@ -5,6 +5,13 @@ import {
   type UIMessage,
 } from "ai";
 
+import {
+  CONDUCTOR_UI_ONLY_TOOLS,
+  CONDUCTOR_INTERNAL_TRANSCRIPT_TOOLS,
+} from "@tallei/conductor-tools/tool-names.js";
+
+export { CONDUCTOR_INTERNAL_TRANSCRIPT_TOOLS };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -29,11 +36,15 @@ export function normalizeConductorChatMessages(messages: Array<UIMessage | null 
     if (seen.has(message.id)) continue;
     if (message.role === "assistant" && !hasVisibleContent(message)) continue;
     seen.add(message.id);
-    normalized.push({
+    const next: UIMessage = {
       id: message.id,
       role: message.role,
       parts: message.parts ?? [],
-    });
+    };
+    if (message.metadata !== undefined) {
+      next.metadata = message.metadata;
+    }
+    normalized.push(next);
   }
   return normalized;
 }
@@ -52,19 +63,22 @@ function stripOpenAiItemIds(value: unknown): unknown {
 /** Canonicalize event-log input without mutating tool lifecycle state. */
 export function prepareConductorChatMessagesForEventLog(messages: UIMessage[]): UIMessage[] {
   return normalizeConductorChatMessages(
-    messages.map((message) => ({
+    ensureVisibleConductorAssistantTurn(messages).map((message) => ({
       ...message,
-      parts: (message.parts ?? []).map((part) => stripOpenAiItemIds(part) as UIMessage["parts"][number]),
+      parts: (message.parts ?? []).map((part) => {
+        const stripped = stripOpenAiItemIds(part) as UIMessage["parts"][number];
+        // Persist completed reasoning so refresh does not keep a live "Thinking..." shimmer.
+        if (stripped.type === "reasoning") {
+          const reasoning = stripped as { type: "reasoning"; text?: string; state?: string };
+          if (reasoning.state === "streaming") {
+            return { ...reasoning, state: "done" } as UIMessage["parts"][number];
+          }
+        }
+        return stripped;
+      }),
     })),
   );
 }
-
-const CONDUCTOR_UI_ONLY_TOOLS = new Set([
-  "askQuestion",
-  "pickConnectorApp",
-  "presentReplyOptions",
-  "confirmOutcomeBrief",
-]);
 
 const SUPERSEDED_TOOL_ERROR = "Superseded by a later user message before this tool completed.";
 
@@ -303,6 +317,164 @@ export async function prepareConductorModelMessagesForStream(
 
 export function isMissingToolResultsError(error: unknown): error is MissingToolResultsError {
   return MissingToolResultsError.isInstance(error);
+}
+
+type ToolLikePart = {
+  type: string;
+  toolName?: string;
+  state?: string;
+  input?: unknown;
+  output?: unknown;
+  toolCallId?: string;
+};
+
+function resolveToolPartNameFromPart(part: ToolLikePart): string {
+  if (part.type === "dynamic-tool" && part.toolName) return part.toolName;
+  return part.type.replace(/^tool-/, "");
+}
+
+function isUserVisibleTranscriptPart(part: UIMessage["parts"][number]): boolean {
+  if (part.type === "text") {
+    return "text" in part && typeof part.text === "string" && part.text.trim().length > 0;
+  }
+  if (part.type === "reasoning") return false;
+  if (!isToolPartType(part.type)) return false;
+  const name = resolveToolPartNameFromPart(part as ToolLikePart);
+  return !CONDUCTOR_INTERNAL_TRANSCRIPT_TOOLS.has(name);
+}
+
+function hasUserVisibleTranscriptContent(message: UIMessage): boolean {
+  return (message.parts ?? []).some(isUserVisibleTranscriptPart);
+}
+
+function buildFallbackAssistantText(message: UIMessage, context?: ConductorStallRecoveryContext): string {
+  if (context?.streamError) {
+    return `I hit a temporary issue while working on this step. Send your message again to continue.`;
+  }
+
+  const hasFailedTool = (message.parts ?? []).some((part) => {
+    if (!isToolPartType(part.type)) return false;
+    const toolPart = part as ToolLikePart;
+    return toolPart.state === "output-error";
+  });
+  if (hasFailedTool) {
+    return "One of the workflow setup steps failed. Tell me what to change, or send **continue** to retry.";
+  }
+
+  for (const part of message.parts ?? []) {
+    if (!isToolPartType(part.type)) continue;
+    const toolPart = part as ToolLikePart;
+    const name = resolveToolPartNameFromPart(toolPart);
+    if (name === "askQuestion" || name === "pickConnectorApp") {
+      const question = typeof toolPart.input === "object"
+        && toolPart.input
+        && "question" in toolPart.input
+        && typeof toolPart.input.question === "string"
+        ? toolPart.input.question.trim()
+        : "";
+      if (question) return question;
+    }
+  }
+
+  const hasPendingQuestion = (message.parts ?? []).some((part) => {
+    if (!isToolPartType(part.type)) return false;
+    const toolPart = part as ToolLikePart;
+    const name = resolveToolPartNameFromPart(toolPart);
+    return CONDUCTOR_UI_ONLY_TOOLS.has(name)
+      && (toolPart.state === "input-available" || toolPart.state === "input-streaming");
+  });
+  if (hasPendingQuestion || context?.pendingUiTool) {
+    return "I need one answer from you to continue building this workflow.";
+  }
+
+  const hasReasoningOnly = (message.parts ?? []).some((part) => part.type === "reasoning")
+    && !(message.parts ?? []).some((part) => part.type === "text" && part.text.trim().length > 0);
+  if (hasReasoningOnly && context?.stepsUsed === 0) {
+    return "I finished thinking but didn't advance the workflow yet. Send **continue** and I'll pick up from here.";
+  }
+
+  if (context?.outcome === "blocked") {
+    return "I couldn't make more progress on this step. Tell me what to change, or send **continue** to retry.";
+  }
+
+  return "I captured the workflow intent and need one answer to continue.";
+}
+
+export type ConductorStallRecoveryContext = {
+  streamError?: string | null;
+  stepsUsed?: number;
+  outcome?: string;
+  resolutionReason?: string;
+  pendingUiTool?: { toolName?: string; toolCallId?: string } | null;
+};
+
+function assistantHasRecoverableVisibleText(message: UIMessage): boolean {
+  return (message.parts ?? []).some((part) => {
+    if (part.type !== "text") return false;
+    const text = part.text.trim();
+    return text.length > 0;
+  });
+}
+
+/** Append a short user-facing sentence when a turn ends with only hidden tools or reasoning. */
+export function ensureVisibleConductorAssistantTurn(
+  messages: UIMessage[],
+  context?: ConductorStallRecoveryContext,
+): UIMessage[] {
+  if (messages.length === 0) return messages;
+
+  let lastAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistantIndex = index;
+      break;
+    }
+  }
+  if (lastAssistantIndex < 0) return messages;
+
+  const message = messages[lastAssistantIndex]!;
+  if (hasUserVisibleTranscriptContent(message)) return messages;
+  if (assistantHasRecoverableVisibleText(message)) return messages;
+
+  const nextMessage: UIMessage = {
+    ...message,
+    parts: [
+      ...(message.parts ?? []),
+      { type: "text", text: buildFallbackAssistantText(message, context) },
+    ],
+  };
+
+  return messages.map((item, index) => (index === lastAssistantIndex ? nextMessage : item));
+}
+
+/** Add a recoverable assistant sentence after a stalled turn if the transcript still looks blank. */
+export function appendConductorStallRecoveryMessage(
+  messages: UIMessage[],
+  context: ConductorStallRecoveryContext,
+): UIMessage[] {
+  return ensureVisibleConductorAssistantTurn(messages, context);
+}
+
+/** Revision for client persistence dedupe; ignores streaming reasoning token deltas. */
+export function messagesPersistenceRevision(messages: UIMessage[]): string {
+  return messages.map((message) => {
+    const parts = (message.parts ?? []).map((part) => {
+      if (part.type === "text") {
+        return `t:${part.text?.length ?? 0}`;
+      }
+      if (part.type === "reasoning") {
+        const reasoning = part as { state?: string; text?: string };
+        if (reasoning.state === "streaming") return "r:streaming";
+        return `r:${reasoning.state ?? "done"}:${reasoning.text?.length ?? 0}`;
+      }
+      if (isToolPartType(part.type)) {
+        const toolPart = part as ToolLikePart;
+        return `tool:${toolPart.toolCallId ?? ""}:${toolPart.state ?? ""}:${toolPart.output != null ? 1 : 0}`;
+      }
+      return part.type;
+    }).join(",");
+    return `${message.id}:${parts}`;
+  }).join("|");
 }
 
 export { CONDUCTOR_UI_ONLY_TOOLS, SUPERSEDED_TOOL_ERROR };

@@ -1,0 +1,34 @@
+{
+  "name": "@tallei/composio-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "exports": {
+    "./types": "./dist/composio-tool-types.js",
+    "./types.js": "./dist/composio-tool-types.js",
+    "./normalize": "./dist/composio-tool-normalize.js",
+    "./normalize.js": "./dist/composio-tool-normalize.js",
+    "./contract-types": "./dist/contract-types.js",
+    "./contract-types.js": "./dist/contract-types.js",
+    "./tool-schema": "./dist/tool-schema.js",
+    "./tool-schema.js": "./dist/tool-schema.js",
+    "./tool-planner-card": "./dist/tool-planner-card.js",
+    "./tool-planner-card.js": "./dist/tool-planner-card.js",
+    "./schema-contract": "./dist/composio-schema-contract.js",
+    "./schema-contract.js": "./dist/composio-schema-contract.js",
+    "./action-instructions": "./dist/composio-action-instructions.js",
+    "./action-instructions.js": "./dist/composio-action-instructions.js",
+    "./trigger-known-fields": "./dist/trigger-known-fields.js",
+    "./trigger-known-fields.js": "./dist/trigger-known-fields.js"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "zod": "^3.24.2"
+  }
+}

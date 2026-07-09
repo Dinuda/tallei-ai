@@ -4,7 +4,7 @@ import type { UIMessage } from "ai";
 import { History } from "lucide-react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -13,7 +13,6 @@ import {
 } from "@/components/ai-elements/interactive-prompt-menu";
 import {
   PromptInput,
-  PromptInputFooter,
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
@@ -22,6 +21,7 @@ import { BuilderConnectorPrompt } from "@/components/conductor/builder-connector
 import { BuilderOutcomeBriefPrompt } from "@/components/conductor/builder-outcome-brief-prompt";
 import { ConductorBuilderChat } from "@/components/conductor/conductor-builder-chat";
 import { ConductorSpecSheet, type LoopEventTriggerStatus } from "@/components/conductor/conductor-spec-sheet";
+import { ConductorUsageIndicator } from "@/components/conductor/conductor-usage-indicator";
 import { LoopSuggestionCards } from "@/components/conductor/loop-suggestion-cards";
 import type {
   ChatStatus,
@@ -34,6 +34,11 @@ import {
   validateConductorComposerMessage,
 } from "@/components/conductor/conductor-shared";
 import type { ConductorPromptSuggestion } from "@/lib/conductor-prompt-suggestions";
+import type { ConductorTranscriptError } from "@/lib/conductor-transcript-error";
+import {
+  emptyBuilderLiveUsage,
+  type BuilderLiveUsage,
+} from "@/lib/loop-builder-usage";
 
 export type ConductorBuilderLayoutProps = {
   loopId?: string;
@@ -64,7 +69,64 @@ export type ConductorBuilderLayoutProps = {
   composerDisabled?: boolean;
   sendBlocked?: boolean;
   pendingReplyOptionsCallId?: string | null;
+  chatUsage?: BuilderLiveUsage;
+  transcriptError?: ConductorTranscriptError | null;
 };
+
+function ComposerFooterActions({
+  loopId,
+  loopName,
+  spec,
+  missingSlots,
+  status,
+  compiledPlanId,
+  eventTrigger,
+  readyToCompile,
+  onRun,
+  chatUsage,
+  trailing,
+}: {
+  loopId?: string;
+  loopName?: string;
+  spec: Record<string, unknown> | null;
+  missingSlots: string[];
+  status: string;
+  compiledPlanId: string | null;
+  eventTrigger?: LoopEventTriggerStatus | null;
+  readyToCompile: boolean;
+  onRun?: () => void;
+  chatUsage: BuilderLiveUsage;
+  trailing?: ReactNode;
+}) {
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-2 border-t border-[var(--cb-border-light,#e5e7eb)] px-4 py-2">
+      <div className="flex items-center gap-2">
+        <ConductorSpecSheet
+          compiledPlanId={compiledPlanId}
+          eventTrigger={eventTrigger}
+          loopId={loopId}
+          loopName={loopName}
+          missingSlots={missingSlots}
+          onRun={onRun}
+          readyToCompile={readyToCompile}
+          spec={spec}
+          status={status}
+        />
+        <ConductorUsageIndicator usage={chatUsage} />
+        {loopId ? (
+          <Link
+            className="conductor-builder-page__spec-trigger"
+            href={`/dashboard/loops/${loopId}/runs`}
+          >
+            <History className="size-3.5" />
+            <span>Runs</span>
+          </Link>
+        ) : null}
+      </div>
+      {trailing ? <div className="flex items-center">{trailing}</div> : null}
+    </div>
+  );
+}
 
 export function ConductorBuilderLayout({
   loopId,
@@ -95,6 +157,8 @@ export function ConductorBuilderLayout({
   composerDisabled = false,
   sendBlocked = false,
   pendingReplyOptionsCallId = null,
+  chatUsage = emptyBuilderLiveUsage(),
+  transcriptError = null,
 }: ConductorBuilderLayoutProps) {
   const pendingInteractivePromptCallIds = useMemo(
     () => new Set(pendingQuestions.map((prompt) => prompt.toolCallId)),
@@ -138,6 +202,10 @@ export function ConductorBuilderLayout({
     () => (promptSuggestions[0] ? [promptSuggestions[0].id] : []),
     [promptSuggestions],
   );
+
+  const showComposerSubmit = !pendingOutcomeBrief
+    && pendingQuestions.length === 0
+    && !(composerInteractiveReady && showPromptSuggestions);
 
   const chatErrorToastShownRef = useRef(false);
 
@@ -193,17 +261,21 @@ export function ConductorBuilderLayout({
             chatStatus={chatStatus}
             emptyState={emptyState}
             messages={messages}
+            onRetry={onRetry}
             pendingInteractivePromptCallIds={pendingInteractivePromptCallIds}
             pendingReplyOptionsCallId={pendingReplyOptionsCallId}
             spec={spec}
             showThinking={showTranscriptThinking}
             thinkingLabel={thinkingLabel}
+            pauseReasoningForUserInput={Boolean(pendingQuestions.length || pendingOutcomeBrief)}
+            transcriptError={transcriptError}
           />
         </div>
 
         <div className="conductor-builder-page__composer-wrap">
           <div className="conductor-builder-page__composer-inner">
-            <motion.div className="conductor-builder-page__composer-surface">
+            <motion.div className="conductor-builder-page__composer-surface flex flex-col">
+              <div className="min-h-0 flex-1">
               <AnimatePresence initial={false} mode="popLayout">
                 {pendingOutcomeBrief ? (
                   <motion.div
@@ -288,16 +360,6 @@ export function ConductorBuilderLayout({
                       role="status"
                     >
                       <TranscriptThinkingIndicator label={thinkingLabel} />
-                      {onStop && (chatStatus === "streaming" || chatStatus === "submitted") ? (
-                        <div className="absolute bottom-2 right-2 z-10">
-                          <PromptInputSubmit
-                            className="data-[conductor-submit]"
-                            data-conductor-submit
-                            onStop={onStop}
-                            status={chatStatus}
-                          />
-                        </div>
-                      ) : null}
                     </div>
                   </motion.div>
                 ) : (
@@ -310,54 +372,50 @@ export function ConductorBuilderLayout({
                   >
                     <div className="relative" data-conductor-prompt-input>
                       <PromptInput
-                        className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-12 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"
+                        className="[&_[data-slot=input-group]]:rounded-none [&_[data-slot=input-group]]:border-0 [&_[data-slot=input-group]]:bg-transparent [&_[data-slot=input-group]]:shadow-none [&_[data-slot=input-group]]:px-4 [&_[data-slot=input-group]]:pt-3 [&_[data-slot=input-group]]:pb-3 [&_[data-slot=input-group]]:min-h-[56px] [&_[data-slot=input-group]]:overflow-hidden [&_[data-slot=input-group]]:focus-within:!border-0 [&_[data-slot=input-group]]:!ring-0"
                         onSubmit={({ text }) => {
                           submitComposerText(text);
                         }}
                       >
                         <PromptInputTextarea
-                          className="min-h-0 pr-12 pb-2"
+                          className="min-h-0 pr-12"
                           onChange={(event) => setInput(event.currentTarget.value)}
-                          placeholder="What should this loop do? (e.g. Help with support tickets, Weekly team digest)"
+                          placeholder={
+                            messages.some((message) => message.role === "assistant")
+                              ? "Reply or ask to change something…"
+                              : "What should this loop do? (e.g. Help with support tickets, Weekly team digest)"
+                          }
                           value={input}
                         />
-
-                        <div className="absolute bottom-3 left-4 flex items-center gap-2">
-                          <ConductorSpecSheet
-                            compiledPlanId={compiledPlanId}
-                            eventTrigger={eventTrigger}
-                            loopId={loopId}
-                            loopName={loopName}
-                            missingSlots={missingSlots}
-                            onRun={onRun}
-                            readyToCompile={readyToCompile}
-                            spec={spec}
-                            status={status}
-                          />
-                          {loopId ? (
-                            <Link
-                              className="conductor-builder-page__spec-trigger"
-                              href={`/dashboard/loops/${loopId}/runs`}
-                            >
-                              <History className="size-3.5" />
-                              <span>Runs</span>
-                            </Link>
-                          ) : null}
-                        </div>
-
-                        <PromptInputFooter className="absolute bottom-2 right-2 z-10 w-auto p-0">
-                          <PromptInputSubmit
-                            className="data-[conductor-submit]"
-                            data-conductor-submit
-                            onStop={onStop}
-                            status={chatStatus}
-                          />
-                        </PromptInputFooter>
                       </PromptInput>
                     </div>
                   </motion.div>
                 )}
               </AnimatePresence>
+              </div>
+              <ComposerFooterActions
+                chatUsage={chatUsage}
+                compiledPlanId={compiledPlanId}
+                eventTrigger={eventTrigger}
+                loopId={loopId}
+                loopName={loopName}
+                missingSlots={missingSlots}
+                onRun={onRun}
+                readyToCompile={readyToCompile}
+                spec={spec}
+                status={status}
+                trailing={
+                  showComposerSubmit && onStop ? (
+                    <PromptInputSubmit
+                      className="data-[conductor-submit]"
+                      data-conductor-submit
+                      disabled={!showComposerBusy && !input.trim()}
+                      onStop={onStop}
+                      status={chatStatus}
+                    />
+                  ) : null
+                }
+              />
             </motion.div>
           </div>
         </div>

@@ -174,7 +174,8 @@ test("conductor builder renders interactive prompts without auto-selecting conne
   assert.match(shared, /operationKey/);
   assert.match(shared, /hasPriorTerminalExecutionForOperation/);
   assert.match(source, /addToolOutput/);
-  assert.match(source, /shouldAutoSendConductorChat/);
+  assert.match(source, /useConductorContinuation/);
+  assert.match(source, /parseContinuationIntent/);
   assert.match(source, /findPendingInteractivePrompts/);
   assert.match(source, /pendingQuestions/);
   assert.match(layout, /const activePendingQuestion = pendingQuestions\[0\] \?\? null/);

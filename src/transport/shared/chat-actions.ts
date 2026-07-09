@@ -27,7 +27,7 @@ import {
 import type { OpenAiFileRef } from "../http/schemas/uploaded-files.js";
 import { confidenceTier } from "../../infrastructure/recall/scoring-utils.js";
 import type { ConflictHint } from "../../infrastructure/recall/scoring-utils.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 import { runAsyncSafe } from "../../shared/async-safe.js";
 import { config } from "../../config/index.js";
 import { setRequestTimingField } from "../../observability/request-timing.js";
@@ -998,9 +998,10 @@ export function parsePrepareResponseIntent(raw: string): PrepareResponseIntent |
 }
 
 export async function classifyPrepareResponseIntent(input: PrepareResponseActionInput): Promise<PrepareResponseIntent> {
-  const response = await aiProviderRegistry.chat({
+  const response = await modelGateway.chat({
+    purpose: "chat",
     model: config.intentClassifierModel,
-    responseFormat: "json_object",
+    responseFormat: "json",
     temperature: 0,
     maxTokens: 500,
     messages: [
@@ -1015,7 +1016,7 @@ export async function classifyPrepareResponseIntent(input: PrepareResponseAction
       },
     ],
   });
-  const parsed = parsePrepareResponseIntent(response.text.trim());
+  const parsed = parsePrepareResponseIntent(response.text?.trim() ?? "");
   if (!parsed) throw new Error("Failed to parse prepare_response intent JSON");
   return parsed;
 }

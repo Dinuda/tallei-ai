@@ -1,4 +1,5 @@
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
+import type { AppModelRequest } from "../../model/types.js";
 import { DEBATE_SYSTEM_PROMPT } from "./prompts.js";
 import { compactSnapshotForAi, normalizeProposal, readJsonObject, validateProposal } from "./proposal-utils.js";
 import type { AdversaryResult, CleanupAiUsage, CleanupProposalInput, CleanupSnapshot, DebateResult } from "./types.js";
@@ -19,11 +20,12 @@ export class CleanupDebateUseCase {
       };
     }
 
-    const request = {
-      model: aiProviderRegistry.chatModelName(),
+    const request: AppModelRequest = {
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       temperature: 0,
       maxTokens: 1500,
-      responseFormat: "json_object",
+      responseFormat: "json",
       messages: [
         { role: "system", content: DEBATE_SYSTEM_PROMPT },
         {
@@ -36,12 +38,12 @@ export class CleanupDebateUseCase {
           }),
         },
       ],
-    } as const;
-    const response = await aiProviderRegistry.chat(request);
+    };
+    const response = await modelGateway.chat(request);
     const usage = emptyCleanupAiUsage();
     recordCleanupAiUsage(usage, request, response);
 
-    const raw = readJsonObject(response.text);
+    const raw = readJsonObject(response.text ?? "");
     const finalProposal = normalizeProposal(raw.finalProposal) ?? input.proposal;
     const safeFinalProposal = validateProposal(finalProposal, input.snapshot) === null
       ? finalProposal

@@ -1,4 +1,5 @@
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
+import type { AppModelRequest } from "../../model/types.js";
 import { CONSOLIDATOR_SYSTEM_PROMPT } from "./prompts.js";
 import { compactSnapshotForAi, findCandidate, normalizeProposal, readJsonObject, validateProposal } from "./proposal-utils.js";
 import type { CleanupAiUsage, CleanupProposalInput, CleanupSnapshot } from "./types.js";
@@ -105,11 +106,12 @@ export class CleanupConsolidatorUseCase {
 
     const batchResults = await Promise.all(subBatches.map(async (batchMemories, batchIdx) => {
       const sub = subSnapshot(snapshot, batchMemories);
-      const request = {
-        model: aiProviderRegistry.chatModelName(),
+      const request: AppModelRequest = {
+        purpose: "chat",
+        model: modelGateway.chatModelName(),
         temperature: 0,
         maxTokens: 900,
-        responseFormat: "json_object",
+        responseFormat: "json",
         messages: [
           { role: "system", content: CONSOLIDATOR_SYSTEM_PROMPT },
           {
@@ -120,11 +122,11 @@ export class CleanupConsolidatorUseCase {
             }),
           },
         ],
-      } as const;
-      const response = await aiProviderRegistry.chat(request);
+      };
+      const response = await modelGateway.chat(request);
       const callUsage = emptyCleanupAiUsage();
       recordCleanupAiUsage(callUsage, request, response);
-      const raw = readJsonObject(response.text);
+      const raw = readJsonObject(response.text ?? "");
       const rawProposals = Array.isArray(raw.proposals) ? raw.proposals : [];
       return { raw, rawProposals, usage: callUsage };
     }));

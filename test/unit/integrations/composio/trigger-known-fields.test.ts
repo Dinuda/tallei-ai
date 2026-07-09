@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   extractTriggerKnownFields,
   formatTriggerKnownFields,
-} from "../../../../src/integrations/composio/trigger-known-fields.js";
+} from "@tallei/composio-tools/trigger-known-fields.js";
 
 test("extractTriggerKnownFields pulls message ids from nested payload", () => {
   const fields = extractTriggerKnownFields({

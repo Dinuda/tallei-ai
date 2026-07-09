@@ -5,7 +5,7 @@ import { Handle, MiniMap } from "@xyflow/react";
 import type { DynamicToolUIPart } from "ai";
 import { AlertCircle, ChevronDown, UserRound } from "lucide-react";
 import { useSession } from "next-auth/react";
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
 import { Canvas } from "@/components/ai-elements/canvas";
 import { Controls } from "@/components/ai-elements/controls";
@@ -17,9 +17,9 @@ import {
   NodeTitle,
 } from "@/components/ai-elements/node";
 import { Shimmer } from "@/components/ai-elements/shimmer";
-import { ToolOutput } from "@/components/ai-elements/tool";
 import { AgentTeamAvatar, rosterAvatarShellClassName } from "@/components/conductor/agent-team-avatar";
-import { OutcomeBriefFitView } from "@/components/conductor/outcome-brief-fit-view";
+import { TestRunLabHeader } from "@/components/conductor/test-run-lab-header";
+import { TestRunCanvasFocus } from "@/components/conductor/test-run-canvas-focus";
 import type { PresentAgentTeamOutput } from "@/components/conductor/conductor-shared";
 import {
   buildTestRunCanvasModel,
@@ -292,7 +292,7 @@ export function TestRunStoryboardCard({
       playback.resolvedFromOutput,
     ],
   );
-  const { nodes, edges } = useMemo(
+  const { nodes: baseNodes, edges } = useMemo(
     () => buildTestRunCanvasModel(viewModel.beats, {
       image: session?.user?.image,
       name: session?.user?.name,
@@ -305,10 +305,27 @@ export function TestRunStoryboardCard({
     () => ({ expandedBeatId, setExpandedBeatId }),
     [expandedBeatId],
   );
-  const selectedBeat = selectedId ? nodes.find((node) => node.id === selectedId)?.data : null;
   const isRunning = viewModel.footer === "running"
     || toolState === "input-streaming"
     || toolState === "input-available";
+  const focusBeatId = isRunning
+    ? viewModel.beats[playback.activeBeatIndex]?.id ?? null
+    : null;
+
+  useEffect(() => {
+    if (isRunning && focusBeatId) {
+      setSelectedId(focusBeatId);
+    }
+  }, [focusBeatId, isRunning]);
+
+  const nodes = useMemo(
+    () => baseNodes.map((node) => ({
+      ...node,
+      selected: node.id === (isRunning && focusBeatId ? focusBeatId : selectedId),
+    })),
+    [baseNodes, focusBeatId, isRunning, selectedId],
+  );
+  const selectedBeat = selectedId ? nodes.find((node) => node.id === selectedId)?.data : null;
 
   return (
     <section
@@ -317,9 +334,15 @@ export function TestRunStoryboardCard({
       className="overflow-hidden border border-[var(--ed-border)] bg-white"
       data-transcript-block
     >
+      <TestRunLabHeader
+        errors={viewModel.errors}
+        footer={viewModel.footer}
+        isRunning={isRunning}
+        output={output}
+      />
+
       <div className="border-b border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-4 py-4 sm:px-5">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--ed-text-4)]">Test run</p>
-        <h3 className="mt-1 text-base font-semibold leading-6 text-[var(--ed-text)]">{viewModel.title}</h3>
+        <h3 className="text-base font-semibold leading-6 text-[var(--ed-text)]">{viewModel.title}</h3>
       </div>
 
       <div
@@ -348,7 +371,11 @@ export function TestRunStoryboardCard({
             proOptions={{ hideAttribution: true }}
             zoomOnDoubleClick
           >
-            <OutcomeBriefFitView stageCount={viewModel.beats.length} />
+            <TestRunCanvasFocus
+              beatCount={viewModel.beats.length}
+              focusBeatId={focusBeatId}
+              isRunning={isRunning}
+            />
             <Controls className="rounded-none [&>button]:rounded-none" position="bottom-right" showInteractive={false} />
             {viewModel.beats.length > 6 ? <MiniMap className="rounded-none" pannable zoomable /> : null}
           </Canvas>
@@ -372,40 +399,6 @@ export function TestRunStoryboardCard({
           </p>
         )}
       </div>
-
-      {output ? (
-        <Collapsible>
-          <CollapsibleTrigger className="group flex w-full items-center justify-end gap-1 border-t border-[var(--ed-border-light)] px-4 py-2 text-[11px] font-medium text-[var(--ed-text-2)] underline-offset-2 hover:underline sm:px-5">
-            Technical details
-            <ChevronDown className="size-3 transition-transform group-data-[state=open]:rotate-180" aria-hidden />
-          </CollapsibleTrigger>
-          <CollapsibleContent className="border-t border-[var(--ed-border-light)] px-4 py-3 sm:px-5">
-            <ToolOutput errorText={undefined} output={output} />
-          </CollapsibleContent>
-        </Collapsible>
-      ) : null}
-
-      {isRunning || viewModel.footer === "passed" || viewModel.footer === "failed" ? (
-        <footer className="border-t border-[var(--ed-border-light)] px-4 py-2 sm:px-5">
-          {viewModel.footer === "failed" && viewModel.errors?.length ? (
-            <ul className="mb-2 space-y-1 text-left text-[11px] leading-5 text-red-800">
-              {viewModel.errors.map((error) => (
-                <li key={error} className="flex gap-2">
-                  <AlertCircle className="mt-0.5 size-3 shrink-0" aria-hidden />
-                  <span>{error}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <p className="text-right text-[11px] font-medium text-[var(--ed-text-2)]">
-            {isRunning
-              ? "Running test…"
-              : viewModel.footer === "passed"
-                ? "Test passed"
-                : "Test failed"}
-          </p>
-        </footer>
-      ) : null}
     </section>
   );
 }

@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   findActivationReplyOption,
   isActivationConfirmationReply,
-} from "../../../shared/conductor-activation-confirm.js";
+} from "@tallei/shared/conductor-activation-confirm.js";
 
 test("isActivationConfirmationReply accepts presentReplyOptions selectedOptionId and message", () => {
   assert.equal(isActivationConfirmationReply(

@@ -8,7 +8,7 @@ Tallei runs workspace-scoped loops through a generic `loopRunWorkflow` when `TAL
 
 - PostgreSQL with loop engine tables (`TALLEI_DB__AUTO_MIGRATE_ON_BOOT=true` applies `loop-engine-schema`)
 - Composio configured for workspace-scoped connectors
-- LLM provider (e.g. OpenCode):
+- LLM provider (OpenCode or OpenAI via `modelGateway.resolveStreaming()`):
 
 ```env
 TALLEI_LLM__LOCAL_MODEL_MODE=false
@@ -16,7 +16,13 @@ TALLEI_LLM__PROVIDER=opencode
 TALLEI_LLM__OPENCODE_BASE_URL=https://opencode.ai/zen/v1
 TALLEI_LLM__OPENCODE_MODEL=big-pickle
 TALLEI_CONDUCTOR__MODEL=big-pickle
-# legacy alias: TALLEI_LOOP_BUILDER__OPENAI_MODEL
+# OpenAI alternative:
+# TALLEI_LLM__PROVIDER=openai
+# TALLEI_LLM__OPENAI_API_KEY=sk-...
+# TALLEI_CONDUCTOR__MODEL=gpt-5-mini
+# TALLEI_CONDUCTOR__REASONING_EFFORT=high
+# TALLEI_PLANNER__REASONING_EFFORT=low
+# TALLEI_CONDUCTOR__MODEL=gpt-5-mini
 TALLEI_TEMPORAL__ENABLED=true
 TALLEI_TEMPORAL__ADDRESS=127.0.0.1:7233
 TALLEI_TEMPORAL__NAMESPACE=default

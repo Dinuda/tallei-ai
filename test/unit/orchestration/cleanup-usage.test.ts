@@ -2,18 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { emptyCleanupAiUsage, recordCleanupAiUsage } from "../../../src/orchestration/memory-cleanup/usage.js";
-import type { ChatCompletionRequest, ChatCompletionResponse } from "../../../src/providers/ai/types.js";
+import type { AppModelRequest, AppModelResponse } from "../../../src/model/types.js";
 
-const request: ChatCompletionRequest = {
+const request: Pick<AppModelRequest, "messages" | "model"> = {
+  model: "gpt-5-nano",
   messages: [{ role: "user", content: "hello" }],
 };
 
 test("recordCleanupAiUsage prices versioned gpt-5-nano models", () => {
   const usage = emptyCleanupAiUsage();
-  const response: ChatCompletionResponse = {
+  const response: AppModelResponse = {
     text: "world",
     model: "gpt-5-nano-2025-08-07",
     finishReason: "stop",
+    provider: "openai",
     usage: {
       promptTokens: 1_000_000,
       completionTokens: 1_000_000,

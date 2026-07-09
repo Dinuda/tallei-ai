@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getTriggerFieldNamesForFeasibility } from "../../../src/integrations/composio/trigger-known-fields.js";
-import { evaluateActionFeasibility } from "../../../src/loops/composio-schema-contract.js";
+import { getTriggerFieldNamesForFeasibility } from "@tallei/composio-tools/trigger-known-fields.js";
+import { evaluateActionFeasibility } from "@tallei/composio-tools/schema-contract.js";
 import {
   prepareBindingResolution,
   type BindingResolutionInput,

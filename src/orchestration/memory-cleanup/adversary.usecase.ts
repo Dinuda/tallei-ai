@@ -1,4 +1,5 @@
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
+import type { AppModelRequest } from "../../model/types.js";
 import { ADVERSARY_SYSTEM_PROMPT } from "./prompts.js";
 import { compactSnapshotForAi, normalizeRiskLevel, readJsonObject } from "./proposal-utils.js";
 import type { AdversaryResult, CleanupAiUsage, CleanupProposalInput, CleanupSnapshot } from "./types.js";
@@ -55,11 +56,12 @@ export class CleanupAdversaryUseCase {
       };
     }
 
-    const request = {
-      model: aiProviderRegistry.chatModelName(),
+    const request: AppModelRequest = {
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       temperature: 0,
       maxTokens: 600,
-      responseFormat: "json_object",
+      responseFormat: "json",
       messages: [
         { role: "system", content: ADVERSARY_SYSTEM_PROMPT },
         {
@@ -71,12 +73,12 @@ export class CleanupAdversaryUseCase {
           }),
         },
       ],
-    } as const;
-    const response = await aiProviderRegistry.chat(request);
+    };
+    const response = await modelGateway.chat(request);
     const usage = emptyCleanupAiUsage();
     recordCleanupAiUsage(usage, request, response);
 
-    const raw = readJsonObject(response.text);
+    const raw = readJsonObject(response.text ?? "");
     const recommendedAction = raw.recommendedAction === "approve" || raw.recommendedAction === "modify" || raw.recommendedAction === "reject"
       ? raw.recommendedAction
       : deterministic.recommendedAction;

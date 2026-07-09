@@ -314,6 +314,8 @@ export type BindingDiagnosticCode =
   | "AMBIGUOUS_ACTION_BINDING"
   | "AMBIGUOUS_TRIGGER"
   | "INVALID_TRIGGER_SELECTION"
+  | "INVALID_BINDING_SELECTION"
+  | "NO_FEASIBLE_ACTION"
   | "CONNECTOR_NOT_CONNECTED"
   | "UNSUPPORTED_TRIGGER_CONFIG"
   | "INVALID_TRIGGER_CONFIG"
@@ -331,7 +333,7 @@ export type BindingDiagnostic = {
   expected: string;
   action: string;
   options?: Array<{ label: string; value: string; description: string }>;
-  technical: Record<string, string | number | boolean>;
+  technical: Record<string, string | number | boolean | string[]>;
 };
 
 export type BindingDerivationResult = {

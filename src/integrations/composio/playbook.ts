@@ -2,7 +2,7 @@ import type { AuthContext } from "../../domain/auth/index.js";
 import { normalizeToolkitSlug } from "./auth.js";
 import { isComposioConfigured } from "./client.js";
 import type { ConnectorPlaybook, ToolBinding, LoopIntent, ToolPlannerCard } from "../../loops/spec.js";
-import { buildPlannerCardFromSchemas } from "../../loops/tool-planner-card.js";
+import { buildPlannerCardFromSchemas } from "@tallei/composio-tools/tool-planner-card.js";
 import { getAllTools } from "./tools.js";
 
 export type PlaybookToolEntry = {

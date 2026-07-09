@@ -1,0 +1,19 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - dashboard/Dockerfile
+      - --build-arg
+      - API_PROXY_TARGET=${_API_PROXY_TARGET}
+      - --build-arg
+      - BACKEND_URL=${_BACKEND_URL}
+      - -t
+      - ${_IMAGE_URI}
+      - .
+images:
+  - ${_IMAGE_URI}
+substitutions:
+  _API_PROXY_TARGET: https://api.tallei.com
+  _BACKEND_URL: https://api.tallei.com
+  _IMAGE_URI: ""

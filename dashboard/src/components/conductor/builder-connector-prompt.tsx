@@ -1,7 +1,7 @@
 "use client";
 
 import { LayoutGrid, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   InteractivePromptMenu,
@@ -76,6 +76,26 @@ export function BuilderConnectorPrompt({
     onSubmit(answer);
   }, [onSubmit]);
 
+  const pendingAnswerRef = useRef(pendingAnswer);
+  pendingAnswerRef.current = pendingAnswer;
+
+  const pendingSession = useMemo(() => ({
+    buildPayload: (toolkit: string, connectionRequestId: string) => ({
+      answer: pendingAnswerRef.current,
+      toolkit,
+      connectionRequestId,
+    }),
+    canRestore: (payload: { answer?: InteractivePromptAnswer; toolkit?: string }) => {
+      if (!payload.answer || !payload.toolkit) return false;
+      return options.some((option) => option.value === payload.toolkit);
+    },
+  }), [options]);
+
+  const handleConnected = useCallback(() => {
+    const answer = pendingAnswerRef.current;
+    if (answer) completeSelection(answer);
+  }, [completeSelection]);
+
   const {
     busy,
     statusLabel,
@@ -85,20 +105,8 @@ export function BuilderConnectorPrompt({
     reset,
   } = useConnectorAuthorization({
     toolkit: pendingToolkit,
-    onConnected: () => {
-      if (pendingAnswer) completeSelection(pendingAnswer);
-    },
-    pendingSession: {
-      buildPayload: (toolkit, connectionRequestId) => ({
-        answer: pendingAnswer,
-        toolkit,
-        connectionRequestId,
-      }),
-      canRestore: (payload) => {
-        if (!payload.answer || !payload.toolkit) return false;
-        return options.some((option) => option.value === payload.toolkit);
-      },
-    },
+    onConnected: handleConnected,
+    pendingSession,
   });
 
   const handleSubmit = useCallback((answer: InteractivePromptAnswer) => {

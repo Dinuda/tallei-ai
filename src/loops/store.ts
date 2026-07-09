@@ -913,6 +913,12 @@ export async function getLoopBuildMeta(
   loopId: string,
 ): Promise<import("./loop-chat.js").LoopBuildMeta> {
   const projection = await getLoopBuildProjection(auth, loopId);
+  return buildLoopBuildMetaFromProjection(projection);
+}
+
+export function buildLoopBuildMetaFromProjection(
+  projection: LoopBuildProjection,
+): import("./loop-chat.js").LoopBuildMeta {
   const compileArtifact = projection.state?.artifacts.compile?.artifact as { compiledPlanId?: unknown } | undefined;
   return {
     compiledPlanId: typeof compileArtifact?.compiledPlanId === "string"

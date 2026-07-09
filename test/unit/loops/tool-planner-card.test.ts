@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildPlannerCardFromSchemas } from "../../../src/loops/tool-planner-card.js";
+import { buildPlannerCardFromSchemas } from "@tallei/composio-tools/tool-planner-card.js";
 
 test("buildPlannerCardFromSchemas uses description as summary", () => {
   const card = buildPlannerCardFromSchemas({

@@ -1,5 +1,5 @@
 import { RUNTIME_EMAIL_MESSAGE_LIMIT } from "./tool-result-compact.js";
-import { summarizeInputSchema } from "./tool-schema.js";
+import { summarizeInputSchema } from "@tallei/composio-tools/tool-schema.js";
 
 const LIMIT_FIELD_MARKERS = ["maxresults", "limit", "pagesize"];
 const PAYLOAD_FIELD_MARKERS = ["includepayload", "includebody", "fullpayload"];

@@ -10,7 +10,7 @@ import {
   isActionableConductorPhase,
   isBuildIncomplete,
   isRecoverableConductorExecution,
-} from "../../../shared/conductor-turn-budget.js";
+} from "@tallei/shared/conductor-turn-budget.js";
 
 test("conductorStepLimitForPhase raises bindings budget above legacy cap", () => {
   assert.equal(conductorStepLimitForPhase("bindings"), 12);

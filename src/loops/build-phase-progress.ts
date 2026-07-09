@@ -1,6 +1,7 @@
 import type { UIMessage } from "ai";
 
-import { isActivationConfirmationReply } from "../../shared/conductor-activation-confirm.js";
+import { isActivationConfirmationReply } from "@tallei/shared/conductor-activation-confirm.js";
+import type { ConductorToolName } from "@tallei/conductor-tools/tool-names.js";
 import { derivePendingUiToolFromEvents, type LoopBuildEvent, type PendingUiToolCall } from "./build-events.js";
 import {
   bindingEvidenceFromMessages,
@@ -17,27 +18,11 @@ import {
   testArtifactSchema,
 } from "./build-state.js";
 import type { IntentAnalysis } from "./intent-discovery.js";
-import { conductorStepLimitForPhase } from "./conductor-turn-budget.js";
+import { conductorStepLimitForPhase } from "@tallei/shared/conductor-turn-budget.js";
 
 export type BuildEvidenceSource = UIMessage[] | LoopBuildEvent[];
 
-export type ConductorToolName =
-  | "analyzeIntent"
-  | "askQuestion"
-  | "discoverConnectorsForBlueprint"
-  | "pickConnectorApp"
-  | "listWorkspaceConnectors"
-  | "connectToolkit"
-  | "listTriggers"
-  | "listActions"
-  | "discoverBindings"
-  | "resolveBindings"
-  | "presentAgentTeam"
-  | "confirmOutcomeBrief"
-  | "compileLoop"
-  | "testRunLoop"
-  | "presentReplyOptions"
-  | "activateLoop";
+export type { ConductorToolName };
 
 export type BuildPhaseProgressStatus = "pending" | "in_progress" | "complete" | "waiting";
 
@@ -604,7 +589,7 @@ export function deriveActivationProgress(
   if (context.loopStatus === "active") {
     return progress(phase, {
       status: "complete",
-      instruction: "Loop activation is complete.",
+      instruction: "Activation is complete. The UI shows the active automation summary. Do not recap the workflow in text.",
       terminal: true,
       allowedTools: [],
       reason: "activation_complete",
@@ -638,7 +623,7 @@ export function deriveActivationProgress(
   if (activationSucceeded) {
     return progress(phase, {
       status: "complete",
-      instruction: "Loop activation is complete.",
+      instruction: "Activation is complete. The UI shows the active automation summary. Do not recap the workflow in text.",
       terminal: true,
       allowedTools: [],
       reason: "activation_complete",

@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { config } from "../../config/index.js";
 import {
   createPooledLlmFetch,
+  getNvidiaApiKeyPool,
   getOpenAiApiKeyPool,
   getOpenCodeApiKeyPool,
 } from "../../services/llm/api-key-pool.js";
@@ -16,11 +17,13 @@ import {
 import { createLogger } from "../../observability/index.js";
 import { CircuitOpenError } from "../../shared/errors/provider-errors.js";
 
+import { modelRegistry } from "../../model/registry.js";
 import type { AiProvider } from "./ai-provider.js";
 import { isRetriableProviderError } from "./errors.js";
 import { GoogleGenAI } from "@google/genai";
 import { GoogleProvider } from "./google-provider.js";
 import { OllamaProvider } from "./ollama-provider.js";
+import { NvidiaProvider } from "./nvidia-provider.js";
 import { OpenCodeProvider } from "./opencode-provider.js";
 import { OpenAiProvider } from "./openai-provider.js";
 import type {
@@ -84,6 +87,12 @@ function requireOpenCodeKeyIfNeeded(providerNames: readonly AiProviderName[]): v
   }
 }
 
+function requireNvidiaKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("nvidia") && getNvidiaApiKeyPool().size === 0) {
+    throw new Error("TALLEI_LLM__NVIDIA_API_KEY (or NIM_API_KEY) is required when TALLEI_LLM__PROVIDER=nvidia");
+  }
+}
+
 export class ProviderRegistry {
   private readonly providers = new Map<AiProviderName, AiProvider>();
   private readonly chatPolicies = new Map<AiProviderName, Policy<ChatCompletionResponse>>();
@@ -103,15 +112,11 @@ export class ProviderRegistry {
   }
 
   chatModelName(): string {
-    if (this.chatProviderName === "ollama") return config.ollamaModel;
-    if (this.chatProviderName === "opencode") return config.opencodeModel;
-    if (this.chatProviderName === "google") return config.googleModel;
-    return config.openaiModel;
+    return modelRegistry.resolveModelRoute({ purpose: "chat" }).modelId;
   }
 
   embeddingModelName(): string {
-    if (this.embeddingProviderName === "google") return config.googleEmbeddingModel;
-    return config.embeddingModel;
+    return modelRegistry.resolveModelRoute({ purpose: "embed" }).modelId;
   }
 
   async chat(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
@@ -157,6 +162,7 @@ export class ProviderRegistry {
     const requiredNames: AiProviderName[] = [options.chatProviderName, options.embeddingProviderName];
     requireOpenAiKeyIfNeeded(requiredNames);
     requireOpenCodeKeyIfNeeded(requiredNames);
+    requireNvidiaKeyIfNeeded(requiredNames);
 
     if (requiredNames.includes("openai")) {
       const openAiPool = getOpenAiApiKeyPool();
@@ -186,6 +192,19 @@ export class ProviderRegistry {
         defaultChatModel: config.opencodeModel,
       });
       this.providers.set(openCodeProvider.name, openCodeProvider);
+    }
+
+    if (requiredNames.includes("nvidia")) {
+      const nvidiaPool = getNvidiaApiKeyPool();
+      const nvidiaProvider = new NvidiaProvider({
+        client: new OpenAI({
+          baseURL: config.nvidiaBaseUrl,
+          apiKey: nvidiaPool.pickKey(),
+          fetch: createPooledLlmFetch(nvidiaPool, "nvidia"),
+        }),
+        defaultChatModel: config.nvidiaModel,
+      });
+      this.providers.set(nvidiaProvider.name, nvidiaProvider);
     }
 
     if (requiredNames.includes("ollama")) {
@@ -244,4 +263,4 @@ export class ProviderRegistry {
   }
 }
 
-export const aiProviderRegistry = new ProviderRegistry();
+export const providerRegistry = new ProviderRegistry();

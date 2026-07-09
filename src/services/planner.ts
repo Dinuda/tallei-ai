@@ -1,7 +1,6 @@
-import OpenAI from "openai";
-
 import { config } from "../config/index.js";
-import { createLoopChatOpenAiSdk } from "./llm/loop-chat-client.js";
+import { modelGateway } from "../model/gateway.js";
+import type { AppModelMessage } from "../model/types.js";
 
 export type PlannerMode = "interview" | "finalize";
 
@@ -316,15 +315,6 @@ const providerRoleJsonSchema = {
   },
 } as const;
 
-let plannerClient: OpenAI | null = null;
-
-function getPlannerClient(userId?: string): OpenAI {
-  if (!userId && plannerClient) return plannerClient;
-  const client = createLoopChatOpenAiSdk({ userId });
-  if (!userId) plannerClient = client;
-  return client;
-}
-
 function normalizeWebSearches(value: unknown): WebSearchResult[] {
   if (!Array.isArray(value)) return [];
   const results: WebSearchResult[] = [];
@@ -454,23 +444,18 @@ function extractResponseText(response: any): string {
   return chunks.join("\n").trim();
 }
 
-async function callPlanner(params: {
+function buildPlannerMessages(params: {
   mode: PlannerMode;
   goal: string;
   transcript: PlannerTurn[];
   webSearchBudget: number;
-}): Promise<any> {
-  const timeoutMs = config.plannerRequestTimeoutMs;
-  const controller = timeoutMs > 0 ? new AbortController() : null;
-  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-
-  const schema = params.mode === "interview" ? interviewJsonSchema : finalizeJsonSchema;
+}): AppModelMessage[] {
   const modeInstruction =
     params.mode === "interview"
       ? "Ask exactly one next question unless the plan is fully ready."
       : "Finalize and return the completed plan now.";
 
-  const input: Array<Record<string, unknown>> = [
+  return [
     {
       role: "system",
       content:
@@ -480,29 +465,40 @@ async function callPlanner(params: {
         "If budget is 0, do not rely on web_search_preview.",
     },
     ...params.transcript.map((turn) => ({
-      role: turn.role === "user" ? "user" : turn.role === "planner" ? "assistant" : "system",
+      role: turn.role === "user" ? "user" as const : turn.role === "planner" ? "assistant" as const : "system" as const,
       content: turn.content,
     })),
   ];
+}
+
+async function callPlanner(params: {
+  mode: PlannerMode;
+  goal: string;
+  transcript: PlannerTurn[];
+  webSearchBudget: number;
+}): Promise<unknown> {
+  const timeoutMs = config.plannerRequestTimeoutMs;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
+  const schema = params.mode === "interview" ? interviewJsonSchema : finalizeJsonSchema;
 
   try {
-    const client = getPlannerClient();
-    return await (client.responses as any).create(
+    const response = await modelGateway.structuredJsonSchema(
       {
+        purpose: "collab-planner",
         model: config.plannerModel,
-        input,
-        tools: params.webSearchBudget > 0 ? [{ type: "web_search_preview" }] : [],
-        text: {
-          format: {
-            type: "json_schema",
-            name: schema.name,
-            strict: true,
-            schema: schema.schema,
-          },
-        },
+        messages: buildPlannerMessages(params),
+        webSearchBudget: params.webSearchBudget,
+        signal: controller?.signal,
       },
-      ...(controller ? { signal: controller.signal } : {}),
+      {
+        name: schema.name,
+        strict: true,
+        schema: schema.schema as Record<string, unknown>,
+      },
     );
+    return response.raw ?? { output_text: response.text ?? "" };
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -512,7 +508,7 @@ async function callProviderRoleSuggestion(params: {
   title: string;
   brief?: string | null;
   comments?: string | null;
-}): Promise<any> {
+}): Promise<unknown> {
   const timeoutMs = config.plannerRequestTimeoutMs;
   const controller = timeoutMs > 0 ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -520,7 +516,7 @@ async function callProviderRoleSuggestion(params: {
   const brief = params.brief?.trim() ?? "";
   const comments = params.comments?.trim() ?? "";
 
-  const input: Array<Record<string, unknown>> = [
+  const messages: AppModelMessage[] = [
     {
       role: "system",
       content:
@@ -543,23 +539,21 @@ async function callProviderRoleSuggestion(params: {
   ];
 
   try {
-    const client = getPlannerClient();
-    return await (client.responses as any).create(
+    const response = await modelGateway.structuredJsonSchema(
       {
+        purpose: "collab-planner",
         model: config.plannerModel,
-        input,
-        tools: [],
-        text: {
-          format: {
-            type: "json_schema",
-            name: providerRoleJsonSchema.name,
-            strict: true,
-            schema: providerRoleJsonSchema.schema,
-          },
-        },
+        messages,
+        webSearchBudget: 0,
+        signal: controller?.signal,
       },
-      ...(controller ? { signal: controller.signal } : {}),
+      {
+        name: providerRoleJsonSchema.name,
+        strict: true,
+        schema: providerRoleJsonSchema.schema as Record<string, unknown>,
+      },
     );
+    return response.raw ?? { output_text: response.text ?? "" };
   } finally {
     if (timeout) clearTimeout(timeout);
   }

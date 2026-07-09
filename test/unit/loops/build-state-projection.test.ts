@@ -166,6 +166,8 @@ test("projectLoopBuild projects phase turn and consumed handoffs", () => {
   assert.deepEqual(projectConsumedHandoffIds(events), ["handoff-1"]);
   assert.equal(projectLatestPhaseTurn(events)?.stepsUsed, 6);
   assert.equal(projection.state?.buildPhase, "blueprint");
+  assert.equal(projection.continuationIntent?.action, "wait");
+  assert.equal(projection.continuationIntent?.trigger, "budget_exhausted");
 });
 
 test("projectLatestPhaseTurn preserves pending user-input metadata", () => {

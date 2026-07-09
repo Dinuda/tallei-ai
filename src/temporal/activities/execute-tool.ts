@@ -2,7 +2,7 @@ import { getConnectorProvider } from "../../integrations/connectors/index.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { ResolvedTool } from "../../loops/spec.js";
 import { clampComposioArgsForRuntime } from "../../loops/composio-runtime-args.js";
-import { filterArgsToSchemaProperties, validateToolArgsAgainstSchema } from "../../loops/tool-schema.js";
+import { filterArgsToSchemaProperties, validateToolArgsAgainstSchema } from "@tallei/composio-tools/tool-schema.js";
 import { compactEmailReadToolResult } from "../../loops/tool-result-compact.js";
 import { claimRunStep, completeClaimedRunStep, insertRunStep, updateLoopRun } from "../../loops/store.js";
 

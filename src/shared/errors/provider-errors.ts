@@ -1,6 +1,6 @@
 import { AppError } from "./base.js";
 
-export type ProviderName = "openai" | "ollama" | "google" | "opencode" | "qdrant" | "redis" | "unknown";
+export type ProviderName = "openai" | "ollama" | "google" | "opencode" | "nvidia" | "qdrant" | "redis" | "unknown";
 
 abstract class ProviderError extends AppError {
   abstract readonly kind:

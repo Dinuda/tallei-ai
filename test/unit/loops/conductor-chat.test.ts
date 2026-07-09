@@ -24,6 +24,68 @@ test("normalizeConductorChatMessages drops empty assistant placeholders", () => 
   );
 });
 
+test("normalizeConductorChatMessages preserves assistant usage metadata", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "text", text: "Done." }],
+    metadata: {
+      usage: {
+        promptTokens: 120,
+        completionTokens: 45,
+        estimatedCostUsd: 0.0003,
+      },
+    },
+  }] satisfies UIMessage[];
+
+  const normalized = normalizeConductorChatMessages(messages);
+  assert.deepEqual(normalized[0]?.metadata, messages[0]?.metadata);
+});
+
+test("normalizeConductorChatMessages drops assistant turns with only empty reasoning", () => {
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Build a loop" }] },
+    { id: "assistant-empty-reasoning", role: "assistant", parts: [{ type: "reasoning", text: "   " }] },
+    { id: "assistant-1", role: "assistant", parts: [{ type: "text", text: "Which trigger?" }] },
+  ] satisfies UIMessage[];
+
+  assert.deepEqual(
+    normalizeConductorChatMessages(messages).map((message) => message.id),
+    ["user-1", "assistant-1"],
+  );
+});
+
+test("prepareConductorChatMessagesForEventLog preserves reasoning encrypted content", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "reasoning",
+      text: "Planning connector setup",
+      providerOptions: { openai: { itemId: "rs_123", reasoningEncryptedContent: "enc" } },
+    }],
+  }] satisfies UIMessage[];
+
+  const sanitized = prepareConductorChatMessagesForEventLog(messages);
+  const reasoning = sanitized[0]?.parts[0] as {
+    providerOptions?: { openai?: { itemId?: string; reasoningEncryptedContent?: string } };
+  };
+  assert.equal(reasoning.providerOptions?.openai?.itemId, undefined);
+  assert.equal(reasoning.providerOptions?.openai?.reasoningEncryptedContent, "enc");
+});
+
+test("normalizeConductorChatMessages preserves non-empty reasoning summaries", () => {
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "reasoning", text: "Weighing trigger options" }],
+  }] satisfies UIMessage[];
+
+  const normalized = normalizeConductorChatMessages(messages);
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0]?.parts[0]?.type, "reasoning");
+});
+
 test("prepareConductorChatMessagesForEventLog strips provider replay ids", () => {
   const messages = [{
     id: "assistant-1",
@@ -235,4 +297,123 @@ test("repaired replay history converts without orphaned tool calls", async () =>
   const { messages: replay } = sanitizeConductorChatMessagesForModelReplay(messages);
   const modelMessages = await convertToModelMessages(replay);
   assert.equal(findOrphanedToolCallIdsFromModelMessages(modelMessages).length, 0);
+});
+
+test("ensureVisibleConductorAssistantTurn appends fallback text for hidden-tool-only turns", async () => {
+  const { ensureVisibleConductorAssistantTurn } = await import("../../../src/loops/conductor-chat.js");
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Summarize support tickets" }] },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        { type: "reasoning", text: "Planning trigger options" },
+        {
+          type: "tool-analyzeIntent",
+          toolCallId: "call-1",
+          state: "output-available",
+          output: { ok: true },
+        },
+      ],
+    },
+  ] satisfies UIMessage[];
+
+  const next = ensureVisibleConductorAssistantTurn(messages);
+  const textPart = next[1]?.parts.find((part) => part.type === "text");
+  assert.equal(textPart?.type, "text");
+  assert.match("text" in textPart! ? textPart.text : "", /need one answer to continue/i);
+});
+
+test("ensureVisibleConductorAssistantTurn keeps pending askQuestion turns without fallback text", async () => {
+  const { ensureVisibleConductorAssistantTurn } = await import("../../../src/loops/conductor-chat.js");
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Summarize support tickets" }] },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-analyzeIntent",
+          toolCallId: "call-1",
+          state: "output-available",
+          output: { ok: true },
+        },
+        {
+          type: "tool-askQuestion",
+          toolCallId: "call-2",
+          state: "input-available",
+          input: {
+            questionId: "trigger",
+            question: "How should this start?",
+            options: [
+              { id: "manual", label: "Manual", value: "manual" },
+              { id: "email", label: "Email", value: "email" },
+            ],
+          },
+        },
+      ],
+    },
+  ] satisfies UIMessage[];
+
+  const next = ensureVisibleConductorAssistantTurn(messages);
+  assert.equal(next[1]?.parts.some((part) => part.type === "text"), false);
+});
+
+test("prepareConductorChatMessagesForEventLog injects fallback for invisible assistant turns", () => {
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Summarize support tickets" }] },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-analyzeIntent",
+        toolCallId: "call-1",
+        state: "output-available",
+        output: { ok: true },
+      }],
+    },
+  ] satisfies UIMessage[];
+
+  const sanitized = prepareConductorChatMessagesForEventLog(messages);
+  const textPart = sanitized[1]?.parts.find((part) => part.type === "text");
+  assert.equal(textPart?.type, "text");
+  assert.match("text" in textPart! ? textPart.text : "", /need one answer to continue/i);
+});
+
+test("appendConductorStallRecoveryMessage adds retry guidance for blocked turns", async () => {
+  const { appendConductorStallRecoveryMessage } = await import("../../../src/loops/conductor-chat.js");
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Build a loop" }] },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{ type: "reasoning", text: "Still planning", state: "done" }],
+    },
+  ] satisfies UIMessage[];
+
+  const next = appendConductorStallRecoveryMessage(messages, {
+    stepsUsed: 0,
+    outcome: "blocked",
+  });
+  const textPart = next[1]?.parts.find((part) => part.type === "text");
+  assert.match("text" in textPart! ? textPart.text : "", /continue/i);
+});
+
+test("messagesPersistenceRevision ignores streaming reasoning token deltas", async () => {
+  const { messagesPersistenceRevision } = await import("../../../src/loops/conductor-chat.js");
+  const shortReasoning = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "reasoning", text: "abc", state: "streaming" }],
+  }] satisfies UIMessage[];
+  const longerReasoning = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{ type: "reasoning", text: "abcdef", state: "streaming" }],
+  }] satisfies UIMessage[];
+
+  assert.equal(
+    messagesPersistenceRevision(shortReasoning),
+    messagesPersistenceRevision(longerReasoning),
+  );
 });

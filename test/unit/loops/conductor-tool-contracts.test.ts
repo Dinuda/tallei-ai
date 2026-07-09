@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CONDUCTOR_TOOL_DESCRIPTIONS } from "../../../src/loops/conductor-chat-prompts.js";
+import { CONDUCTOR_TOOL_DESCRIPTIONS } from "@tallei/conductor-tools/descriptions.js";
 import {
   activateLoopInputSchema,
   analyzeIntentInputSchema,

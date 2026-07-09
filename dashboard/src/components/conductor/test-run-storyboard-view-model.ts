@@ -1,7 +1,11 @@
 import type {
   AgentTeamSpecialist,
   PresentAgentTeamOutput,
-} from "@/components/conductor/conductor-shared";
+} from "./conductor-shared";
+import {
+  specialistDisplayName,
+  splitSpecialistsAroundReviewer,
+} from "./workflow-rows-from-team";
 import { buildBeatStepData, type TestRunBeatDataSection } from "./test-run-step-data";
 
 export type TestRunBeatStatus = "pending" | "active" | "completed" | "failed" | "skipped";
@@ -56,10 +60,6 @@ export type TestRunStoryboardViewModel = {
   errors?: string[];
 };
 
-function specialistDisplayName(name: string): string {
-  return name.trim().split(/\s+/)[0] || name.trim();
-}
-
 function specialistActionSummary(specialist: AgentTeamSpecialist): string {
   const stepDescriptions = specialist.steps
     .filter((step) => step.role !== "trigger")
@@ -99,11 +99,7 @@ function buildBaseBeats(input: {
     narrative: triggerDescription,
   });
 
-  const reviewerInsertAt = team?.reviewer
-    ? (team.reviewerInsertIndex ?? team.specialists.length)
-    : team?.specialists.length ?? 0;
-  const specialistsBefore = team?.specialists.slice(0, reviewerInsertAt) ?? [];
-  const specialistsAfter = team?.specialists.slice(reviewerInsertAt) ?? [];
+  const { specialistsBefore, specialistsAfter } = splitSpecialistsAroundReviewer(team);
 
   for (const specialist of specialistsBefore) {
     const name = specialistDisplayName(specialist.name);

@@ -1,4 +1,5 @@
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
+import type { AppModelRequest } from "../../model/types.js";
 import { JUDGE_SYSTEM_PROMPT } from "./prompts.js";
 import { compactSnapshotForAi, normalizeConfidence, normalizeProposal, readJsonObject, validateProposal } from "./proposal-utils.js";
 import type { AdversaryResult, CleanupAiUsage, CleanupProposalInput, CleanupSnapshot, DebateResult, JudgeResult } from "./types.js";
@@ -64,11 +65,12 @@ export class CleanupJudgeUseCase {
       };
     }
 
-    const request = {
-      model: aiProviderRegistry.chatModelName(),
+    const request: AppModelRequest = {
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       temperature: 0,
       maxTokens: 600,
-      responseFormat: "json_object",
+      responseFormat: "json",
       messages: [
         { role: "system", content: JUDGE_SYSTEM_PROMPT },
         {
@@ -82,12 +84,12 @@ export class CleanupJudgeUseCase {
           }),
         },
       ],
-    } as const;
-    const response = await aiProviderRegistry.chat(request);
+    };
+    const response = await modelGateway.chat(request);
     const usage = emptyCleanupAiUsage();
     recordCleanupAiUsage(usage, request, response);
 
-    const raw = readJsonObject(response.text);
+    const raw = readJsonObject(response.text ?? "");
     const decision = raw.decision === "approve" || raw.decision === "modify" || raw.decision === "reject"
       ? raw.decision
       : "reject";

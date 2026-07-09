@@ -14,7 +14,7 @@ import { normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
 import { composioRequest, getComposioClient, getComposioEntityId, isComposioConfigured } from "./client.js";
 import { listComposioTriggerTypes, type ComposioTriggerTypeRow } from "./triggers.js";
 import { listToolkits } from "./tools.js";
-import type { ComposioToolkitView } from "./types.js";
+import type { ComposioToolkitView } from "@tallei/composio-tools/types.js";
 
 export type WorkspaceConnectorView = {
   slug: string;

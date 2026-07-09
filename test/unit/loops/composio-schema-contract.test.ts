@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildComposioToolContract } from "../../../src/loops/composio-schema-contract.js";
+import { buildComposioToolContract } from "@tallei/composio-tools/schema-contract.js";
 
 test("schema modifier hides runner-controlled fields while preserving the execution schema", () => {
   const originalInputSchema = {

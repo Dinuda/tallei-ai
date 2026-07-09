@@ -50,7 +50,7 @@ function main() {
   const mcpUrl = getArgValue("--mcp-url") || process.env.MCP_URL || "http://localhost:3000/mcp";
   const configPath = resolveClaudeConfigPath();
   const repoRoot = process.cwd();
-  const bridgePath = path.resolve(getArgValue("--bridge") || path.join(repoRoot, "mcp-bridge.js"));
+  const bridgePath = path.resolve(getArgValue("--bridge") || path.join(repoRoot, "scripts/mcp-bridge.js"));
   const serverName = getArgValue("--server-name") || "tallei";
 
   if (!fs.existsSync(bridgePath)) {
@@ -93,7 +93,7 @@ function main() {
   console.log(`Claude MCP server '${serverName}' configured.`);
   console.log(`Config path: ${configPath}`);
   console.log(`MCP URL: ${mcpUrl}`);
-  console.log("Run `node mcp-bridge.js login` once to complete OAuth sign-in.");
+  console.log("Run `node scripts/mcp-bridge.js login` once to complete OAuth sign-in.");
   console.log("Restart Claude Desktop to load the updated MCP config.");
 }
 

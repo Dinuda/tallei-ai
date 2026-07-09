@@ -5,7 +5,7 @@ import {
   isBuildTerminalForStall,
   isPhaseOpenForStallRecovery,
   isPhaseProgressTerminal,
-} from "../../../shared/conductor-stall-recovery.js";
+} from "@tallei/shared/conductor-stall-recovery.js";
 
 test("isPhaseProgressTerminal is true when terminal or status complete", () => {
   assert.equal(isPhaseProgressTerminal({ terminal: true, status: "in_progress" }), true);

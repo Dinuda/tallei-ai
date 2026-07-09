@@ -53,6 +53,115 @@ test("findPendingInteractivePrompts ignores askQuestion until questionId is pres
   assert.deepEqual(findPendingInteractivePrompts(messages), []);
 });
 
+test("findPendingInteractivePrompts excludes optimistically resolved tool calls", async () => {
+  const { findPendingInteractivePrompts } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-askQuestion",
+      toolCallId: "tool-1",
+      state: "input-available",
+      input: {
+        questionId: "priority-labels",
+        question: "Use default priority labels?",
+        options: [
+          { id: "default", label: "Default", value: "default" },
+          { id: "custom", label: "Custom", value: "custom" },
+        ],
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.equal(findPendingInteractivePrompts(messages).length, 1);
+  assert.equal(
+    findPendingInteractivePrompts(messages, null, null, new Set(["tool-1"])).length,
+    0,
+  );
+});
+
+test("collectSupersededAskQuestionCallIds keeps only the latest answered card per questionId", async () => {
+  const { collectSupersededAskQuestionCallIds } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [
+      {
+        type: "tool-askQuestion",
+        toolCallId: "tool-1",
+        state: "output-available",
+        input: {
+          questionId: "priority-labels",
+          question: "Use default priority labels?",
+          options: [
+            { id: "default", label: "Default", value: "default" },
+            { id: "custom", label: "Custom", value: "custom" },
+          ],
+        },
+        output: {
+          questionId: "priority-labels",
+          answerText: "Default",
+          selectedOptionIds: ["default"],
+          selectedValues: ["default"],
+        },
+      },
+      {
+        type: "tool-askQuestion",
+        toolCallId: "tool-2",
+        state: "output-available",
+        input: {
+          questionId: "priority-labels",
+          question: "Use default priority labels?",
+          options: [
+            { id: "default", label: "Default", value: "default" },
+            { id: "custom", label: "Custom", value: "custom" },
+          ],
+        },
+        output: {
+          questionId: "priority-labels",
+          answerText: "Default",
+          selectedOptionIds: ["default"],
+          selectedValues: ["default"],
+        },
+      },
+    ],
+  }] satisfies UIMessage[];
+
+  const superseded = collectSupersededAskQuestionCallIds(messages);
+  assert.equal(superseded.size, 1);
+  assert.equal(superseded.has("tool-1"), true);
+  assert.equal(superseded.has("tool-2"), false);
+});
+
+test("clearPhaseProgressPendingUiTool clears only the matching pending tool", async () => {
+  const { clearPhaseProgressPendingUiTool } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const phaseProgress = {
+    phase: "intent",
+    pendingUiTool: {
+      toolCallId: "tool-1",
+      toolName: "askQuestion",
+      input: {
+        questionId: "priority-labels",
+        question: "Use default priority labels?",
+        options: [
+          { id: "default", label: "Default", value: "default" },
+          { id: "custom", label: "Custom", value: "custom" },
+        ],
+      },
+    },
+  };
+
+  const cleared = clearPhaseProgressPendingUiTool(phaseProgress, "tool-1");
+  assert.equal(cleared?.pendingUiTool, undefined);
+  assert.equal(clearPhaseProgressPendingUiTool(phaseProgress, "tool-2"), phaseProgress);
+});
+
 test("findPendingInteractivePrompts returns multiple prompts in transcript order", async () => {
   const { findPendingInteractivePrompts } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
@@ -231,8 +340,8 @@ test("completed askQuestion answers stay visible while pending copies stay hidde
   assert.match(toolPart, /pendingInteractivePromptCallIds\.has/);
   assert.match(toolPart, /AnsweredPresentReplyOptionsCard/);
   assert.match(shared, /findPendingInteractivePrompts/);
-  assert.match(shared, /return prompts\.map/);
-  assert.match(shared, /step: \{ index: index \+ 1, total: prompts\.length \}/);
+  assert.match(shared, /return visible\.map/);
+  assert.match(shared, /step: \{ index: index \+ 1, total: visible\.length \}/);
 });
 
 test("conductor composer validates message length and surfaces sonner toasts", async () => {
@@ -283,8 +392,8 @@ test("connector picker searches all apps and verifies before submitting", async 
   assert.doesNotMatch(connectCard, /window\.open/);
 });
 
-test("evaluateConductorStall is inert because server turn resolution owns continuation", async () => {
-  const { evaluateConductorStall } = await import("../../../shared/conductor-turn-budget.js");
+test("evaluateConductorStall flags text-only mid-phase stalls for recovery", async () => {
+  const { evaluateConductorStall } = await import("@tallei/shared/conductor-turn-budget.js");
   const stall = evaluateConductorStall({
     chatBusy: false,
     hasMessages: true,
@@ -298,7 +407,8 @@ test("evaluateConductorStall is inert because server turn resolution owns contin
     wouldAutoContinue: false,
     hasAssistantParts: true,
   });
-  assert.equal(stall.stalled, false);
+  assert.equal(stall.stalled, true);
+  assert.equal(stall.reason, "text_only_mid_phase");
 });
 
 test("findConductorStall does not stall when loop status is active", async () => {
@@ -545,7 +655,7 @@ test("hasTerminalExecution treats build_complete as terminal", async () => {
 });
 
 test("isPhaseHandoffPending detects roster without confirmation", async () => {
-  const { isPhaseHandoffPending } = await import("../../../shared/conductor-phase-handoff.js");
+  const { isPhaseHandoffPending } = await import("@tallei/shared/conductor-phase-handoff.js");
   const messages = [
     {
       id: "assistant-1",
@@ -581,7 +691,7 @@ test("isPhaseHandoffPending detects roster without confirmation", async () => {
 });
 
 test("isPhaseHandoffPending detects connector discovery without pick", async () => {
-  const { isPhaseHandoffPending } = await import("../../../shared/conductor-phase-handoff.js");
+  const { isPhaseHandoffPending } = await import("@tallei/shared/conductor-phase-handoff.js");
   const messages = [
     {
       id: "assistant-1",
@@ -612,8 +722,8 @@ test("isPhaseHandoffPending detects connector discovery without pick", async () 
 });
 
 test("evaluateConductorStall stays inert while confirmation is pending", async () => {
-  const { isPhaseHandoffPending } = await import("../../../shared/conductor-phase-handoff.js");
-  const { evaluateConductorStall } = await import("../../../shared/conductor-turn-budget.js");
+  const { isPhaseHandoffPending } = await import("@tallei/shared/conductor-phase-handoff.js");
+  const { evaluateConductorStall } = await import("@tallei/shared/conductor-turn-budget.js");
   const messages = [
     {
       id: "assistant-1",
@@ -664,15 +774,32 @@ test("evaluateConductorStall stays inert while confirmation is pending", async (
   assert.equal(stall.stalled, false);
 });
 
-test("shouldAutoSendConductorChat delegates phase continuation to typed handoffs", async () => {
+test("conductor builder uses server continuation intent instead of transcript auto-send", async () => {
+  const fs = await import("node:fs/promises");
+  const [builder, continuationHook] = await Promise.all([
+    fs.readFile(new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../../../dashboard/src/components/conductor/use-conductor-continuation.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(builder, /useConductorContinuation/);
+  assert.match(builder, /parseContinuationIntent/);
+  assert.match(builder, /continuationIntent/);
+  assert.match(builder, /void sendMessage\(\)/);
+  // UI-tool answers still use sendAutomaticallyWhen; phase handoff uses server intent.
+  assert.match(builder, /sendAutomaticallyWhen/);
+  assert.doesNotMatch(builder, /findPendingConductorPhaseHandoff/);
+  assert.match(continuationHook, /trigger !== "phase_handoff"/);
+  assert.match(continuationHook, /sessionActionRef/);
+});
+
+test("shouldAutoSendConductorChat is deprecated in favor of server continuation intent", async () => {
   const fs = await import("node:fs/promises");
   const shared = await fs.readFile(
     new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
     "utf8",
   );
-  assert.match(shared, /isPhaseHandoffPending/);
-  assert.match(shared, /@\/lib\/conductor-phase-handoff/);
-  assert.match(shared, /lastAssistantEndedWithAnsweredUiTool/);
+  assert.match(shared, /@tallei\/shared\/conductor-stall-recovery/);
+  assert.doesNotMatch(shared, /Transcript-inferred auto-continue/i);
+  assert.match(shared, /return false/);
 });
 
 test("shouldAutoSendConductorChat no longer auto-continues on generic non-terminal tool output in source", async () => {
@@ -681,20 +808,19 @@ test("shouldAutoSendConductorChat no longer auto-continues on generic non-termin
     new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
     "utf8",
   );
-  assert.match(shared, /return lastAssistantEndedWithAnsweredUiTool\(messages\)/);
+  assert.match(shared, /return false/);
   assert.doesNotMatch(shared, /executions\.length === 0\) return true/);
 });
 
-test("phase handoff refreshes persisted progress before continuing", async () => {
+test("phase handoff continuation is owned by useConductorContinuation", async () => {
   const fs = await import("node:fs/promises");
   const builder = await fs.readFile(
     new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(builder, /findPendingConductorPhaseHandoff/);
-  assert.match(builder, /apiFetch\(`\/api\/loops\/\$\{loopId\}`\)/);
-  assert.match(builder, /persistedPhase !== handoff\.nextPhase/);
-  assert.match(builder, /await sendMessage\(\)/);
+  assert.doesNotMatch(builder, /findPendingConductorPhaseHandoff/);
+  assert.doesNotMatch(builder, /persistedPhase !== handoff\.nextPhase/);
+  assert.match(builder, /useConductorContinuation/);
 });
 
 test("shouldAutoSendConductorChat stops auto-continue on recoverable compile prerequisite miss in source", async () => {
@@ -794,7 +920,7 @@ test("hasUnansweredUiToolCalls ignores stale phaseProgress when transcript alrea
   }), false);
 });
 
-test("shouldAutoSendConductorChat auto-continues after answered confirmOutcomeBrief", async () => {
+test("shouldAutoSendConductorChat continues after a fully answered UI tool", async () => {
   const { shouldAutoSendConductorChat } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
   );
@@ -828,24 +954,11 @@ test("shouldAutoSendConductorChat auto-continues after answered confirmOutcomeBr
     buildPhase: "review",
     missingSlots: [],
     loopStatus: "draft",
-    phaseProgress: {
-      pendingUiTool: {
-        toolCallId: "confirm-1",
-        toolName: "confirmOutcomeBrief",
-        input: {
-          briefHash: "a".repeat(64),
-          question: "Ready?",
-          options: [
-            { id: "confirm", label: "Yes", value: "confirm" },
-            { id: "other", label: "No", value: "other" },
-          ],
-        },
-      },
-    },
+    phaseProgress: null,
   }), true);
 });
 
-test("shouldAutoSendConductorChat resumes when the final step answers UI after earlier progress", async () => {
+test("shouldAutoSendConductorChat continues after mixed-step UI answers despite stale pendingUiTool", async () => {
   const { shouldAutoSendConductorChat } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
   );
@@ -931,7 +1044,7 @@ test("findPendingInteractivePrompts restores an event-log question missing from 
   assert.equal(prompts[0]?.toolCallId, "question-restored");
 });
 
-test("phase-complete handoff waits for the persisted-state refresh effect", async () => {
+test("phase-complete handoff is detected for rendering but not transcript auto-send", async () => {
   const { findPendingConductorPhaseHandoff, shouldAutoSendConductorChat } = await import(
     "../../../dashboard/src/components/conductor/conductor-shared.ts"
   );
@@ -1041,17 +1154,109 @@ test("shouldAutoSendConductorChat does not auto-continue on ordinary progress ou
   }), false);
 });
 
-test("shouldAutoSendConductorChat still blocks unanswered confirmOutcomeBrief in source", async () => {
+test("shouldAutoSendConductorChat does not replay activation after loop is active", async () => {
+  const { shouldAutoSendConductorChat } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [
+    {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [{
+        type: "tool-presentReplyOptions",
+        toolCallId: "reply-1",
+        state: "output-available",
+        input: {
+          options: [
+            { id: "activate", label: "Yes, turn it on!", message: "Yes, turn it on!" },
+          ],
+        },
+        output: {
+          selectedOptionId: "activate",
+          message: "Yes, turn it on!",
+        },
+      }],
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{
+        type: "tool-activateLoop",
+        toolCallId: "activate-1",
+        state: "output-available",
+        input: { confirmedByUser: true },
+        output: {
+          ok: true,
+          turnOutcome: "build_complete",
+          status: "active",
+        },
+      }],
+    },
+  ] satisfies UIMessage[];
+
+  assert.equal(shouldAutoSendConductorChat({
+    messages,
+    buildPhase: "activation",
+    missingSlots: [],
+    loopStatus: "active",
+    phaseProgress: {
+      phase: "activation",
+      status: "complete",
+      terminal: true,
+      reason: "activation_complete",
+    },
+  }), false);
+});
+
+test("shouldAutoSendConductorChat does not replay answered UI tools when build is terminal", async () => {
+  const { shouldAutoSendConductorChat } = await import(
+    "../../../dashboard/src/components/conductor/conductor-shared.ts"
+  );
+  const messages = [{
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-presentReplyOptions",
+      toolCallId: "reply-1",
+      state: "output-available",
+      input: {
+        options: [
+          { id: "activate", label: "Yes, turn it on!", message: "Yes, turn it on!" },
+        ],
+      },
+      output: {
+        selectedOptionId: "activate",
+        message: "Yes, turn it on!",
+      },
+    }],
+  }] satisfies UIMessage[];
+
+  assert.equal(shouldAutoSendConductorChat({
+    messages,
+    buildPhase: "activation",
+    missingSlots: [],
+    loopStatus: "active",
+    phaseProgress: {
+      phase: "activation",
+      status: "complete",
+      terminal: true,
+      reason: "activation_complete",
+    },
+  }), false);
+});
+
+test("shouldAutoSendConductorChat is a no-op stub after server continuation migration", async () => {
   const fs = await import("node:fs/promises");
   const shared = await fs.readFile(
     new URL("../../../dashboard/src/components/conductor/conductor-shared.ts", import.meta.url),
     "utf8",
   );
-  assert.match(shared, /hasUnansweredUiToolCalls\(messages, phaseProgress\)\) return false/);
-  assert.match(shared, /confirmOutcomeBrief/);
+  assert.match(shared, /@tallei\/shared\/conductor-stall-recovery/);
+  assert.doesNotMatch(shared, /Transcript-inferred auto-continue/i);
+  assert.match(shared, /return false/);
 });
 
-test("conductor builder wires authoritative progress and answered-tool continuation", async () => {
+test("conductor builder wires server continuation intent and UI answer send", async () => {
   const fs = await import("node:fs/promises");
   const [builder, shared, suggestions] = await Promise.all([
     fs.readFile(new URL("../../../dashboard/src/components/conductor-builder.tsx", import.meta.url), "utf8"),
@@ -1060,12 +1265,13 @@ test("conductor builder wires authoritative progress and answered-tool continuat
   ]);
 
   assert.match(builder, /phaseProgress/);
-  assert.match(builder, /buildProgress\?\.phaseProgress/);
+  assert.match(builder, /buildProgress\?\.continuationIntent/);
   assert.match(builder, /findConductorStall/);
   assert.match(builder, /isStalled/);
-  assert.match(builder, /buildPhase: buildPhaseRef\.current/);
+  assert.match(builder, /useConductorContinuation/);
+  assert.match(builder, /setHydrationReady/);
   assert.match(builder, /answeredToolResumeRef/);
   assert.match(shared, /findConductorStall/);
-  assert.match(shared, /lastAssistantEndedWithAnsweredUiTool/);
+  assert.match(shared, /findPendingInteractivePrompts/);
   assert.match(suggestions, /isStalled/);
 });

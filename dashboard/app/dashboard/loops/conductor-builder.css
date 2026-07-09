@@ -102,6 +102,30 @@
   background: transparent;
 }
 
+.conductor-transcript-error {
+  margin-top: 0.5rem;
+  border-color: #fecaca;
+  background: #fff5f5;
+  color: #7f1d1d;
+}
+
+.conductor-transcript-error__retry {
+  align-self: flex-start;
+  margin-top: 0.25rem;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #991b1b;
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+}
+
+.conductor-transcript-error__retry:hover {
+  background: #fef2f2;
+}
+
 /*
  * Transcript stream rhythm — spacing is margin-only (no flex `gap`) so each
  * pair of adjacent parts can be tuned independently and the contrast between
@@ -118,6 +142,11 @@
   display: flex;
   flex-direction: column;
   width: 100%;
+  contain: layout style;
+}
+
+.conductor-builder-chat .conductor-transcript-stream [data-transcript-text] {
+  contain: content;
 }
 
 /* Tool/reply cards should span the assistant column; Message keeps max-w-[95%] for hierarchy. */
@@ -135,17 +164,22 @@
 }
 
 /* Space out a thought from whatever preceded it (text or a tool/question card). */
-.conductor-builder-chat .conductor-transcript-stream > * + [data-transcript-thought] {
+.conductor-builder-chat .conductor-transcript-stream > * + *:has(> [data-transcript-thought]) {
   margin-top: 1.75rem;
 }
 
 /* Pull the very next line/card tight against the thought that produced it. */
-.conductor-builder-chat .conductor-transcript-stream > [data-transcript-thought] + * {
+.conductor-builder-chat .conductor-transcript-stream > *:has(> [data-transcript-thought]) + * {
   margin-top: 0.3rem;
 }
 
+/* Back-to-back thoughts read as one reflection — keep them grouped. */
+.conductor-builder-chat .conductor-transcript-stream > *:has(> [data-transcript-thought]) + *:has(> [data-transcript-thought]) {
+  margin-top: 0.35rem;
+}
+
 /* An intro sentence and its question/tool card are one beat — keep them close. */
-.conductor-builder-chat .conductor-transcript-stream > [data-transcript-text] + [data-transcript-block] {
+.conductor-builder-chat .conductor-transcript-stream > *:has(> [data-transcript-text]) + *:has([data-transcript-block]) {
   margin-top: 0.4rem;
 }
 
@@ -160,55 +194,36 @@
   margin-bottom: 0 !important;
 }
 
-/* Reasoning stream — clamped height while thinking, optional expand */
-.conductor-reasoning-stream {
-  position: relative;
+/* Reasoning bar — collapsed by default; shimmer while streaming, expand after */
+.conductor-reasoning-trigger {
+  padding: 0;
+  color: var(--cb-text-muted, #9ca3af);
 }
 
-.conductor-reasoning-stream__scroll--live {
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scroll-behavior: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.conductor-reasoning-stream__scroll--masked {
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent 0%,
-    #000 2.75rem,
-    #000 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0%,
-    #000 2.75rem,
-    #000 100%
-  );
-}
-
-.conductor-reasoning-stream__scroll--collapsing {
-  overflow: hidden;
-  mask-image: none !important;
-  -webkit-mask-image: none !important;
-  pointer-events: none;
-  transition:
-    height 0.52s cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 0.45s ease;
-}
-
-.conductor-reasoning-stream--collapsing .conductor-reasoning-stream__toggle {
-  opacity: 0;
-  max-height: 0;
-  margin: 0;
-  overflow: hidden;
-  transition: opacity 0.2s ease, max-height 0.2s ease, margin 0.2s ease;
+.conductor-reasoning-trigger:hover {
+  color: var(--cb-text-2, #6b7280);
 }
 
 .conductor-reasoning-collapsible {
   overflow: hidden;
+}
+
+.conductor-reasoning-live {
+  overscroll-behavior: contain;
+  scroll-behavior: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  contain: content;
+}
+
+.conductor-reasoning-live::-webkit-scrollbar {
+  display: none;
+}
+
+.conductor-reasoning-live__text {
+  color: var(--cb-text-2, #374151);
+  font-size: 0.875rem;
+  line-height: 1.6;
 }
 
 .conductor-reasoning-collapsible[data-state="open"] {
@@ -243,38 +258,6 @@
   }
 }
 
-.conductor-reasoning-stream__settled {
-  padding-top: 0.125rem;
-}
-
-.conductor-reasoning-stream__scroll--live::-webkit-scrollbar {
-  display: none;
-}
-
-.conductor-reasoning-stream__live-text {
-  color: var(--cb-text-2, #374151);
-  font-size: 0.875rem;
-  line-height: 1.6;
-}
-
-.conductor-reasoning-stream__toggle {
-  position: relative;
-  z-index: 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  margin-top: 0.25rem;
-  padding: 0.125rem 0;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--cb-text-muted);
-  transition: color 0.15s ease;
-}
-
-.conductor-reasoning-stream__toggle:hover {
-  color: var(--cb-text);
-}
-
 .conductor-builder-page [data-conductor-prompt-input] [data-slot="input-group"] {
   border-radius: 0;
   border: 0;
@@ -299,4 +282,95 @@
 
 .conductor-builder-page [data-conductor-submit]:hover {
   background: var(--cb-accent-hover);
+}
+
+.agent-team-lab-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem 0.5rem;
+  border-bottom: 1px solid var(--ed-border-light);
+  background: var(--ed-surface-alt);
+}
+
+.agent-team-lab-badge--with-actions {
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.agent-team-lab-badge__brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.agent-team-lab-badge__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.agent-team-lab-badge__icon {
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  object-fit: contain;
+}
+
+.agent-team-lab-badge__text {
+  font-family: var(--font-bytesized), ui-monospace, monospace;
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  color: var(--ed-text);
+  -webkit-font-smoothing: none;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.agent-team-lab-badge__text--long {
+  font-size: 18px;
+  letter-spacing: 0.08em;
+}
+
+.agent-team-lab-badge__status {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.agent-team-lab-badge__status--passed {
+  color: var(--ed-green-text);
+}
+
+.agent-team-lab-badge__status--failed {
+  color: var(--ed-red-text);
+}
+
+.agent-team-lab-badge__status--running {
+  color: var(--ed-text-2);
+}
+
+.agent-team-lab-badge__info-btn {
+  display: inline-flex;
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ed-border-light);
+  background: white;
+  color: var(--ed-text-muted);
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.agent-team-lab-badge__info-btn:hover {
+  border-color: var(--ed-border);
+  background: white;
+  color: var(--ed-text);
 }

@@ -258,6 +258,7 @@ test("buildConductorSystemPrompt includes the requested prompt sections", () => 
   assert.match(prompt, /<hard_stops>/);
   assert.match(prompt, /<safety>/);
   assert.match(prompt, /<specialist_review>/);
+  assert.match(prompt, /<activation_complete>/);
   assert.match(prompt, /<examples>/);
   assert.match(prompt, /<response_format>/);
   assert.match(prompt, /Available tools:/);
@@ -364,7 +365,7 @@ test("Conductor refreshes confirmation state per step without a nested summary m
 
   assert.match(source, /prepareStep:\s*async \(\) => \{/);
   assert.match(source, /system: buildCurrentSystemPrompt\(\)/);
-  assert.match(source, /toolChoice: resolveConductorToolChoice\(activeTools\.length, config\.conductorModel\)/);
+  assert.match(source, /toolChoice: modelGateway\.resolveToolChoice\(activeTools\.length\)/);
   assert.match(source, /confirmationHash:\s*currentBuildState!\.artifacts\.bindings\?\.artifactHash\s*\?\?\s*computeOutcomeBriefHash\(currentSpec!\)/);
   assert.match(source, /presentAgentTeam:\s*tool/);
   assert.match(source, /Review isn't complete yet\. Confirm the specialist team summary before compiling\./);
@@ -377,4 +378,20 @@ test("Conductor refreshes confirmation state per step without a nested summary m
   assert.doesNotMatch(source, /lastToolExecution\?\.recoverToPhase/);
   assert.match(source, /recoverLoopBuildToCompile/);
   assert.doesNotMatch(source, /summarizeOutcomeBriefForUser|reviewOutcomeBrief:\s*tool/);
+});
+
+test("buildConductorSystemPrompt includes activation no-recap rules", () => {
+  const spec = createEmptyLoopSpec(workspaceId);
+  const prompt = buildConductorSystemPrompt({
+    spec,
+    confirmationHash: computeOutcomeBriefHash(spec),
+    buildPhase: "activation",
+    connectedToolkits: [],
+  });
+
+  assert.match(prompt, /ActivationSummaryCard/);
+  assert.match(prompt, /at most one short sentence/i);
+  assert.match(prompt, /Never recap workflow steps/i);
+  assert.match(prompt, /activation summary—reply with at most one short sentence/i);
+  assert.match(prompt, /do not use bullets or tables—the UI renders the activation summary card/i);
 });

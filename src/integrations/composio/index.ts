@@ -1,4 +1,8 @@
-export * from "./types.js";
+export type {
+  ComposioToolkitView,
+  ComposioActionView,
+  ComposioToolSearchResult,
+} from "@tallei/composio-tools/types.js";
 export {
   composioRequest,
   getComposioClient,
@@ -49,7 +53,15 @@ export {
   parseSearchResponse,
 } from "./playbook.js";
 export type { FetchConnectorPlaybookResult, PlaybookToolEntry } from "./playbook.js";
-export { extractTriggerKnownFields, formatTriggerKnownFields } from "./trigger-known-fields.js";
+export {
+  extractTriggerKnownFields,
+  formatTriggerKnownFields,
+  getTriggerOutputFields,
+  getTriggerFieldNamesForFeasibility,
+  buildSampleTriggerPayload,
+  TRIGGER_OUTPUT_FIELDS,
+} from "@tallei/composio-tools/trigger-known-fields.js";
+export type { TriggerFieldSpec } from "@tallei/composio-tools/trigger-known-fields.js";
 export {
   registerLoopEventTrigger,
   unregisterLoopEventTrigger,

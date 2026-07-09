@@ -4,7 +4,7 @@ import { createLot, documentBriefsByRefs, recallDocument } from "../documents.js
 import { ingestUploadedFilesToDocuments, type UploadedFileSaveError } from "../uploaded-file-ingest.js";
 import { listRecentCompletedUploadedFileIngestJobs } from "../uploaded-file-ingest-jobs.js";
 import { saveMemory } from "../memory.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 import { PlanRequiredError } from "../../shared/errors/index.js";
 import { config } from "../../config/index.js";
 
@@ -1706,8 +1706,9 @@ Transcript:
 ${transcriptText}`;
 
   try {
-    const response = await aiProviderRegistry.chat({
-      model: aiProviderRegistry.chatModelName(),
+    const response = await modelGateway.chat({
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       messages: [
         { role: "system", content: "You summarize collab tasks into concise context blocks for AI assistants." },
         { role: "user", content: prompt },

@@ -5,7 +5,7 @@ import {
   buildComposioActionInstruction,
   resolveComposioActionArgs,
   validateComposioActionInstructions,
-} from "../../../src/loops/composio-action-instructions.js";
+} from "@tallei/composio-tools/action-instructions.js";
 import type { CompiledPlan } from "../../../src/loops/spec.js";
 
 const inputSchema = {

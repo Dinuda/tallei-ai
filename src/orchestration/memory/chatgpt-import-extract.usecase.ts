@@ -1,5 +1,5 @@
 import { config } from "../../config/index.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 import type { MemoryType } from "./memory-types.js";
 import type { ScoredImportConversation } from "./chatgpt-import-signal.usecase.js";
 
@@ -182,10 +182,11 @@ async function extractConversationMemories(
   supportsCustomTemperature: boolean
 ): Promise<{ rows: ExtractedImportMemory[]; warning: string | null }> {
   try {
-    const response = await aiProviderRegistry.chat({
+    const response = await modelGateway.chat({
+      purpose: "chat",
       model,
       ...(supportsCustomTemperature ? { temperature: 0 } : {}),
-      responseFormat: "json_object",
+      responseFormat: "json",
       maxTokens: 900,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
@@ -194,7 +195,7 @@ async function extractConversationMemories(
     });
 
     const rows: ExtractedImportMemory[] = [];
-    const parsedRows = parseJsonItems(response.text);
+    const parsedRows = parseJsonItems(response.text ?? "");
     for (const row of parsedRows.slice(0, MAX_FACTS_PER_CONVERSATION)) {
       const memory = typeof row.memory === "string" ? row.memory.trim() : "";
       if (memory.length < MEMORY_MIN_LENGTH) continue;

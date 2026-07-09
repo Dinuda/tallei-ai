@@ -1,15 +1,14 @@
 "use client";
 
-import type { DynamicToolUIPart, ReasoningUIPart } from "ai";
+import type { DynamicToolUIPart } from "ai";
 import { AlertTriangle, BadgeQuestionMark, ChevronDown } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Reasoning, ReasoningTrigger, reasoningStreamdownPlugins } from "@/components/ai-elements/reasoning";
-import { ConductorReasoningStream, CONDUCTOR_REASONING_COLLAPSE_MS } from "@/components/conductor/conductor-reasoning-stream";
-import { Streamdown } from "streamdown";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 import { BuilderCompletedCard } from "@/components/conductor/builder-completed-card";
+import { ActivationSummaryCard } from "@/components/conductor/activation-summary-card";
+import { buildActivationSummaryViewModel } from "@/components/conductor/activation-summary-view-model";
 import { BuilderConnectToolkitCard } from "@/components/conductor/builder-connect-toolkit-card";
 import {
   AgentTeamRoster,
@@ -57,41 +56,14 @@ import type {
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
 
-export function ConductorReasoningPart({
-  part,
-}: {
-  part: ReasoningUIPart;
-}) {
-  const isStreaming = part.state === "streaming";
-  const text = part.text;
-
-  return (
-    <div data-transcript-thought>
-      <Reasoning
-        autoCloseDelay={CONDUCTOR_REASONING_COLLAPSE_MS + 180}
-        isStreaming={isStreaming}
-      >
-        <ReasoningTrigger />
-        <CollapsibleContent className="conductor-reasoning-collapsible mt-2 text-sm outline-none">
-          <ConductorReasoningStream
-            isStreaming={isStreaming}
-            textLength={text.length}
-            liveContent={
-              <p className="conductor-reasoning-stream__live-text whitespace-pre-wrap break-words">
-                {text}
-              </p>
-            }
-            settledContent={
-              <div className="text-muted-foreground">
-                <Streamdown plugins={reasoningStreamdownPlugins}>{text}</Streamdown>
-              </div>
-            }
-          />
-        </CollapsibleContent>
-      </Reasoning>
-    </div>
-  );
-}
+const INTERNAL_TRANSCRIPT_TOOLS = new Set([
+  "analyzeIntent",
+  "listWorkspaceConnectors",
+  "listTriggers",
+  "listActions",
+  "discoverBindings",
+  "resolveBindings",
+]);
 
 export function AnsweredPresentReplyOptionsCard({
   input,
@@ -222,19 +194,24 @@ export function BindingDiagnosticsCard({ diagnostics, resolved = false }: { diag
   );
 }
 
-export function ConductorToolPart({
+type ConductorToolPartProps = {
+  part: DynamicToolUIPart & { toolName?: string; input?: unknown; output?: unknown };
+  messages: UIMessage[];
+  messagesRevision: string;
+  pendingInteractivePromptCallIds: Set<string>;
+  pendingReplyOptionsCallId: string | null;
+  supersededAskQuestionCallIds: Set<string>;
+  spec: Record<string, unknown> | null;
+};
+
+function ConductorToolPartImpl({
   part,
   messages,
   pendingInteractivePromptCallIds,
   pendingReplyOptionsCallId,
+  supersededAskQuestionCallIds,
   spec,
-}: {
-  part: DynamicToolUIPart & { toolName?: string; input?: unknown; output?: unknown };
-  messages: UIMessage[];
-  pendingInteractivePromptCallIds: Set<string>;
-  pendingReplyOptionsCallId: string | null;
-  spec: Record<string, unknown> | null;
-}) {
+}: ConductorToolPartProps) {
   const toolName = resolveToolPartName(part);
   const [open, setOpen] = useState(false);
   const diagnosticOutput = part.output && typeof part.output === "object"
@@ -256,6 +233,7 @@ export function ConductorToolPart({
   if (toolName === "askQuestion") {
     const toolPart = part as AskQuestionToolPart;
     if (pendingInteractivePromptCallIds.has(toolPart.toolCallId)) return null;
+    if (supersededAskQuestionCallIds.has(toolPart.toolCallId)) return null;
     if (toolPart.state === "output-available" && toolPart.input && toolPart.output) {
       return (
         <AnsweredAskQuestionCard
@@ -388,7 +366,27 @@ export function ConductorToolPart({
     );
   }
 
-  if (["analyzeIntent", "listWorkspaceConnectors", "listTriggers", "listActions", "discoverBindings", "resolveBindings"].includes(toolName)) {
+  if (toolName === "activateLoop") {
+    const output = part.output as {
+      ok?: boolean;
+      alreadyActive?: boolean;
+      eventTrigger?: { subscribed?: boolean } | null;
+    } | undefined;
+
+    if (output?.ok !== false && part.state === "output-available") {
+      return (
+        <ActivationSummaryCard
+          viewModel={buildActivationSummaryViewModel({
+            team: findLatestPresentAgentTeamOutput(messages),
+            spec,
+            output,
+          })}
+        />
+      );
+    }
+  }
+
+  if (INTERNAL_TRANSCRIPT_TOOLS.has(toolName)) {
     return null;
   }
 
@@ -480,3 +478,30 @@ export function ConductorToolPart({
     </Tool>
   );
 }
+
+function conductorToolPartPropsAreEqual(
+  prev: ConductorToolPartProps,
+  next: ConductorToolPartProps,
+): boolean {
+  if (prev.part !== next.part) {
+    const prevPart = prev.part;
+    const nextPart = next.part;
+    if (
+      prevPart.toolCallId !== nextPart.toolCallId
+      || prevPart.state !== nextPart.state
+      || prevPart.input !== nextPart.input
+      || prevPart.output !== nextPart.output
+      || prevPart.errorText !== nextPart.errorText
+    ) {
+      return false;
+    }
+  }
+  if (prev.messagesRevision !== next.messagesRevision) return false;
+  if (prev.spec !== next.spec) return false;
+  if (prev.pendingInteractivePromptCallIds !== next.pendingInteractivePromptCallIds) return false;
+  if (prev.pendingReplyOptionsCallId !== next.pendingReplyOptionsCallId) return false;
+  if (prev.supersededAskQuestionCallIds !== next.supersededAskQuestionCallIds) return false;
+  return true;
+}
+
+export const ConductorToolPart = memo(ConductorToolPartImpl, conductorToolPartPropsAreEqual);

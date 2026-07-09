@@ -8,7 +8,7 @@ import { insertRunStep } from "../../loops/store.js";
 import {
   extractTriggerKnownFields,
   formatTriggerKnownFields,
-} from "../../integrations/composio/trigger-known-fields.js";
+} from "@tallei/composio-tools/trigger-known-fields.js";
 import { searchWorkspaceMemories } from "../../services/workspace-memory.js";
 import type { AuthContext } from "../../domain/auth/index.js";
 import type { AgentRunState } from "../types.js";

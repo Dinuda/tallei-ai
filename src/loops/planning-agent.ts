@@ -1,7 +1,7 @@
 import { generateText } from "ai";
 
 import { config } from "../config/index.js";
-import { getStreamingLanguageModel } from "../providers/ai/streaming/language-model.js";
+import { modelGateway } from "../model/index.js";
 import type { PhaseExecutionContract, TestRunScenario } from "./conductor-tools.js";
 import {
   plannerDecisionSchema,
@@ -13,7 +13,7 @@ import {
 } from "./spec.js";
 import { getMissingSlots } from "./patch.js";
 import { getPendingConnectorOutcomes } from "./task-decomposition.js";
-import { summarizeToolForPlanner } from "./tool-planner-card.js";
+import { summarizeToolForPlanner } from "@tallei/composio-tools/tool-planner-card.js";
 import { compactStepHistoryForPlanner } from "./tool-result-compact.js";
 import { isOutcomeBriefConfirmed } from "./outcome-brief.js";
 import type { BuildPhaseProgress } from "./build-phase-progress.js";
@@ -162,7 +162,7 @@ export function buildConductorSystemPrompt(input: {
         connectors: "recommend apps, reuse a prior explicit app choice when discovery auto-resolves it, and ask only for remaining app choices.",
         bindings: "discover exact triggers and actions only from the selected apps. Call resolveBindings before any binding askQuestion, reproduce pendingQuestions exactly, then finalize with resolveBindings.",
         review: "Write one short introductory sentence, call presentAgentTeam, then confirmOutcomeBrief in the same turn. The confirmation result is saved automatically.",
-        compile: "compileLoop.", test: "testRunLoop.", activation: "request explicit confirmation, then activateLoop.",
+        compile: "compileLoop.", test: "testRunLoop.", activation: "call activateLoop after explicit approval; the UI renders the activation summary—reply with at most one short sentence.",
       } as const)[input.buildPhase]
     : !hasBlueprint
       ? "analyzeIntent and complete its business questions; the server derives the blueprint automatically."
@@ -189,6 +189,8 @@ export function buildConductorSystemPrompt(input: {
       "• analyzeIntent must return a complete platform-neutral execution plan and zero to four questions. Ask only independent, material unresolved business choices. Zero questions is correct when the requested business behavior is already clear; never add a generic confirmation or filler question. Ask every returned question in the same assistant turn.",
       "• Never expose internal IDs, JSON, confirmation hashes, API slugs, action slugs, trigger slugs, or cron syntax to the user.",
       "• In actionable phases, do not narrate a next action (\"let me…\", \"now I'll…\") without immediately emitting the corresponding tool call in the same step. If you cannot call a tool, stop and wait for the user.",
+      "• After internal reasoning, write one concise user-facing sentence before UI-visible decisions or tool calls. Summarize what was accomplished in plain language—never mention internal tool names, slugs, hashes, or JSON.",
+      "• Avoid generic \"I'm doing X\" narration unless the matching tool call happens in the same step.",
       "• Phase recovery crosses a server handoff. Stop after a recovery result; the next request resumes from persisted state. Do not retry an earlier-phase tool in the current request.",
       "",
       "Tool ownership (do not omit):",
@@ -273,6 +275,14 @@ export function buildConductorSystemPrompt(input: {
       "</specialist_review>",
     ].join("\n"),
     [
+      "<activation_complete>",
+      "After successful activateLoop, the dashboard renders ActivationSummaryCard from the tool output.",
+      "Write at most one short sentence (celebration or next action only).",
+      "Never recap workflow steps, specialist roster, markdown tables, emoji step lists, or preferences.",
+      "If the user asks what is live after activation, point them to the activation summary card above; do not regenerate a full summary.",
+      "</activation_complete>",
+    ].join("\n"),
+    [
       "<examples>",
       "User: \"When I get a new email, summarize it and post to Slack\"",
       "Action: analyzeIntent → askQuestion only for material business choices (e.g. review policy). Never ask which email app or chat app to use.",
@@ -289,6 +299,9 @@ export function buildConductorSystemPrompt(input: {
       "User: \"Turn it on\"",
       "Action: presentReplyOptions → activateLoop only after testRunLoop has passed.",
       "",
+      "User: (activation just succeeded)",
+      "Action: activateLoop only. One short sentence max. Do not recap steps or preferences.",
+      "",
       "User: \"Which Slack channel should drafts go to?\" (during bindings)",
       "Action: discoverBindings → listTriggers → resolveBindings → askQuestion for each pendingQuestion exactly as returned → resolveBindings again.",
       "",
@@ -298,7 +311,8 @@ export function buildConductorSystemPrompt(input: {
     ].join("\n"),
     [
       "<response_format>",
-      "When showing configuration, format it in clear markdown with bullet points.",
+      "When showing configuration during build phases, format it in clear markdown with bullet points.",
+      "After successful activateLoop, do not use bullets or tables—the UI renders the activation summary card.",
       "When reporting a change, state what changed in plain language using before → after when comparing choices.",
       "Write one short introductory sentence before presentAgentTeam and confirmOutcomeBrief.",
       "Keep responses concise but informative.",
@@ -320,7 +334,14 @@ export function buildConductorSystemPrompt(input: {
     phaseBudget != null ? `Phase step budget: ${phaseBudget}` : "",
     autoAdvance == null ? "" : `Auto-advance after phase completion: ${autoAdvance ? "yes" : "no"}`,
     input.phaseContract
-      ? `Phase contract: ${input.phaseContract.phase} revision ${input.phaseContract.revision}\nAllowed tools: ${input.phaseContract.allowedTools.join(", ") || "none"}\nRequired next tool: ${input.phaseContract.nextTool ?? "none"}`
+      ? [
+        `Phase contract: ${input.phaseContract.phase} revision ${input.phaseContract.revision}`,
+        `Allowed tools: ${input.phaseContract.allowedTools.join(", ") || "none"}`,
+        `Required next tool: ${input.phaseContract.nextTool ?? "none"}`,
+        input.phaseContract.nextTool
+          ? `Call \`${input.phaseContract.nextTool}\` now in this step. Do not finish with reasoning-only output or prose without the required tool call.`
+          : "",
+      ].filter(Boolean).join("\n")
       : "",
     `Next: ${nextStep}`,
     `Spec JSON:\n${JSON.stringify(input.spec)}`,
@@ -338,8 +359,12 @@ export async function runPlannerDecision(
     ? setTimeout(() => abortController.abort(), timeoutMs)
     : null;
   try {
+    const resolvedPlannerModel = modelGateway.resolveStreaming("planner", { userId: options?.userId });
     const { text } = await generateText({
-      model: getStreamingLanguageModel("planner", { userId: options?.userId }),
+      model: resolvedPlannerModel.model,
+      ...(resolvedPlannerModel.providerOptions
+        ? { providerOptions: resolvedPlannerModel.providerOptions }
+        : {}),
       system:
         "You are Tallei's loop runtime planner. Reply with a single JSON object only.",
       prompt,

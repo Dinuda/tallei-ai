@@ -7,7 +7,7 @@ import {
   pollApprovalDecision,
   runAgenticLoop,
 } from "../../loops/agentic-run.js";
-import { resolveComposioActionArgs } from "../../loops/composio-action-instructions.js";
+import { resolveComposioActionArgs } from "@tallei/composio-tools/action-instructions.js";
 import { buildMonitorAlertMessage, evaluateMonitorRule } from "../../loops/monitor.js";
 import { getCompiledPlan, createLoopRun, getLoopRunById, insertRunStep, updateLoopRun } from "../../loops/store.js";
 import { compiledPlanSchema } from "../../loops/spec.js";
@@ -19,7 +19,7 @@ import {
   resolveApprovalExpiredActivity,
 } from "./approval.js";
 import { deliverOutputActivity, failRunActivity } from "./deliver-output.js";
-import { getStreamingLanguageModel } from "../../providers/ai/streaming/language-model.js";
+import { modelGateway } from "../../model/index.js";
 import type { ExecutionStep } from "../../loops/spec.js";
 
 function toAuth(input: { userId: string; tenantId: string; workspaceId: string }): AuthContext {
@@ -186,8 +186,12 @@ export async function executeTransformStepActivity(input: {
     `Prior step results: ${JSON.stringify(input.state.toolResults)}`,
     "Return only the transformed artifact content.",
   ].filter(Boolean).join("\n\n");
+  const resolvedPlannerModel = modelGateway.resolveStreaming("planner", { userId: input.auth.userId });
   const { text } = await generateText({
-    model: getStreamingLanguageModel("planner", { userId: input.auth.userId }),
+    model: resolvedPlannerModel.model,
+    ...(resolvedPlannerModel.providerOptions
+      ? { providerOptions: resolvedPlannerModel.providerOptions }
+      : {}),
     system: "You perform one bounded workflow transform. Do not choose or call tools.",
     prompt,
   });

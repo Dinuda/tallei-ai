@@ -35,6 +35,7 @@ import {
   submitTurn as submitCollabTurn,
 } from "../../../services/collab/collab.service.js";
 import { PlatformSchema } from "../schemas.js";
+import { mcpToolDefs } from "@tallei/mcp-tools";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {
   executePrepareResponseAction,
@@ -140,16 +141,11 @@ function hasCollabWriteScope(auth: AuthContext): boolean {
 
 export function registerTools(server: McpServer, auth: AuthContext): void {
   server.registerTool(
-    "save_memory",
+    mcpToolDefs.save_memory.name,
     {
-      title: "Save Memory",
-      description: "Prefer the `remember` tool — it handles facts, preferences, and document notes in one call. This tool exists for backward compatibility.",
-      inputSchema: {
-        content: z
-          .string()
-          .describe("The fact, preference, or information to remember. Be specific and concise."),
-        platform: PlatformSchema.optional().default("claude").describe("The AI platform this memory is from"),
-      },
+      title: mcpToolDefs.save_memory.title,
+      description: mcpToolDefs.save_memory.description,
+      inputSchema: mcpToolDefs.save_memory.inputSchema,
     },
     async ({ content, platform }) => {
       try {
@@ -162,21 +158,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "save_preference",
+    mcpToolDefs.save_preference.name,
     {
-      title: "Save Preference",
-      description: "Prefer the `remember` tool with kind=\"preference\". This exists for backward compatibility.",
-      inputSchema: {
-        content: z
-          .string()
-          .describe("The preference to store (e.g., favorite color, preferred stack, name/pronouns)."),
-        category: z.string().optional().describe("Optional preference category like identity, ui, stack."),
-        preference_key: z
-          .string()
-          .optional()
-          .describe("Optional stable conflict key (e.g., favorite_color, identity_name)."),
-        platform: PlatformSchema.optional().default("claude").describe("The AI platform this preference is from"),
-      },
+      title: mcpToolDefs.save_preference.title,
+      description: mcpToolDefs.save_preference.description,
+      inputSchema: mcpToolDefs.save_preference.inputSchema,
     },
     async ({ content, category, preference_key, platform }) => {
       try {
@@ -192,28 +178,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recall_memories",
+    mcpToolDefs.recall_memories.name,
     {
-      title: "Recall Memories",
-      description:
-        "Searches Tallei persistent memory and returns relevant past context. " +
-        "Call ONLY when the user explicitly references prior sessions, asks about their preferences, or the task requires personalized past context. " +
-        "Do NOT call this before answering — answer first, then recall if needed. " +
-        "Pinned preferences are already available as the 'Pinned Preferences' MCP resource; do not recall them here.",
-      inputSchema: {
-        query: z
-          .string()
-          .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
-        limit: z.number().int().min(1).max(20).optional().default(5),
-        types: z.array(MemoryTypeSchema).optional().describe("Optional type filter for scoped recall."),
-        include_doc_refs: z
-          .array(z.string())
-          .max(20)
-          .optional()
-          .describe("Optional @doc/@lot refs to append brief document metadata."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.recall_memories.title,
+      description: mcpToolDefs.recall_memories.description,
+      inputSchema: mcpToolDefs.recall_memories.inputSchema,
     },
     async (args) => {
       try {
@@ -242,15 +211,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "collab_check_turn",
+    mcpToolDefs.collab_check_turn.name,
     {
-      title: "Check Claude Collab Turn",
-      description: "Checks if it's Claude's turn on a collab task and returns task context.",
-      inputSchema: {
-        task_id: z.string().uuid().describe("Collab task ID."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.collab_check_turn.title,
+      description: mcpToolDefs.collab_check_turn.description,
+      inputSchema: mcpToolDefs.collab_check_turn.inputSchema,
     },
     async ({ task_id, openaiFileIdRefs, conversation_id }) => {
       try {
@@ -328,16 +293,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "collab_take_turn",
+    mcpToolDefs.collab_take_turn.name,
     {
-      title: "Submit Claude Collab Turn",
-      description: "Submits Claude's full user-facing content for a collab task turn. Summary-only submissions are rejected. After this tool returns, Claude must show the full submitted output visibly in the Claude chat before any summary/handoff.",
-      inputSchema: {
-        task_id: z.string().uuid().describe("Collab task ID."),
-        content: z.string().min(1).describe("Full user-facing turn output content. Do not submit summary-only text when the deliverable is longer."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.collab_take_turn.title,
+      description: mcpToolDefs.collab_take_turn.description,
+      inputSchema: mcpToolDefs.collab_take_turn.inputSchema,
     },
     async ({ task_id, content, openaiFileIdRefs, conversation_id }) => {
       try {
@@ -442,11 +402,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "collab_list_pending",
+    mcpToolDefs.collab_list_pending.name,
     {
-      title: "List Pending Collab Tasks",
-      description: "Lists collab tasks currently waiting on Claude.",
-      inputSchema: {},
+      title: mcpToolDefs.collab_list_pending.title,
+      description: mcpToolDefs.collab_list_pending.description,
+      inputSchema: mcpToolDefs.collab_list_pending.inputSchema,
     },
     async () => {
       try {
@@ -466,19 +426,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "collab_create_task",
+    mcpToolDefs.collab_create_task.name,
     {
-      title: "Create Collab Task",
-      description: "Creates a new collab task for ChatGPT and Claude turn-taking. Performs recall preflight (supports include_doc_refs) before creation and returns preflight context.",
-      inputSchema: {
-        title: z.string().min(1).describe("Task title."),
-        brief: z.string().optional().describe("Optional task brief."),
-        first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt").describe("Which model takes the first turn."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        include_doc_refs: z.array(z.string()).max(20).optional(),
-        recall_query: z.string().min(1).max(500).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.collab_create_task.title,
+      description: mcpToolDefs.collab_create_task.description,
+      inputSchema: mcpToolDefs.collab_create_task.inputSchema,
     },
     async (args) => {
       try {
@@ -592,11 +544,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "list_preferences",
+    mcpToolDefs.list_preferences.name,
     {
-      title: "List Preferences",
-      description: "Lists pinned and active user preferences.",
-      inputSchema: {},
+      title: mcpToolDefs.list_preferences.title,
+      description: mcpToolDefs.list_preferences.description,
+      inputSchema: mcpToolDefs.list_preferences.inputSchema,
     },
     async () => {
       const preferences = await listPreferences(auth);
@@ -611,13 +563,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "forget_preference",
+    mcpToolDefs.forget_preference.name,
     {
-      title: "Forget Preference",
-      description: "Deletes a preference memory by ID.",
-      inputSchema: {
-        preference_id: z.string().describe("Preference memory ID"),
-      },
+      title: mcpToolDefs.forget_preference.title,
+      description: mcpToolDefs.forget_preference.description,
+      inputSchema: mcpToolDefs.forget_preference.inputSchema,
     },
     async ({ preference_id }) => {
       try {
@@ -631,11 +581,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "list_memories",
+    mcpToolDefs.list_memories.name,
     {
-      title: "List Memories",
-      description: "Lists all recent memories stored in Tallei for this user.",
-      inputSchema: {},
+      title: mcpToolDefs.list_memories.title,
+      description: mcpToolDefs.list_memories.description,
+      inputSchema: mcpToolDefs.list_memories.inputSchema,
     },
     async () => {
       const memories = await listMemories(auth);
@@ -647,13 +597,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "delete_memory",
+    mcpToolDefs.delete_memory.name,
     {
-      title: "Delete Memory",
-      description: "Deletes a specific memory from Tallei by its ID.",
-      inputSchema: {
-        memory_id: z.string().describe("The unique ID of the memory to delete"),
-      },
+      title: mcpToolDefs.delete_memory.title,
+      description: mcpToolDefs.delete_memory.description,
+      inputSchema: mcpToolDefs.delete_memory.inputSchema,
     },
     async ({ memory_id }) => {
       const result = await deleteMemory(memory_id, auth);
@@ -662,19 +610,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "stash_document",
+    mcpToolDefs.stash_document.name,
     {
-      title: "Stash Document Full Blob",
-      description:
-        "HEAVY: Requires emitting the entire document as the `content` argument. " +
-        "Prefer remember(kind=\"document-note\") for most 'save this document' requests — it needs no content field. " +
-        "Only use this when the user explicitly says to archive or store the full file for future retrieval. " +
-        "Call AFTER finishing your user response. Indexing runs in the background.",
-      inputSchema: {
-        content: z.string().min(1).describe("Full document markdown/text to store verbatim."),
-        filename: z.string().optional().describe("Optional source filename."),
-        title: z.string().optional().describe("Optional display title."),
-      },
+      title: mcpToolDefs.stash_document.title,
+      description: mcpToolDefs.stash_document.description,
+      inputSchema: mcpToolDefs.stash_document.inputSchema,
     },
     async ({ content, filename, title }) => {
       try {
@@ -696,14 +636,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "create_lot",
+    mcpToolDefs.create_lot.name,
     {
-      title: "Create Lot",
-      description: "Groups existing stashed documents under one @lot handle for multi-file recall.",
-      inputSchema: {
-        refs: z.array(z.string()).min(1).describe("Array of @doc:... references to group."),
-        title: z.string().optional().describe("Optional lot title."),
-      },
+      title: mcpToolDefs.create_lot.title,
+      description: mcpToolDefs.create_lot.description,
+      inputSchema: mcpToolDefs.create_lot.inputSchema,
     },
     async ({ refs, title }) => {
       try {
@@ -721,15 +658,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recall_document",
+    mcpToolDefs.recall_document.name,
     {
-      title: "Recall Document",
-      description:
-        "Returns the complete stored document markdown for an @doc ref, or all full docs for an @lot ref. " +
-        "May be large: use only when the user clearly needs the full file.",
-      inputSchema: {
-        ref: z.string().min(1).describe("Document or lot reference, e.g. @doc:... or @lot:..."),
-      },
+      title: mcpToolDefs.recall_document.title,
+      description: mcpToolDefs.recall_document.description,
+      inputSchema: mcpToolDefs.recall_document.inputSchema,
     },
     async ({ ref }) => {
       try {
@@ -742,16 +675,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "search_documents",
+    mcpToolDefs.search_documents.name,
     {
-      title: "Search Documents",
-      description:
-        "Vector-searches stashed document summaries and returns matching refs for discovery. " +
-        "Does not return full content.",
-      inputSchema: {
-        query: z.string().min(1).describe("Search query to find relevant documents."),
-        limit: z.number().int().min(1).max(20).optional().default(5),
-      },
+      title: mcpToolDefs.search_documents.title,
+      description: mcpToolDefs.search_documents.description,
+      inputSchema: mcpToolDefs.search_documents.inputSchema,
     },
     async ({ query, limit }) => {
       try {
@@ -765,51 +693,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
 
   // Unified entry point — the preferred tool for all save operations.
   server.registerTool(
-    "remember",
+    mcpToolDefs.remember.name,
     {
-      title: "Save / Stash to Memory (remember)",
-      description:
-        "Save a memory, save a preference, or stash a document to Tallei persistent memory. " +
-        "Use this for explicit save requests AND required auto-save of newly processed structured content. " +
-        "For auto-save footers, call remember before finalizing the reply so you can include the saved @doc ref.\n\n" +
-        "• kind=\"fact\" — a single fact or observation. Pass text in `content`.\n" +
-        "• kind=\"preference\" — a stable user preference. Pass text in `content`.\n" +
-        "• kind=\"document-note\" — DEFAULT for document/file/PDF saves and auto-save notes. " +
-        "File ingest accepts only PDF and Word (.docx/.docm); other file types are rejected. " +
-        "Pass title + key_points (array of strings, one per product/item/section, up to 10) + summary. " +
-        "If generated or pasted content should be preserved, pass the full text in `content`; it will be saved as a real @doc document.\n" +
-        "• kind=\"document-blob\" — only for 'sf' / 'archive full file' / 'full stash'. " +
-        "Requires the complete document text in `content`. Warn the user it will take a moment. " +
-        "Use stash_document as a fallback if this times out.\n\n" +
-        "One remember call replaces chaining save_memory + stash_document.",
-      inputSchema: {
-        kind: z
-          .enum(["fact", "preference", "document-note", "document-blob", "checkpoint"])
-          .describe("What type of thing to remember."),
-        content: z
-          .string()
-          .optional()
-          .describe("The text to save. Required for fact/preference/document-blob. Omit for document-note."),
-        title: z.string().optional().describe("Display title. Used for document-note and document-blob."),
-        key_points: z
-          .array(z.string())
-          .max(10)
-          .optional()
-          .describe("3–8 bullet points for document-note. Each ~20 words. Omit for other kinds."),
-        summary: z
-          .string()
-          .optional()
-          .describe("Short paragraph summary for document-note. Omit for other kinds."),
-        source_hint: z
-          .string()
-          .optional()
-          .describe("Human-readable hint about the source, e.g. 'Product catalogue PDF attached this turn'. document-note only."),
-        category: z.string().optional().describe("Preference category (preference kind only)."),
-        preference_key: z.string().optional().describe("Stable conflict key for preferences, e.g. favorite_color."),
-        platform: PlatformSchema.optional().default("claude"),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.remember.title,
+      description: mcpToolDefs.remember.description,
+      inputSchema: mcpToolDefs.remember.inputSchema,
     },
     async (args) => {
       try {
@@ -843,15 +731,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "upload_blob",
+    mcpToolDefs.upload_blob.name,
     {
-      title: "Upload Blob",
-      description: "Queue uploaded file refs for background ingest. Parity with ChatGPT upload_blob action. Only PDF and Word (.docx/.docm) are supported.",
-      inputSchema: {
-        openaiFileIdRefs: z.array(openAiFileRefSchema).min(1).max(10),
-        conversation_id: conversationIdSchema,
-        title: z.string().optional(),
-      },
+      title: mcpToolDefs.upload_blob.title,
+      description: mcpToolDefs.upload_blob.description,
+      inputSchema: mcpToolDefs.upload_blob.inputSchema,
     },
     async (args) => {
       try {
@@ -869,13 +753,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "upload_status",
+    mcpToolDefs.upload_status.name,
     {
-      title: "Upload Status",
-      description: "Check status for a queued upload ingest job.",
-      inputSchema: {
-        ref: z.string().trim().min(1).describe("Upload ingest job ref"),
-      },
+      title: mcpToolDefs.upload_status.title,
+      description: mcpToolDefs.upload_status.description,
+      inputSchema: mcpToolDefs.upload_status.inputSchema,
     },
     async ({ ref }) => {
       try {
@@ -888,13 +770,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recent_documents",
+    mcpToolDefs.recent_documents.name,
     {
-      title: "Recent Documents",
-      description: "Return latest document briefs for this user.",
-      inputSchema: {
-        limit: z.number().int().min(1).max(20).optional().default(5),
-      },
+      title: mcpToolDefs.recent_documents.title,
+      description: mcpToolDefs.recent_documents.description,
+      inputSchema: mcpToolDefs.recent_documents.inputSchema,
     },
     async ({ limit }) => {
       try {
@@ -907,27 +787,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "prepare_turn",
+    mcpToolDefs.prepare_turn.name,
     {
-      title: "Prepare Turn",
-      description:
-        "PRIMARY ENTRY POINT. Call this FIRST on every turn. " +
-        "Equivalent to ChatGPT's prepare_response. It classifies intent, recalls memories, " +
-        "auto-saves files, queues checkpoint saves, and returns replyInstructions telling you what to do next. " +
-        "Always call this before any other tool on a new turn.",
-      inputSchema: {
-        message: z.string().trim().min(1).describe("Exact current user message."),
-        conversation_id: conversationIdSchema,
-        conversation_history: z.array(z.object({
-          role: z.enum(["user", "assistant", "system", "tool"]).optional(),
-          content: z.string().trim().min(1),
-        })).max(40).optional().describe("Visible conversation history for checkpoint auto-save."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional().describe("Attached files with temporary HTTPS download_link URLs."),
-        last_recall: z.object({
-          query: z.string().optional(),
-          context_hash: z.string().optional(),
-        }).optional().nullable().describe("Previous recall state for deduplication."),
-      },
+      title: mcpToolDefs.prepare_turn.title,
+      description: mcpToolDefs.prepare_turn.description,
+      inputSchema: mcpToolDefs.prepare_turn.inputSchema,
     },
     async (args) => {
       try {
@@ -961,16 +825,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
 
   // One-word undo for auto-saves: user replies "undo" and Claude calls this.
   server.registerTool(
-    "undo_save",
+    mcpToolDefs.undo_save.name,
     {
-      title: "Undo Save",
-      description:
-        "Deletes a recently auto-saved document or memory by ref. " +
-        "Call when the user replies 'undo', 'del', or 'delete' after an auto-save footer. " +
-        "Pass the @doc ref from the footer.",
-      inputSchema: {
-        ref: z.string().min(1).describe("The @doc ref to delete, e.g. @doc:catalogue-a3f2"),
-      },
+      title: mcpToolDefs.undo_save.title,
+      description: mcpToolDefs.undo_save.description,
+      inputSchema: mcpToolDefs.undo_save.inputSchema,
     },
     async ({ ref }) => {
       try {

@@ -2,10 +2,10 @@ import type { AuthContext } from "../domain/auth/index.js";
 import { getConnectorProvider } from "../integrations/connectors/index.js";
 import type { ConnectorToolkit } from "../integrations/connectors/index.js";
 import { normalizeToolkitSlug } from "../integrations/composio/auth.js";
-import type { ComposioToolSearchResult } from "../integrations/composio/types.js";
+import type { ComposioToolSearchResult } from "@tallei/composio-tools/types.js";
 import { scoreOutcomeRelevance } from "./binding-discovery.js";
 import type { BindingAskOption } from "./binding-discovery.js";
-import { scoreSchemaFieldRelevance } from "./tool-schema.js";
+import { scoreSchemaFieldRelevance } from "@tallei/composio-tools/tool-schema.js";
 import type { OutcomeRole, TaskBlueprint } from "./spec.js";
 
 export const TOP_CONNECTOR_RECOMMENDATIONS = 5;
@@ -40,11 +40,13 @@ export const DEFAULT_CONNECTOR_PICK_QUESTION =
 function outcomeSubject(description: string): string {
   const trimmed = description.trim().replace(/[?.!]+$/, "");
   const withoutLeadingVerb = trimmed
+    .replace(/^(?:wait(?:s|ing)?\s+for\s+(?:a\s+|an\s+|the\s+)?)/i, "")
     .replace(/^(?:detects?|starts?|triggers?)\s+(?:when\s+)?/i, "")
     .replace(/^(?:monitors?|watches?)\s+(?:for\s+)?/i, "")
     .replace(/^(?:receives?|retrieves?|reads?|fetches?|gets?|loads?|finds?)\s+/i, "")
     .replace(/^(?:sends?|delivers?|publishes?|posts?|creates?|updates?)\s+/i, "")
-    .replace(/^when\s+/i, "");
+    .replace(/^when\s+/i, "")
+    .replace(/\s+to\s+arrive$/i, "");
   const withoutPassiveEvent = withoutLeadingVerb.replace(
     /\s+(?:is|are)\s+(?:submitted|received|created|added|sent|published|updated)$/i,
     "",

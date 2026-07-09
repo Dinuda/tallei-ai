@@ -13,7 +13,7 @@ import {
 } from "../../../src/loops/connector-discovery.js";
 import type { AuthContext } from "../../../src/domain/auth/index.js";
 import type { CatalogToolkitView } from "../../../src/integrations/composio/accounts.js";
-import type { ComposioToolSearchResult } from "../../../src/integrations/composio/types.js";
+import type { ComposioToolSearchResult } from "@tallei/composio-tools/types.js";
 
 const auth: AuthContext = {
   tenantId: "tenant-1",
@@ -114,6 +114,10 @@ test("connector questions preserve the actual workflow outcome", () => {
     role: "destination",
     description: "Publishes the completed result",
   }), "Where should the completed result be delivered?");
+  assert.equal(connectorQuestionForOutcome({
+    role: "trigger",
+    description: "wait for a new support ticket to arrive",
+  }), "Where should new support ticket come from?");
 });
 
 test("applyPrimaryConnectorToBlueprint marks all pending outcomes", () => {

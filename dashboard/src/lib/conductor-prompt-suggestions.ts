@@ -3,9 +3,9 @@ import type { UIMessage } from "ai";
 import {
   CONDUCTOR_BUDGET_EXHAUSTED_QUESTION,
   type ConductorBuildPhase,
-} from "@/lib/conductor-turn-budget";
-import type { PhaseHandoffProgress } from "@/lib/conductor-phase-handoff";
-import { isBuildTerminalForStall } from "@/lib/conductor-stall-recovery";
+} from "@tallei/shared/conductor-turn-budget";
+import type { PhaseHandoffProgress } from "@tallei/shared/conductor-phase-handoff";
+import { isBuildTerminalForStall } from "@tallei/shared/conductor-stall-recovery";
 
 export type ConductorPromptSuggestion = {
   id: string;

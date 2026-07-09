@@ -1,7 +1,7 @@
 import type { AuthContext } from "../domain/auth/index.js";
 import { getApprovalRequest } from "./store.js";
 import { assertAgenticCompiledPlan } from "./plan-validators.js";
-import { resolveComposioActionArgs } from "./composio-action-instructions.js";
+import { resolveComposioActionArgs } from "@tallei/composio-tools/action-instructions.js";
 import type { CompiledPlan, PlannerDecision } from "./spec.js";
 import type { AgentRunState, ApprovalDecision, LoopRunResult, LoopRunWorkflowInput } from "../temporal/types.js";
 

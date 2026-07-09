@@ -405,6 +405,7 @@ test("deriveActivationProgress is terminal complete when loop status is active",
   assert.equal(progress.status, "complete");
   assert.equal(progress.terminal, true);
   assert.equal(progress.reason, "activation_complete");
+  assert.match(progress.instruction ?? "", /Do not recap the workflow in text/i);
 });
 
 test("deriveActivationProgress is terminal complete after successful activateLoop", () => {
@@ -426,6 +427,7 @@ test("deriveActivationProgress is terminal complete after successful activateLoo
   assert.equal(progress.terminal, true);
   assert.deepEqual(progress.allowedTools, []);
   assert.equal(progress.reason, "activation_complete");
+  assert.match(progress.instruction ?? "", /Do not recap the workflow in text/i);
 });
 
 test("deriveActivationProgress surfaces missing test prerequisite", () => {

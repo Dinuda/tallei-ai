@@ -9,12 +9,12 @@ import type { InteractivePromptOption } from "@/components/ai-elements/interacti
 import {
   resolveConfirmOutcomeBriefActionFromSelection,
   type ConfirmOutcomeBriefAction,
-} from "@/lib/confirm-outcome-brief-action";
-import { findActivationReplyOption } from "@/lib/conductor-activation-confirm";
+} from "@tallei/shared/confirm-outcome-brief-action";
+import { findActivationReplyOption } from "@tallei/shared/conductor-activation-confirm";
 import {
   isBuildTerminalForStall,
   isPhaseOpenForStallRecovery,
-} from "@/lib/conductor-stall-recovery";
+} from "@tallei/shared/conductor-stall-recovery";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
@@ -25,8 +25,8 @@ import {
   isRecoverableConductorExecution,
   type ConductorBuildPhase,
   type ConductorStallResult,
-} from "@/lib/conductor-turn-budget";
-import { isPhaseHandoffPending, type PhaseHandoffProgress } from "@/lib/conductor-phase-handoff";
+} from "@tallei/shared/conductor-turn-budget";
+import { isPhaseHandoffPending, type PhaseHandoffProgress } from "@tallei/shared/conductor-phase-handoff";
 
 export type { PhaseHandoffProgress };
 
@@ -276,7 +276,7 @@ function getLastAssistantExecutions(messages: UIMessage[]): ConductorToolExecuti
   });
 }
 
-export { isBuildTerminalForStall } from "@/lib/conductor-stall-recovery";
+export { isBuildTerminalForStall } from "@tallei/shared/conductor-stall-recovery";
 
 export function findPendingConductorPhaseHandoff(messages: UIMessage[]): ConductorToolExecution | null {
   const last = messages.at(-1);
@@ -346,7 +346,7 @@ export function isConductorBudgetExhausted(messages: UIMessage[]): boolean {
   return isBudgetExhaustedEnding(messages);
 }
 
-export { isPhaseHandoffPending, isReviewConfirmationHandoffPending } from "@/lib/conductor-phase-handoff";
+export { isPhaseHandoffPending, isReviewConfirmationHandoffPending } from "@tallei/shared/conductor-phase-handoff";
 
 export { isActionableConductorPhase, type ConductorBuildPhase, type ConductorStallResult };
 
@@ -550,6 +550,28 @@ function pendingOutcomeBriefFromPhaseProgress(
   };
 }
 
+/** Revision for client persistence dedupe; ignores streaming reasoning token deltas. */
+export function messagesPersistenceRevision(messages: UIMessage[]): string {
+  return messages.map((message) => {
+    const parts = (message.parts ?? []).map((part) => {
+      if (part.type === "text") {
+        return `t:${part.text?.length ?? 0}`;
+      }
+      if (part.type === "reasoning") {
+        const reasoning = part as ReasoningUIPart;
+        if (reasoning.state === "streaming") return "r:streaming";
+        return `r:${reasoning.state ?? "done"}:${reasoning.text?.length ?? 0}`;
+      }
+      if (isToolPart(part.type)) {
+        const toolPart = part as DynamicToolUIPart & { output?: unknown };
+        return `tool:${toolPart.toolCallId ?? ""}:${toolPart.state ?? ""}:${toolPart.output != null ? 1 : 0}`;
+      }
+      return part.type;
+    }).join(",");
+    return `${message.id}:${parts}`;
+  }).join("|");
+}
+
 /** Fingerprint tool part states so effects can react to addToolOutput without message count changes. */
 export function messagesUiStateRevision(messages: UIMessage[]): string {
   return messages.map((message) => {
@@ -561,6 +583,24 @@ export function messagesUiStateRevision(messages: UIMessage[]): string {
       })
       .join(",");
     return `${message.id}:${toolStates}`;
+  }).join("|");
+}
+
+/** Lightweight per-message revision for memoizing frozen transcript turns. */
+export function messagePartsRevision(message: UIMessage): string {
+  return (message.parts ?? []).map((part) => {
+    if (part.type === "text") {
+      return `t:${part.text?.length ?? 0}`;
+    }
+    if (part.type === "reasoning") {
+      const reasoning = part as { state?: string; text?: string };
+      return `r:${reasoning.state ?? ""}:${reasoning.text?.length ?? 0}`;
+    }
+    if (isToolPart(part.type)) {
+      const toolPart = part as DynamicToolUIPart & { output?: unknown };
+      return `tool:${toolPart.toolCallId ?? ""}:${toolPart.state ?? ""}:${toolPart.output != null ? 1 : 0}`;
+    }
+    return part.type;
   }).join("|");
 }
 
@@ -628,6 +668,11 @@ export function findStaleConfirmOutcomeBriefCalls(messages: UIMessage[]): StaleC
   return stale;
 }
 
+/**
+ * Returns true when the last assistant step ended on a fully-answered UI-only tool
+ * and there are no remaining unanswered UI calls.  Used by `sendAutomaticallyWhen`
+ * (guarded externally by a session-action ref so it never fires on page refresh).
+ */
 export function shouldAutoSendConductorChat({
   messages,
   buildPhase,
@@ -641,11 +686,11 @@ export function shouldAutoSendConductorChat({
   loopStatus?: string;
   phaseProgress?: PhaseHandoffProgress | null;
 }): boolean {
-  if (hasUnansweredUiToolCalls(messages, phaseProgress)) return false;
-  if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) return false;
   void buildPhase;
   void missingSlots;
-  void loopStatus;
+  if (isBuildTerminalForStall({ loopStatus, phaseProgress })) return false;
+  if (hasUnansweredUiToolCalls(messages, phaseProgress)) return false;
+  if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) return false;
   return lastAssistantEndedWithAnsweredUiTool(messages);
 }
 
@@ -784,10 +829,41 @@ export function findConnectorPickInputForToolCall(
   return null;
 }
 
+/** Hide earlier answered askQuestion cards when the same questionId was answered again. */
+export function collectSupersededAskQuestionCallIds(messages: UIMessage[]): Set<string> {
+  const latestByQuestionId = new Map<string, string>();
+  const superseded = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.parts ?? []) {
+      if (!isAskQuestionPart(part)) continue;
+      const askPart = part as AskQuestionToolPart;
+      const questionId = askPart.input?.questionId?.trim();
+      if (!questionId || askPart.state !== "output-available" || askPart.output == null) continue;
+      const previous = latestByQuestionId.get(questionId);
+      if (previous) superseded.add(previous);
+      latestByQuestionId.set(questionId, askPart.toolCallId);
+    }
+  }
+
+  return superseded;
+}
+
+export function clearPhaseProgressPendingUiTool(
+  phaseProgress: PhaseHandoffProgress | null | undefined,
+  toolCallId: string,
+): PhaseHandoffProgress | null | undefined {
+  if (!phaseProgress?.pendingUiTool) return phaseProgress;
+  if (phaseProgress.pendingUiTool.toolCallId !== toolCallId) return phaseProgress;
+  return { ...phaseProgress, pendingUiTool: undefined };
+}
+
 export function findPendingInteractivePrompts(
   messages: UIMessage[],
   spec: Record<string, unknown> | null = null,
   phaseProgress?: PhaseHandoffProgress | null,
+  excludeToolCallIds: ReadonlySet<string> = new Set(),
 ): PendingInteractivePrompt[] {
   const discovery = findLatestConnectorDiscovery(messages);
   const prompts: PendingInteractivePrompt[] = [];
@@ -852,13 +928,17 @@ export function findPendingInteractivePrompts(
     }
   }
 
-  if (prompts.length <= 1) return prompts;
+  const visible = excludeToolCallIds.size > 0
+    ? prompts.filter((prompt) => !excludeToolCallIds.has(prompt.toolCallId))
+    : prompts;
 
-  return prompts.map((prompt, index) => ({
+  if (visible.length <= 1) return visible;
+
+  return visible.map((prompt, index) => ({
     ...prompt,
     input: {
       ...prompt.input,
-      step: { index: index + 1, total: prompts.length },
+      step: { index: index + 1, total: visible.length },
     },
   }));
 }

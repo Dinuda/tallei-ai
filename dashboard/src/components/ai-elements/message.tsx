@@ -28,10 +28,11 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { Streamdown } from "streamdown";
+
+import { useAnimationFrameText } from "@/hooks/use-animation-frame-text";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
@@ -321,44 +322,19 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
-function useAnimationFrameText(
-  value: MessageResponseProps["children"],
-  isAnimating?: boolean,
-) {
-  const isText = typeof value === "string";
-  const [displayText, setDisplayText] = useState(isText ? value : "");
-  const latestTextRef = useRef(isText ? value : "");
-  const frameRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (!isText) return;
-    latestTextRef.current = value;
-    if (isAnimating) {
-      return;
-    }
-
-    const flush = () => {
-      frameRef.current = null;
-      setDisplayText((current) => (current === latestTextRef.current ? current : latestTextRef.current));
-    };
-
-    if (frameRef.current !== null) return;
-    frameRef.current = window.requestAnimationFrame(flush);
-  }, [isAnimating, isText, value]);
-
-  useEffect(() => () => {
-    if (frameRef.current !== null) {
-      window.cancelAnimationFrame(frameRef.current);
-    }
-  }, []);
-
-  if (isAnimating && isText) return value;
-  return isText ? displayText : value;
-}
-
 export const MessageResponse = memo(
   ({ children, className, isAnimating, ...props }: MessageResponseProps & { isAnimating?: boolean }) => {
-    const displayedChildren = useAnimationFrameText(children, isAnimating);
+    const isText = typeof children === "string";
+    const displayedText = useAnimationFrameText(isText ? children : null);
+
+    if (isAnimating && isText) {
+      return (
+        <p className={cn("size-full whitespace-pre-wrap break-words", className)}>
+          {displayedText}
+        </p>
+      );
+    }
+
     return (
       <Streamdown
         className={cn(
@@ -368,14 +344,14 @@ export const MessageResponse = memo(
         plugins={streamdownPlugins}
         {...props}
       >
-        {displayedChildren}
+        {children}
       </Streamdown>
     );
   },
   (prevProps, nextProps) =>
-  !nextProps.isAnimating
-  && prevProps.children === nextProps.children
-  && nextProps.isAnimating === prevProps.isAnimating
+    !nextProps.isAnimating
+    && prevProps.children === nextProps.children
+    && nextProps.isAnimating === prevProps.isAnimating
 );
 
 MessageResponse.displayName = "MessageResponse";

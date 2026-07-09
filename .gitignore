@@ -11,3 +11,10 @@ memory.db
 login-ngrok.png
 .env*
 generated/
+
+# Workspace package build outputs
+packages/*/dist/
+packages/*/node_modules/
+test-results/
+dashboard/test-results/
+exports/

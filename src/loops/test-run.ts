@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import type { AuthContext } from "../domain/auth/index.js";
 import { config } from "../config/index.js";
 import type { TestRunScenario } from "./conductor-tools.js";
-import { buildSampleTriggerPayload } from "../integrations/composio/trigger-known-fields.js";
+import { buildSampleTriggerPayload } from "@tallei/composio-tools/trigger-known-fields.js";
 import {
   buildTestRunPlannerPrompt,
   runPlannerDecision,
@@ -14,9 +14,9 @@ import {
   type PlannerDecision,
 } from "./spec.js";
 import { assertAgenticCompiledPlan } from "./plan-validators.js";
-import { validateToolArgsAgainstSchema } from "./tool-schema.js";
+import { validateToolArgsAgainstSchema } from "@tallei/composio-tools/tool-schema.js";
 import { createLoopRun, getCompiledPlan, getLatestBuildState, updateLoopRun } from "./store.js";
-import { resolveComposioActionArgs } from "./composio-action-instructions.js";
+import { resolveComposioActionArgs } from "@tallei/composio-tools/action-instructions.js";
 import { isCompiledPlanCurrent } from "./build-continuity.js";
 
 export type TestRunStep =

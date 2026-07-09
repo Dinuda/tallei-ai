@@ -7,7 +7,7 @@ import {
   scoreTriggerFieldOverlap,
   summarizeInputSchema,
   type SchemaFieldSummary,
-} from "./tool-schema.js";
+} from "@tallei/composio-tools/tool-schema.js";
 
 export const MIN_CAPABILITY_SCORE = 2;
 /** Top candidates within this score gap are treated as ambiguous (user picks outcome-framed option). */

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   resolveConfirmOutcomeBriefActionFromSelection,
-} from "../../../shared/confirm-outcome-brief-action.js";
+} from "@tallei/shared/confirm-outcome-brief-action.js";
 import { confirmOutcomeBriefInputSchema } from "../../../src/loops/conductor-tools.js";
 
 test("confirmOutcomeBriefInputSchema requires action tokens on option id and value", () => {

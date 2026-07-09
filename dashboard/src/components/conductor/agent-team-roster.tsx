@@ -5,6 +5,7 @@ import { useSession } from "next-auth/react";
 import { useMemo } from "react";
 
 import { AgentTeamAvatar, rosterAvatarShellClassName } from "@/components/conductor/agent-team-avatar";
+import { LabBadge } from "@/components/conductor/lab-badge";
 import { OutcomeBriefCard } from "@/components/conductor/outcome-brief-card";
 import type {
   AgentTeamReviewer,
@@ -197,6 +198,8 @@ export function AgentTeamRoster({
       className="overflow-hidden border border-[var(--ed-border)] bg-white"
       data-transcript-block
     >
+      <LabBadge />
+
       <div className="border-b border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-4 py-4 sm:px-5">
         <h3 className="text-base font-semibold leading-6 text-[var(--ed-text)]">{team.title}</h3>
         <p className="mt-1 text-xs text-[var(--ed-text-muted)]">Specialists grouped by responsibility.</p>
@@ -205,7 +208,6 @@ export function AgentTeamRoster({
       <div className="space-y-2 bg-[var(--ed-surface-alt)] p-3 sm:p-4">
         {team.triggers?.length ? (
           <div className="space-y-2">
-            <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--ed-text-muted)]">Lab</p>
             {team.triggers.map((trigger) => (
               <TriggerLabRow key={trigger.outcomeId} trigger={trigger} />
             ))}
@@ -245,6 +247,8 @@ export function AgentTeamRosterPlaceholder({ title = "Automation team" }: { titl
       )}
       data-transcript-block
     >
+      <LabBadge />
+
       <div className="border-b border-[var(--ed-border-light)] bg-[var(--ed-surface-alt)] px-4 py-4 sm:px-5">
         <h3 className="text-base font-semibold leading-6 text-[var(--ed-text)]">{title}</h3>
         <p className="mt-1 text-xs text-[var(--ed-text-muted)]">Assigning specialists…</p>
