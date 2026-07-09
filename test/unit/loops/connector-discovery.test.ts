@@ -97,6 +97,21 @@ test("buildConnectorAskOptions keeps unavailable apps visible but not selectable
   assert.deepEqual(buildConnectorRecommendedIds(options), []);
 });
 
+test("buildConnectorAskOptions labels no-auth apps as ready without sign-in", () => {
+  const options = buildConnectorAskOptions([
+    candidate({
+      connector: "composio_search",
+      score: 6,
+      connected: true,
+      connectable: true,
+      requiresConnection: false,
+      name: "Composio Search",
+    }),
+  ]);
+  assert.equal(options[0]?.disabled, undefined);
+  assert.match(options[0]?.description ?? "", /no sign-in needed/i);
+});
+
 test("connector questions preserve the actual workflow outcome", () => {
   assert.equal(connectorQuestionForOutcome({
     role: "trigger",
@@ -169,6 +184,14 @@ test("discoverConnectorsForBlueprint treats connection as a secondary viability 
   const rankedToolkits: CatalogToolkitView[] = [
     { slug: "gmail", name: "Gmail", description: "Email", logo: "", connected: true },
     { slug: "notion", name: "Notion", description: "Knowledge base", logo: "", connected: false },
+    {
+      slug: "composio_search",
+      name: "Composio Search",
+      description: "Web search",
+      logo: "",
+      connected: false,
+      requiresConnection: false,
+    },
   ];
   const result = await discoverConnectorsForBlueprint(auth, {
     outcomes: [{ id: "publish", role: "destination", description: "Publish a knowledge base article" }],

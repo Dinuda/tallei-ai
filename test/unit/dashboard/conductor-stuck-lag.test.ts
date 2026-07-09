@@ -9,7 +9,7 @@ test("conductor builder dedupes chat persistence and meta refresh churn", async 
   );
 
   assert.match(builder, /messagesPersistenceRevision/);
-  assert.match(builder, /lastPersistedRevisionRef/);
+  assert.match(builder, /lastSyncedRevisionRef/);
   assert.match(builder, /lastMetaRefreshAtRef/);
   assert.match(builder, /metaRefreshInFlightRef/);
   assert.match(builder, /Still working/);

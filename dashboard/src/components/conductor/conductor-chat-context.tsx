@@ -9,7 +9,8 @@ import type { BuilderLiveUsage } from "@/lib/loop-builder-usage";
 
 export type ConductorChatApi = {
   sendMessage: (input?: { text?: string }) => void;
-  addToolOutput: (params: {
+  /** Persist a UI-tool answer server-side and resume the Conductor session stream. */
+  answerTool: (params: {
     tool: string;
     toolCallId: string;
     output: unknown;
@@ -24,7 +25,7 @@ export type ConductorChatContextValue = {
   chatApi: ConductorChatApi;
   chatUsage: BuilderLiveUsage;
   chatError: string | null;
-  /** Tool calls answered locally before useChat / server state catches up. */
+  /** Tool calls answered locally before server state catches up. */
   optimisticallyResolvedToolCallIds: ReadonlySet<string>;
 };
 

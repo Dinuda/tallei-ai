@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 
 import type { AuthContext } from "../domain/auth/index.js";
 import { normalizeToolkitSlug, resolveToolkitSlug } from "../integrations/composio/auth.js";
+import { isNoAuthToolkit } from "../integrations/composio/toolkit-auth.js";
 import {
   buildPlannerCardForTool,
   fetchConnectorPlaybook,
@@ -291,8 +292,9 @@ export async function compileLoopSpec(
   const toolCatalog: ToolCatalogDraft[] = [];
   for (const binding of parsed.bindings) {
     const resolvedConnector = await resolveToolkitSlug(binding.connector);
+    const noAuth = await isNoAuthToolkit(resolvedConnector);
     const toolkit = connectedBySlug.get(normalizeToolkitSlug(resolvedConnector));
-    if (!toolkit?.connected || !toolkit.connectedAccountId) {
+    if (!noAuth && (!toolkit?.connected || !toolkit.connectedAccountId)) {
       errors.push({
         code: "CONNECTOR_NOT_CONNECTED",
         message: `${binding.connector} is not connected in this workspace`,
@@ -376,7 +378,7 @@ export async function compileLoopSpec(
       inputSchema: resolved.inputSchema,
       ...(resolved.outputSchema ? { outputSchema: resolved.outputSchema } : {}),
       sensitive,
-      credentialRef: toolkit.connectedAccountId,
+      ...(toolkit?.connectedAccountId ? { credentialRef: toolkit.connectedAccountId } : {}),
       bindingRole: binding.role,
       role: binding.role,
       ...(resolved.toolkitVersion ? { toolkitVersion: resolved.toolkitVersion } : {}),

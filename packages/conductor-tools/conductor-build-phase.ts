@@ -1,16 +1,10 @@
 import { z } from "zod";
 
-export const BUILD_PHASES = [
-  "intent",
-  "blueprint",
-  "connectors",
-  "bindings",
-  "review",
-  "compile",
-  "test",
-  "activation",
-] as const;
+import {
+  BUILD_PHASES,
+  type ConductorBuildPhase,
+} from "@tallei/shared/conductor-build-phase.js";
+
+export { BUILD_PHASES, type ConductorBuildPhase };
 
 export const buildPhaseSchema = z.enum(BUILD_PHASES);
-
-export type ConductorBuildPhase = z.infer<typeof buildPhaseSchema>;

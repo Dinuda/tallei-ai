@@ -2,6 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import {
+  BUILD_PHASES,
+  buildPhaseSchema,
+  type ConductorBuildPhase,
+} from "@tallei/conductor-tools/build-phase.js";
+import {
   agentConfigSchema,
   approvalPolicySchema,
   composioActionInstructionSchema,
@@ -20,11 +25,8 @@ import {
 import { intentAnalysisSchema } from "./intent-discovery.js";
 import { computeOutcomeBriefHash } from "./outcome-brief.js";
 
-export const BUILD_PHASES = [
-  "intent", "blueprint", "connectors", "bindings", "review", "compile", "test", "activation",
-] as const;
-export const buildPhaseSchema = z.enum(BUILD_PHASES);
-export type BuildPhase = z.infer<typeof buildPhaseSchema>;
+export { BUILD_PHASES, buildPhaseSchema };
+export type BuildPhase = ConductorBuildPhase;
 
 export const userFacingBuildStageSchema = z.enum([
   "understand", "design", "connect_tools", "review_and_activate",

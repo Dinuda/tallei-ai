@@ -50,7 +50,7 @@ export const composioConnectorProvider: ConnectorProvider = {
       auth: input.auth,
       connector: input.toolkit,
       actionSlug: input.actionSlug,
-      credentialRef: input.connectedAccountId,
+      ...(input.connectedAccountId ? { credentialRef: input.connectedAccountId } : {}),
       args: input.args,
       ...(input.toolkitVersion ? { toolkitVersion: input.toolkitVersion } : {}),
     });

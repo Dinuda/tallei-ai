@@ -169,12 +169,9 @@ test("conductor builder renders interactive prompts without auto-selecting conne
   assert.match(layout, /InteractivePromptMenu/);
   assert.match(shared, /pickConnectorApp/);
   assert.match(shared, /hasUnansweredUiToolCalls/);
-  assert.match(shared, /shouldAutoSendConductorChat/);
-  assert.match(shared, /phaseCompleted/);
-  assert.match(shared, /operationKey/);
-  assert.match(shared, /hasPriorTerminalExecutionForOperation/);
-  assert.match(source, /addToolOutput/);
-  assert.match(source, /useConductorContinuation/);
+  assert.match(shared, /isConductorBudgetExhausted/);
+  assert.match(source, /answerTool/);
+  assert.match(source, /submitConductorToolAnswer/);
   assert.match(source, /parseContinuationIntent/);
   assert.match(source, /findPendingInteractivePrompts/);
   assert.match(source, /pendingQuestions/);
@@ -182,12 +179,14 @@ test("conductor builder renders interactive prompts without auto-selecting conne
   assert.match(layout, /pendingQuestionStepsRef/);
   assert.doesNotMatch(layout, /\{pendingQuestions\.map\(/);
   assert.doesNotMatch(shared, /autoApplyConnector/);
+  assert.doesNotMatch(shared, /shouldAutoSendConductorChat/);
+  assert.doesNotMatch(shared, /hasPriorTerminalExecutionForOperation/);
   const pendingResolver = shared.slice(
     shared.indexOf("export function findPendingInteractivePrompts"),
     shared.indexOf("export function shouldShowThinkingIndicator"),
   );
   assert.match(pendingResolver, /prompts\.push/);
-  assert.match(pendingResolver, /step: \{ index: index \+ 1, total: prompts\.length \}/);
+  assert.match(pendingResolver, /step: \{ index: index \+ 1, total: visible\.length \}/);
   assert.match(route, /conductorStepLimitForPhase\(requestStartPhase\)/);
   assert.match(route, /operationKey/);
   assert.match(route, /duplicateToolExecution/);

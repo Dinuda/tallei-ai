@@ -285,7 +285,7 @@ export const resolvedToolSchema = z.object({
   plannerCard: toolPlannerCardSchema,
   composioAction: composioActionInstructionSchema.optional(),
   sensitive: z.boolean().default(false),
-  credentialRef: z.string().min(1),
+  credentialRef: z.string().min(1).optional(),
   toolkitVersion: z.string().min(1).optional(),
   role: outcomeRoleSchema.optional(),
 });

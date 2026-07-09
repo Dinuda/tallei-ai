@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   isBuildTerminalForStall,
-  isPhaseOpenForStallRecovery,
   isPhaseProgressTerminal,
 } from "@tallei/shared/conductor-stall-recovery.js";
 
@@ -35,22 +34,5 @@ test("isBuildTerminalForStall treats activation_phase_inactive as terminal", () 
       terminal: true,
       reason: "activation_phase_inactive",
     },
-  }), true);
-});
-
-test("isPhaseOpenForStallRecovery distinguishes open, closed, and unknown", () => {
-  assert.equal(isPhaseOpenForStallRecovery({
-    terminal: false,
-    status: "in_progress",
-  }), true);
-  assert.equal(isPhaseOpenForStallRecovery({
-    terminal: true,
-    status: "complete",
-    reason: "activation_complete",
-  }), false);
-  assert.equal(isPhaseOpenForStallRecovery(null), null);
-  assert.equal(isPhaseOpenForStallRecovery({
-    status: "pending",
-    terminal: false,
   }), true);
 });

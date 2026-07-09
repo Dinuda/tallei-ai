@@ -9,6 +9,7 @@ import {
 export function BuilderOutcomeBriefPrompt({
   confirmPrompt,
   disabled,
+  submitting,
   onSubmit,
 }: {
   confirmPrompt: {
@@ -18,6 +19,7 @@ export function BuilderOutcomeBriefPrompt({
     allowOther?: boolean;
   };
   disabled?: boolean;
+  submitting?: boolean;
   onSubmit: (answer: InteractivePromptAnswer) => void;
 }) {
   return (
@@ -25,12 +27,13 @@ export function BuilderOutcomeBriefPrompt({
       <InteractivePromptMenu
         allowOther={false}
         disabled={disabled}
+        submitting={submitting}
         onSubmit={onSubmit}
         options={confirmPrompt.options}
         placement="composer"
         question={confirmPrompt.question}
         recommendedOptionIds={confirmPrompt.recommendedOptionIds}
-        selectionHint="Choose an option, then press Continue"
+        selectionHint="Choose an option to continue"
         variant="neutral"
       />
     </div>

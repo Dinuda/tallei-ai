@@ -48,13 +48,15 @@ cd dashboard && npm run dev
 ## Verify
 
 1. Open `/dashboard/loops`, pick a starter card
-2. Conductor chat streams via `POST /api/loops/:id/chat` (proxied through Next.js with session auth)
-3. Compile → Activate (registers Temporal Schedule when trigger is `schedule`)
-4. Run now → check `loop_runs` in Postgres or Temporal UI at http://localhost:8233
-5. Sensitive tool steps create `approval_requests`; decide at `/dashboard/approvals` (signals workflow)
+2. Conductor chat streams via `POST /api/loops/:id/chat` (proxied through Next.js with session auth → Express backend)
+3. UI-only tool answers (questions, connector picks, confirm, activation chips) use `POST /api/loops/:id/chat/tool-answer` — also proxied with **SSE passthrough** so the backend session loop can resume
+4. Compile → Activate (registers Temporal Schedule when trigger is `schedule`)
+5. Run now → check `loop_runs` in Postgres or Temporal UI at http://localhost:8233
+6. Sensitive tool steps create `approval_requests`; decide at `/dashboard/approvals` (signals workflow)
 
 ## Architecture notes
 
+- **Conductor chat execution** lives on the Express backend (`src/transport/http/routes/loops.ts`, `src/loops/`). Next.js only proxies `/api/loops/*` with auth — it does not run `pipeConductorSession` or persist build events.
 - **Workflow** (`src/temporal/workflows/loop-run.workflow.ts`): deterministic orchestration only
 - **Activities**: planner (`generateObject`), Composio tool execute, approval create, deliver output
 - **Profiles**: `agentic` (default), `monitor` (rule evaluation), `sync` (preview; full bidirectional sync is v2)

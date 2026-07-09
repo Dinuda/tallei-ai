@@ -18,6 +18,3 @@ export function ConductorHeader() {
     </div>
   );
 }
-
-/** @deprecated Use ConductorHeader */
-export const LoopBuilderHeader = ConductorHeader;

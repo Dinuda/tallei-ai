@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   convertToModelMessages,
   MissingToolResultsError,
@@ -32,12 +33,17 @@ export function normalizeConductorChatMessages(messages: Array<UIMessage | null 
   const seen = new Set<string>();
   const normalized: UIMessage[] = [];
   for (const message of messages) {
-    if (!message || !message.id || !message.role) continue;
-    if (seen.has(message.id)) continue;
+    if (!message || !message.role) continue;
+    // Stream turns can arrive without an id when generateMessageId was omitted.
+    // Assign one so visible assistant content is not silently dropped from the event log.
+    const id = typeof message.id === "string" && message.id.trim().length > 0
+      ? message.id
+      : randomUUID();
+    if (seen.has(id)) continue;
     if (message.role === "assistant" && !hasVisibleContent(message)) continue;
-    seen.add(message.id);
+    seen.add(id);
     const next: UIMessage = {
-      id: message.id,
+      id,
       role: message.role,
       parts: message.parts ?? [],
     };

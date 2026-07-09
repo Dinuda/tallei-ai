@@ -1,32 +1,28 @@
 import {
-  lastAssistantMessageIsCompleteWithToolCalls,
   type DynamicToolUIPart,
   type ReasoningUIPart,
   type UIMessage,
 } from "ai";
 
-import type { InteractivePromptOption } from "@/components/ai-elements/interactive-prompt-menu";
+import type {
+  InteractivePromptAnswer,
+  InteractivePromptOption,
+} from "@/components/ai-elements/interactive-prompt-menu";
 import {
   resolveConfirmOutcomeBriefActionFromSelection,
   type ConfirmOutcomeBriefAction,
 } from "@tallei/shared/confirm-outcome-brief-action";
 import { findActivationReplyOption } from "@tallei/shared/conductor-activation-confirm";
-import {
-  isBuildTerminalForStall,
-  isPhaseOpenForStallRecovery,
-} from "@tallei/shared/conductor-stall-recovery";
 import type {
   PresentReplyOptionsInput,
   PresentReplyOptionsOutput,
 } from "@/lib/conductor-prompt-suggestions";
+import { CONDUCTOR_UI_ONLY_TOOLS } from "@tallei/conductor-tools/tool-names";
 import {
   CONDUCTOR_BUDGET_EXHAUSTED_QUESTION,
-  isActionableConductorPhase,
-  isRecoverableConductorExecution,
   type ConductorBuildPhase,
-  type ConductorStallResult,
 } from "@tallei/shared/conductor-turn-budget";
-import { isPhaseHandoffPending, type PhaseHandoffProgress } from "@tallei/shared/conductor-phase-handoff";
+import type { PhaseHandoffProgress } from "@tallei/shared/conductor-phase-handoff";
 
 export type { PhaseHandoffProgress };
 
@@ -126,6 +122,39 @@ export type PendingInteractivePrompt = {
   toolName: "askQuestion" | "pickConnectorApp";
   input: AskQuestionInput;
 };
+
+/** Multiple askQuestion prompts in one turn — answers are batched client-side before POST. */
+export function isBatchableAskQuestionPrompts(prompts: PendingInteractivePrompt[]): boolean {
+  return prompts.length > 1 && prompts.every((prompt) => prompt.toolName === "askQuestion");
+}
+
+export function partitionPendingQuestionBatch(
+  prompts: PendingInteractivePrompt[],
+  queuedAnswers: ReadonlyMap<string, InteractivePromptAnswer>,
+): {
+  batchMode: boolean;
+  total: number;
+  queuedCount: number;
+  remaining: PendingInteractivePrompt[];
+} {
+  const batchMode = isBatchableAskQuestionPrompts(prompts);
+  const total = prompts.length;
+  if (!batchMode) {
+    return { batchMode: false, total, queuedCount: 0, remaining: prompts };
+  }
+
+  const remainingBase = prompts.filter((prompt) => !queuedAnswers.has(prompt.toolCallId));
+  const queuedCount = total - remainingBase.length;
+  const remaining = remainingBase.map((prompt, index) => ({
+    ...prompt,
+    input: {
+      ...prompt.input,
+      step: { index: queuedCount + index + 1, total },
+    },
+  }));
+
+  return { batchMode: true, total, queuedCount, remaining };
+}
 
 export const DEFAULT_CONNECTOR_PICK_QUESTION =
   "Which app should handle this workflow step?";
@@ -229,126 +258,25 @@ export type AskQuestionToolPart = {
 
 export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
-export type ConductorToolExecution = {
-  ok: boolean;
-  operationKey: string;
-  parentArtifactHash: string;
-  phaseCompleted: boolean;
-  requiresUserInput: boolean;
-  retryAllowed: boolean;
-  turnOutcome?: string;
-  continuation?: string;
-  recoverToPhase?: string;
-  nextPhase?: string;
-  handoffId?: string;
-  compiledPlanId?: string;
-};
-
-function readExecutionFromOutput(output: Record<string, unknown>): ConductorToolExecution | null {
-  const operationKey = typeof output.operationKey === "string" ? output.operationKey : null;
-  const parentArtifactHash = typeof output.parentArtifactHash === "string" ? output.parentArtifactHash : null;
-  if (!operationKey || !parentArtifactHash) return null;
-  return {
-    ok: output.ok === false ? false : true,
-    operationKey,
-    parentArtifactHash,
-    phaseCompleted: output.phaseCompleted === true,
-    requiresUserInput: output.requiresUserInput === true,
-    retryAllowed: output.retryAllowed === true,
-    ...(typeof output.turnOutcome === "string" ? { turnOutcome: output.turnOutcome } : {}),
-    ...(typeof output.continuation === "string" ? { continuation: output.continuation } : {}),
-    ...(typeof output.recoverToPhase === "string" ? { recoverToPhase: output.recoverToPhase } : {}),
-    ...(typeof output.nextPhase === "string" ? { nextPhase: output.nextPhase } : {}),
-    ...(typeof output.handoffId === "string" ? { handoffId: output.handoffId } : {}),
-    ...(typeof output.compiledPlanId === "string" ? { compiledPlanId: output.compiledPlanId } : {}),
-  };
-}
-
-function getLastAssistantExecutions(messages: UIMessage[]): ConductorToolExecution[] {
-  const last = messages.at(-1);
-  if (!last || last.role !== "assistant") return [];
-  return (last.parts ?? []).flatMap((part) => {
-    if (!isToolPart(part.type)) return [];
-    const toolPart = part as DynamicToolUIPart & { output?: unknown };
-    if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") return [];
-    const parsed = readExecutionFromOutput(toolPart.output as Record<string, unknown>);
-    return parsed ? [parsed] : [];
-  });
-}
-
-export { isBuildTerminalForStall } from "@tallei/shared/conductor-stall-recovery";
-
-export function findPendingConductorPhaseHandoff(messages: UIMessage[]): ConductorToolExecution | null {
-  const last = messages.at(-1);
-  if (!last || last.role !== "assistant") return null;
-  const executions = getLastAssistantExecutions(messages);
-  for (let index = executions.length - 1; index >= 0; index -= 1) {
-    const execution = executions[index]!;
-    if ((execution.continuation === "next_phase" || execution.continuation === "continue_phase")
-      && (execution.turnOutcome === "phase_complete" || execution.turnOutcome === "progress")
-      && execution.nextPhase
-      && execution.handoffId
-      && !hasPriorTerminalExecutionForOperation(messages, execution.operationKey, execution.parentArtifactHash)) {
-      return execution;
-    }
-  }
-  return null;
-}
-
-function hasTerminalExecution(executions: ConductorToolExecution[]): boolean {
-  return executions.some((execution) => {
-    if (execution.turnOutcome === "build_complete") return true;
-    const output = {
-      ok: execution.ok,
-      retryAllowed: execution.retryAllowed,
-      recoverToPhase: execution.recoverToPhase,
-    };
-    if (isRecoverableConductorExecution(output)) return false;
-    return execution.phaseCompleted
-      || execution.requiresUserInput
-      || (!execution.ok && !execution.retryAllowed);
-  });
-}
-
-function lastAssistantIsTextOnly(messages: UIMessage[]): boolean {
-  const last = messages.at(-1);
-  if (!last || last.role !== "assistant") return false;
-  const parts = last.parts ?? [];
-  const hasText = parts.some((part) => part.type === "text" && part.text.trim().length > 0);
-  const hasToolOutput = parts.some((part) =>
-    isToolPart(part.type) && (part as DynamicToolUIPart).state === "output-available");
-  return hasText && !hasToolOutput;
-}
-
 function isBudgetExhaustedEnding(messages: UIMessage[]): boolean {
   const last = messages.at(-1);
   if (!last || last.role !== "assistant") return false;
-  const executions = getLastAssistantExecutions(messages);
-  if (executions.some((execution) => execution.turnOutcome === "budget_exhausted")) return true;
+  for (const part of last.parts ?? []) {
+    if (!isToolPart(part.type)) continue;
+    const toolPart = part as DynamicToolUIPart & { output?: unknown };
+    if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") continue;
+    if ((toolPart.output as { turnOutcome?: string }).turnOutcome === "budget_exhausted") return true;
+  }
   return (last.parts ?? []).some((part) =>
     part.type === "text"
     && part.text.includes(CONDUCTOR_BUDGET_EXHAUSTED_QUESTION.slice(0, 48)));
-}
-
-export function findConductorStall(input: {
-  messages: UIMessage[];
-  buildPhase: ConductorBuildPhase | null | undefined;
-  missingSlots: string[];
-  chatBusy: boolean;
-  loopStatus?: string;
-  phaseProgress?: PhaseHandoffProgress | null;
-}): ConductorStallResult {
-  void input;
-  return { stalled: false };
 }
 
 export function isConductorBudgetExhausted(messages: UIMessage[]): boolean {
   return isBudgetExhaustedEnding(messages);
 }
 
-export { isPhaseHandoffPending, isReviewConfirmationHandoffPending } from "@tallei/shared/conductor-phase-handoff";
-
-export { isActionableConductorPhase, type ConductorBuildPhase, type ConductorStallResult };
+export type { ConductorBuildPhase };
 
 export function readTaskBlueprint(spec: Record<string, unknown> | null): TaskBlueprint | null {
   const blueprint = spec?.taskBlueprint;
@@ -399,13 +327,6 @@ export function findLatestPresentAgentTeamOutput(messages: UIMessage[]): Present
 export function isConfirmOutcomeBriefPart(part: { type: string; toolName?: string }): part is ConfirmOutcomeBriefToolPart {
   return resolveToolPartName(part) === "confirmOutcomeBrief";
 }
-
-const CONDUCTOR_UI_ONLY_TOOLS = new Set([
-  "askQuestion",
-  "pickConnectorApp",
-  "presentReplyOptions",
-  "confirmOutcomeBrief",
-]);
 
 function hasQuestionOptionsInput(input: unknown): boolean {
   if (!input || typeof input !== "object") return false;
@@ -498,36 +419,6 @@ function isPhaseProgressPendingUiToolAnswered(
   return false;
 }
 
-function lastAssistantEndedWithAnsweredUiTool(messages: UIMessage[]): boolean {
-  const last = messages.at(-1);
-  if (!last || last.role !== "assistant") return false;
-  const allParts = last.parts ?? [];
-  const lastStepStartIndex = allParts.reduce(
-    (lastIndex, part, index) => part.type === "step-start" ? index : lastIndex,
-    -1,
-  );
-  const parts = allParts.slice(lastStepStartIndex + 1);
-  const toolParts = parts.filter((part) => isToolPart(part.type));
-  if (toolParts.length === 0) return false;
-  if (toolParts.some((part) => isUnansweredUiToolPart(part as { type: string; toolName?: string; state?: string; output?: unknown }))) {
-    return false;
-  }
-  const allToolsFinished = toolParts.every((part) => {
-    const toolPart = part as DynamicToolUIPart & { output?: unknown };
-    return (toolPart.state === "output-available" && toolPart.output != null)
-      || toolPart.state === "output-error";
-  });
-  if (!allToolsFinished) return false;
-  const lastToolPart = toolParts.at(-1)!;
-  const lastToolName = resolveToolPartName(lastToolPart as { type: string; toolName?: string });
-  if (!CONDUCTOR_UI_ONLY_TOOLS.has(lastToolName)) return false;
-  return toolParts.some((part) => {
-    const toolName = resolveToolPartName(part as { type: string; toolName?: string });
-    if (!CONDUCTOR_UI_ONLY_TOOLS.has(toolName)) return false;
-    const toolPart = part as DynamicToolUIPart & { output?: unknown };
-    return toolPart.state === "output-available" && toolPart.output != null;
-  });
-}
 
 function pendingOutcomeBriefFromPhaseProgress(
   messages: UIMessage[],
@@ -572,7 +463,7 @@ export function messagesPersistenceRevision(messages: UIMessage[]): string {
   }).join("|");
 }
 
-/** Fingerprint tool part states so effects can react to addToolOutput without message count changes. */
+/** Fingerprint tool part states so effects can react to tool answers without message count changes. */
 export function messagesUiStateRevision(messages: UIMessage[]): string {
   return messages.map((message) => {
     const toolStates = (message.parts ?? [])
@@ -604,19 +495,23 @@ export function messagePartsRevision(message: UIMessage): string {
   }).join("|");
 }
 
-/** Any UI-only tool call in the transcript still waiting for addToolOutput. */
+/** Any UI-only tool call in the transcript still waiting for a tool-answer. */
 export function hasUnansweredUiToolCalls(
   messages: UIMessage[],
   phaseProgress?: PhaseHandoffProgress | null,
+  excludeToolCallIds: ReadonlySet<string> = new Set(),
 ): boolean {
   if (phaseProgress?.pendingUiTool
+    && !excludeToolCallIds.has(phaseProgress.pendingUiTool.toolCallId)
     && !isPhaseProgressPendingUiToolAnswered(messages, phaseProgress.pendingUiTool)) {
     return true;
   }
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts ?? []) {
-      if (isUnansweredUiToolPart(part as { type: string; toolName?: string; state?: string; output?: unknown })) {
+      const toolPart = part as { type: string; toolName?: string; state?: string; output?: unknown; toolCallId?: string };
+      if (toolPart.toolCallId && excludeToolCallIds.has(toolPart.toolCallId)) continue;
+      if (isUnansweredUiToolPart(toolPart)) {
         return true;
       }
     }
@@ -668,65 +563,15 @@ export function findStaleConfirmOutcomeBriefCalls(messages: UIMessage[]): StaleC
   return stale;
 }
 
-/**
- * Returns true when the last assistant step ended on a fully-answered UI-only tool
- * and there are no remaining unanswered UI calls.  Used by `sendAutomaticallyWhen`
- * (guarded externally by a session-action ref so it never fires on page refresh).
- */
-export function shouldAutoSendConductorChat({
-  messages,
-  buildPhase,
-  missingSlots = [],
-  loopStatus,
-  phaseProgress,
-}: {
-  messages: UIMessage[];
-  buildPhase?: ConductorBuildPhase | null;
-  missingSlots?: string[];
-  loopStatus?: string;
-  phaseProgress?: PhaseHandoffProgress | null;
-}): boolean {
-  void buildPhase;
-  void missingSlots;
-  if (isBuildTerminalForStall({ loopStatus, phaseProgress })) return false;
-  if (hasUnansweredUiToolCalls(messages, phaseProgress)) return false;
-  if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) return false;
-  return lastAssistantEndedWithAnsweredUiTool(messages);
-}
 
-function hasPriorTerminalExecutionForOperation(
-  messages: UIMessage[],
-  operationKey: string,
-  parentArtifactHash: string,
-): boolean {
-  for (let i = 0; i < messages.length - 1; i += 1) {
-    const message = messages[i];
-    if (message.role !== "assistant") continue;
-    for (const part of message.parts ?? []) {
-      if (!isToolPart(part.type)) continue;
-      const toolPart = part as DynamicToolUIPart & { output?: unknown };
-      if (toolPart.state !== "output-available" || !toolPart.output || typeof toolPart.output !== "object") continue;
-      const output = toolPart.output as Record<string, unknown>;
-      if (output.operationKey !== operationKey || output.parentArtifactHash !== parentArtifactHash) continue;
-      if (isRecoverableConductorExecution(output)) continue;
-      const ok = output.ok === false ? false : true;
-      const phaseCompleted = output.phaseCompleted === true;
-      const requiresUserInput = output.requiresUserInput === true;
-      const retryAllowed = output.retryAllowed === true;
-      if (phaseCompleted || requiresUserInput || (!ok && !retryAllowed)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
 
 export function findPendingOutcomeBrief(
   messages: UIMessage[],
   phaseProgress?: PhaseHandoffProgress | null,
+  excludeToolCallIds: ReadonlySet<string> = new Set(),
 ): PendingOutcomeBrief | null {
   const fromProgress = pendingOutcomeBriefFromPhaseProgress(messages, phaseProgress);
-  if (fromProgress) return fromProgress;
+  if (fromProgress && !excludeToolCallIds.has(fromProgress.toolCallId)) return fromProgress;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.role !== "assistant") continue;
@@ -735,6 +580,7 @@ export function findPendingOutcomeBrief(
       const part = parts[j];
       if (!isConfirmOutcomeBriefPart(part)) continue;
       const toolPart = part as ConfirmOutcomeBriefToolPart;
+      if (excludeToolCallIds.has(toolPart.toolCallId)) continue;
       if (isResumableUiToolPart("confirmOutcomeBrief", toolPart.state, toolPart.input, toolPart.output)) {
         const confirmInput = toolPart.input;
         if (!confirmInput?.briefHash || !confirmInput.question || !confirmInput.options?.length) continue;
@@ -902,6 +748,7 @@ export function findPendingInteractivePrompts(
 
   const persistedPending = phaseProgress?.pendingUiTool;
   if (persistedPending
+    && !excludeToolCallIds.has(persistedPending.toolCallId)
     && !prompts.some((prompt) => prompt.toolCallId === persistedPending.toolCallId)
     && !isPhaseProgressPendingUiToolAnswered(messages, persistedPending)) {
     if (persistedPending.toolName === "askQuestion"
@@ -991,38 +838,6 @@ export function makeUserMessage(text: string): UIMessage {
   };
 }
 
-/**
- * useChat addToolOutput only patches the last message. Drop trailing user messages and
- * ensure the target tool part is on the final assistant message before applying output.
- */
-export function prepareMessagesForUiToolOutput(
-  messages: UIMessage[],
-  toolCallId: string,
-  output: unknown,
-): UIMessage[] {
-  const withOutput = messages.map((message) => {
-    if (message.role !== "assistant") return message;
-    let changed = false;
-    const parts = (message.parts ?? []).map((part) => {
-      const toolPart = part as DynamicToolUIPart & { toolCallId?: string };
-      if (toolPart.toolCallId !== toolCallId) return part;
-      changed = true;
-      return {
-        ...part,
-        state: "output-available",
-        output,
-      } as UIMessage["parts"][number];
-    });
-    return changed ? { ...message, parts } : message;
-  });
-
-  const toolMessageIndex = withOutput.findIndex((message) =>
-    message.role === "assistant"
-    && (message.parts ?? []).some((part) => (part as { toolCallId?: string }).toolCallId === toolCallId),
-  );
-  if (toolMessageIndex < 0) return withOutput;
-  return withOutput.slice(0, toolMessageIndex + 1);
-}
 
 export function outcomeRoleLabel(role: string): string {
   switch (role) {

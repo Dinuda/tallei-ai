@@ -14,6 +14,10 @@ import { normalizeToolkitSlug, resolveToolkitSlug } from "./auth.js";
 import { composioRequest, getComposioClient, getComposioEntityId, isComposioConfigured } from "./client.js";
 import { listComposioTriggerTypes, type ComposioTriggerTypeRow } from "./triggers.js";
 import { listToolkits } from "./tools.js";
+import {
+  applyNoAuthToolkitView,
+  isNoAuthToolkit,
+} from "./toolkit-auth.js";
 import type { ComposioToolkitView } from "@tallei/composio-tools/types.js";
 
 export type WorkspaceConnectorView = {
@@ -24,6 +28,7 @@ export type WorkspaceConnectorView = {
   connected: boolean;
   connectedAccountId?: string;
   connectable?: boolean;
+  requiresConnection?: boolean;
 };
 
 export type CatalogToolkitView = WorkspaceConnectorView & {
@@ -187,11 +192,11 @@ export async function listWorkspaceConnectors(auth: AuthContext): Promise<Worksp
     const activeByToolkit = new Map(accounts.map((account) => [normalizeToolkitSlug(account.toolkit.slug), account]));
     return catalog.map((toolkit) => {
       const account = activeByToolkit.get(normalizeToolkitSlug(toolkit.slug));
-      return mapToolkitView({
+      return applyNoAuthToolkitView(mapToolkitView({
         ...toolkit,
         connected: Boolean(account),
         ...(account ? { connectedAccountId: account.id } : {}),
-      });
+      }));
     });
   });
 }
@@ -216,18 +221,17 @@ export async function listAllToolkitsWithStatus(auth: AuthContext): Promise<{
     sessionRows.map((row) => [normalizeToolkitSlug(row.slug), row] as const),
   );
 
-  const toolkits = catalog.map((toolkit) => {
-    const status = statusBySlug.get(normalizeToolkitSlug(toolkit.slug));
-    return {
-      slug: toolkit.slug,
-      name: toolkit.name,
-      description: toolkit.description,
-      logo: toolkit.logo,
-      ...(toolkit.category ? { category: toolkit.category } : {}),
-      connected: Boolean(status?.connected && status.connectedAccountId),
-      ...(status?.connectedAccountId ? { connectedAccountId: status.connectedAccountId } : {}),
-    } satisfies CatalogToolkitView;
-  });
+  const toolkits = catalog.map((toolkit) => applyNoAuthToolkitView({
+    slug: toolkit.slug,
+    name: toolkit.name,
+    description: toolkit.description,
+    logo: toolkit.logo,
+    ...(toolkit.category ? { category: toolkit.category } : {}),
+    connected: Boolean(statusBySlug.get(normalizeToolkitSlug(toolkit.slug))?.connectedAccountId),
+    ...(statusBySlug.get(normalizeToolkitSlug(toolkit.slug))?.connectedAccountId
+      ? { connectedAccountId: statusBySlug.get(normalizeToolkitSlug(toolkit.slug))!.connectedAccountId }
+      : {}),
+  } satisfies CatalogToolkitView));
 
   toolkits.sort((a, b) => {
     if (a.connected !== b.connected) return a.connected ? -1 : 1;
@@ -319,8 +323,14 @@ export async function getToolkitConnectionStatus(
   toolkit: string,
 ): Promise<ToolkitConnectionStatus> {
   const slug = await resolveToolkitSlug(toolkit);
-  if (!slug || !isComposioConfigured()) {
-    return { toolkit: slug || toolkit, connected: false, status: "disconnected" };
+  if (!slug) {
+    return { toolkit: toolkit, connected: false, status: "disconnected" };
+  }
+  if (await isNoAuthToolkit(slug)) {
+    return { toolkit: slug, connected: true, status: "connected" };
+  }
+  if (!isComposioConfigured()) {
+    return { toolkit: slug, connected: false, status: "disconnected" };
   }
   const accounts = await listDirectConnectedAccounts(auth);
   const match = accounts.find((row) => normalizeToolkitSlug(row.toolkit.slug) === normalizeToolkitSlug(slug));
@@ -345,6 +355,9 @@ export async function startToolkitAuthorization(
 }> {
   if (!isComposioConfigured()) throw new Error("Composio is not configured");
   const normalized = await resolveToolkitSlug(toolkit);
+  if (await isNoAuthToolkit(normalized)) {
+    throw new Error(`Toolkit ${normalized} does not require authentication`);
+  }
   const authConfigId = await resolveAuthConfigId(normalized);
   const request = await getComposioClient().connectedAccounts.link(
     getComposioEntityId(auth),

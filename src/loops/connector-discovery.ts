@@ -2,6 +2,7 @@ import type { AuthContext } from "../domain/auth/index.js";
 import { getConnectorProvider } from "../integrations/connectors/index.js";
 import type { ConnectorToolkit } from "../integrations/connectors/index.js";
 import { normalizeToolkitSlug } from "../integrations/composio/auth.js";
+import { isKnownNoAuthToolkitSlug } from "../integrations/composio/toolkit-auth.js";
 import type { ComposioToolSearchResult } from "@tallei/composio-tools/types.js";
 import { scoreOutcomeRelevance } from "./binding-discovery.js";
 import type { BindingAskOption } from "./binding-discovery.js";
@@ -16,6 +17,7 @@ export type ConnectorCandidate = {
   connected: boolean;
   connectedAccountId?: string;
   connectable: boolean;
+  requiresConnection?: boolean;
   score: number;
   rationale: string;
   sampleActions: string[];
@@ -207,11 +209,13 @@ export function buildConnectorAskOptions(candidates: ConnectorCandidate[]): Conn
     id: connectorOptionId(candidate.connector),
     label: candidate.name,
     value: candidate.connector,
-    description: candidate.connected
-      ? "Already connected"
-      : candidate.connectable
-        ? "Needs connection"
-        : "Unavailable — connection setup required",
+    description: candidate.requiresConnection === false
+      ? "No sign-in needed"
+      : candidate.connected
+        ? "Already connected"
+        : candidate.connectable
+          ? "Needs connection"
+          : "Unavailable — connection setup required",
     icon: candidate.connector.toLowerCase(),
     ...(!candidate.connected && !candidate.connectable ? { disabled: true } : {}),
   }));
@@ -528,28 +532,34 @@ function rankConnectorsForOutcome(input: {
     const baseScore = Math.max(match?.score ?? 0, catalogScore);
     if (baseScore <= 0 && input.role !== "trigger" && !input.includeAllCatalog) continue;
 
+    const noAuth = isKnownNoAuthToolkitSlug(toolkit.slug)
+      || toolkit.requiresConnection === false;
     candidates.push({
       connector: toolkit.slug,
       name: toolkit.name,
-      connected: toolkit.connected,
-      connectable: toolkit.connected || toolkit.connectable !== false,
+      connected: toolkit.connected || noAuth,
+      connectable: toolkit.connected || toolkit.connectable !== false || noAuth,
+      requiresConnection: !noAuth,
       ...(toolkit.connectedAccountId ? { connectedAccountId: toolkit.connectedAccountId } : {}),
       score: baseScore,
-      rationale: buildRationale(toolkit.name, toolkit.connected, match?.actions[0]),
+      rationale: buildRationale(toolkit.name, toolkit.connected || noAuth, match?.actions[0]),
       sampleActions: match?.actions.map((action) => action.actionSlug) ?? [],
     });
   }
 
   if (candidates.length === 0 && input.role === "trigger") {
     for (const toolkit of input.toolkits.slice(0, 6)) {
+      const noAuth = isKnownNoAuthToolkitSlug(toolkit.slug)
+        || toolkit.requiresConnection === false;
       candidates.push({
         connector: toolkit.slug,
         name: toolkit.name,
-        connected: toolkit.connected,
-        connectable: toolkit.connected || toolkit.connectable !== false,
+        connected: toolkit.connected || noAuth,
+        connectable: toolkit.connected || toolkit.connectable !== false || noAuth,
+        requiresConnection: !noAuth,
         ...(toolkit.connectedAccountId ? { connectedAccountId: toolkit.connectedAccountId } : {}),
         score: 1,
-        rationale: buildRationale(toolkit.name, toolkit.connected, undefined),
+        rationale: buildRationale(toolkit.name, toolkit.connected || noAuth, undefined),
         sampleActions: [],
       });
     }

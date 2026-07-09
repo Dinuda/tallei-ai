@@ -19,18 +19,16 @@ import {
 } from "@/components/conductor/conductor-chat-context";
 import {
   clearPhaseProgressPendingUiTool,
-  findConductorStall,
   findPendingInteractivePrompts,
   findPendingOutcomeBrief,
   findStaleConfirmOutcomeBriefCalls,
   hasUnansweredUiToolCalls,
   isConductorBudgetExhausted,
   makeUserMessage,
-  prepareMessagesForUiToolOutput,
+  partitionPendingQuestionBatch,
   resolveConfirmOutcomeBriefActionFromSelection,
   messagesUiStateRevision,
   messagesPersistenceRevision,
-  shouldAutoSendConductorChat,
   tryResolveContinueAsPendingUiToolAnswer,
   validateConductorComposerMessage,
   resolveToolPartName,
@@ -39,7 +37,6 @@ import {
   type ConductorBuildPhase,
   type PhaseHandoffProgress,
 } from "@/components/conductor/conductor-shared";
-import { useConductorContinuation } from "@/components/conductor/use-conductor-continuation";
 import type { InteractivePromptAnswer } from "@/components/ai-elements/interactive-prompt-menu";
 import { apiFetch, getStoredWorkspaceId } from "@/lib/api-fetch";
 import {
@@ -52,6 +49,7 @@ import {
   deriveConductorPromptSuggestionsQuestion,
   findPendingPresentReplyOptions,
 } from "@/lib/conductor-prompt-suggestions";
+import { submitConductorToolAnswer } from "@/lib/conductor-tool-answer";
 import { deriveConductorTranscriptError } from "@/lib/conductor-transcript-error";
 import { isBuildTerminalForStall } from "@tallei/shared/conductor-stall-recovery";
 import {
@@ -170,24 +168,11 @@ function ConductorChatBridge({
     messages,
     sendMessage,
     status: chatStatus,
-    addToolOutput,
     regenerate,
     setMessages,
     stop,
   } = useChat({
     transport,
-    sendAutomaticallyWhen: ({ messages }) => {
-      // Only continue if the user has performed a real in-session action (chip answer,
-      // typed message). This ref is never set on page hydration, so refresh is safe.
-      if (!sessionActionRef.current) return false;
-      return shouldAutoSendConductorChat({
-        messages,
-        buildPhase: buildPhaseRef.current,
-        phaseProgress: phaseProgressRef.current,
-        missingSlots: missingSlotsRef.current,
-        loopStatus: loopStatusRef.current,
-      });
-    },
     onError: (error) => {
       const message = error instanceof Error ? error.message : "Conductor could not finish that response. Your message was saved — try again.";
       console.error("[conductor/chat] stream failed:", error);
@@ -227,50 +212,30 @@ function ConductorChatBridge({
 
   const chatLoadedRef = useRef(false);
   const prevChatStatusRef = useRef(chatStatus);
-  const lastPersistedRevisionRef = useRef("");
+  const lastSyncedRevisionRef = useRef("");
   const lastMetaRefreshAtRef = useRef(0);
   const metaRefreshInFlightRef = useRef(false);
-  const [hydrationReady, setHydrationReady] = useState(false);
-  // Set to true by any real in-session user action. Never set during hydration, so
-  // sendAutomaticallyWhen and the continuation hook are both safe on page refresh.
-  const sessionActionRef = useRef(false);
+  const [toolAnswerBusy, setToolAnswerBusy] = useState(false);
+  const inFlightToolAnswersRef = useRef<Set<string>>(new Set());
   const processedToolMetaRef = useRef<Set<string>>(new Set());
   const supersededConfirmRef = useRef<Set<string>>(new Set());
-  const answeredToolResumeRef = useRef<Set<string>>(new Set());
   const messagesRevision = messagesUiStateRevision(messages);
-
-  const continueChat = useCallback(() => {
-    void sendMessage();
-  }, [sendMessage]);
-
-  useConductorContinuation({
-    continuationIntent,
-    chatStatus: chatStatus as ChatStatus,
-    hydrationReady,
-    sessionActionRef,
-    sendMessage: continueChat,
-  });
 
   const chatApi = useMemo<ConductorChatApi>(
     () => ({
       sendMessage: (input) => {
         setChatError(null);
-        sessionActionRef.current = true;
-        if (input?.text) {
-          void sendMessage({ text: input.text });
-        } else {
-          void sendMessage();
-        }
+        if (!input?.text?.trim()) return;
+        void sendMessage({ text: input.text });
       },
       regenerate,
       stop,
-      addToolOutput: (params) => {
-        const answerKey = `${buildPhaseRef.current ?? "unknown"}:${latestPhaseTurnRef.current?.parentArtifactHash ?? "unknown"}:${params.toolCallId}`;
-        if (answeredToolResumeRef.current.has(answerKey)) return Promise.resolve();
-        answeredToolResumeRef.current.add(answerKey);
-        // Mark as in-session action BEFORE patching messages so sendAutomaticallyWhen
-        // sees the flag when it evaluates after the state update.
-        sessionActionRef.current = true;
+      answerTool: async (params) => {
+        const answerKey = `${params.toolCallId}`;
+        if (inFlightToolAnswersRef.current.has(answerKey)) return;
+        inFlightToolAnswersRef.current.add(answerKey);
+        setChatError(null);
+        setToolAnswerBusy(true);
         flushSync(() => {
           setOptimisticallyResolvedToolCallIds((current) => {
             if (current.has(params.toolCallId)) return current;
@@ -278,11 +243,6 @@ function ConductorChatBridge({
             next.add(params.toolCallId);
             return next;
           });
-          setMessages((current) => prepareMessagesForUiToolOutput(
-            current,
-            params.toolCallId,
-            params.output,
-          ));
           const clearedPhaseProgress = clearPhaseProgressPendingUiTool(
             phaseProgressRef.current,
             params.toolCallId,
@@ -294,24 +254,36 @@ function ConductorChatBridge({
             });
           }
         });
-        return Promise.resolve(addToolOutput({
-          tool: params.tool,
-          toolCallId: params.toolCallId,
-          output: params.output,
-          // sendAutomaticallyWhen handles the POST; no direct sendMessage() call here.
-        })).catch((error) => {
-          answeredToolResumeRef.current.delete(answerKey);
+        try {
+          await submitConductorToolAnswer({
+            loopId,
+            tool: params.tool,
+            toolCallId: params.toolCallId,
+            output: params.output,
+            onMeta: (meta) => onLoopMetaChangeRef.current(meta),
+            setMessages: (next) => {
+              setMessages(next);
+              lastSyncedRevisionRef.current = messagesPersistenceRevision(next);
+            },
+          });
+        } catch (error) {
           setOptimisticallyResolvedToolCallIds((current) => {
             if (!current.has(params.toolCallId)) return current;
             const next = new Set(current);
             next.delete(params.toolCallId);
             return next;
           });
+          const message = error instanceof Error ? error.message : "Could not submit that answer.";
+          setChatError(message);
+          toast.error(message);
           throw error;
-        });
+        } finally {
+          inFlightToolAnswersRef.current.delete(answerKey);
+          setToolAnswerBusy(false);
+        }
       },
     }),
-    [addToolOutput, regenerate, sendMessage, setMessages, stop],
+    [loopId, regenerate, sendMessage, setMessages, stop],
   );
 
   useEffect(() => {
@@ -334,7 +306,7 @@ function ConductorChatBridge({
 
   const chatContextValue = {
     messages,
-    chatStatus: chatStatus as ChatStatus,
+    chatStatus: (toolAnswerBusy ? "submitted" : chatStatus) as ChatStatus,
     chatApi,
     chatUsage,
     chatError,
@@ -343,17 +315,14 @@ function ConductorChatBridge({
 
   useEffect(() => {
     chatLoadedRef.current = false;
-    setHydrationReady(false);
     setStreamUsage(null);
-    sessionActionRef.current = false;
     processedToolMetaRef.current = new Set();
     supersededConfirmRef.current = new Set();
-    answeredToolResumeRef.current = new Set();
+    inFlightToolAnswersRef.current = new Set();
     setOptimisticallyResolvedToolCallIds(new Set());
 
     if (skipLoopFetch) {
       chatLoadedRef.current = true;
-      setHydrationReady(true);
       return;
     }
 
@@ -392,10 +361,9 @@ function ConductorChatBridge({
         });
         if (Array.isArray(data.chatMessages) && data.chatMessages.length > 0) {
           setMessages(data.chatMessages as UIMessage[]);
-          lastPersistedRevisionRef.current = messagesPersistenceRevision(data.chatMessages as UIMessage[]);
+          lastSyncedRevisionRef.current = messagesPersistenceRevision(data.chatMessages as UIMessage[]);
         }
         chatLoadedRef.current = true;
-        setHydrationReady(true);
         debugConductorClientTiming(`hydrate:${loopId}`, { totalMs: elapsed() });
       }
     })();
@@ -413,7 +381,6 @@ function ConductorChatBridge({
       return;
     }
     bootstrapPromptSentRef.current = true;
-    sessionActionRef.current = true;
     void sendMessage({ text: pendingPrompt.trim() });
   }, [bootstrapPromptSentRef, chatStatus, messages, pendingPrompt, sendMessage]);
 
@@ -469,11 +436,13 @@ function ConductorChatBridge({
   }, [messages]);
 
   useEffect(() => {
-    if (!chatApi || chatStatus === "streaming" || chatStatus === "submitted") return;
+    if (!chatApi || chatStatus === "streaming" || chatStatus === "submitted" || toolAnswerBusy) return;
     for (const stale of findStaleConfirmOutcomeBriefCalls(messages)) {
       if (supersededConfirmRef.current.has(stale.toolCallId)) continue;
+      if (optimisticallyResolvedToolCallIds.has(stale.toolCallId)) continue;
+      if (inFlightToolAnswersRef.current.has(stale.toolCallId)) continue;
       supersededConfirmRef.current.add(stale.toolCallId);
-      void chatApi.addToolOutput({
+      void chatApi.answerTool({
         tool: "confirmOutcomeBrief",
         toolCallId: stale.toolCallId,
         output: {
@@ -483,36 +452,18 @@ function ConductorChatBridge({
         },
       });
     }
-  }, [chatApi, chatStatus, messages]);
-
-  useEffect(() => {
-    if (!chatLoadedRef.current || messages.length === 0) return;
-    if (chatStatus === "streaming" || chatStatus === "submitted") return;
-    const persistenceRevision = messagesPersistenceRevision(messages);
-    if (persistenceRevision === lastPersistedRevisionRef.current) return;
-    const timer = window.setTimeout(() => {
-      const elapsed = startConductorClientTimer();
-      void apiFetch(`/api/loops/${loopId}/chat`, {
-        method: "PUT",
-        body: JSON.stringify({ messages }),
-      }).then(() => {
-        lastPersistedRevisionRef.current = persistenceRevision;
-        debugConductorClientTiming(`chat-put:${loopId}`, { totalMs: elapsed() });
-      });
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [messages, chatStatus, loopId]);
+  }, [chatApi, chatStatus, messages, optimisticallyResolvedToolCallIds, toolAnswerBusy]);
 
   useEffect(() => {
     const previousStatus = prevChatStatusRef.current;
     prevChatStatusRef.current = chatStatus;
-    if (!chatLoadedRef.current || chatStatus === "streaming" || chatStatus === "submitted") return;
+    if (!chatLoadedRef.current || chatStatus === "streaming" || chatStatus === "submitted" || toolAnswerBusy) {
+      return;
+    }
     const streamJustFinished = (previousStatus === "streaming" || previousStatus === "submitted")
       && chatStatus === "ready";
     if (!streamJustFinished) return;
-    // Prevent the chat PUT effect from racing bookkeeping: the stream transcript may
-    // lack a server-injected pickConnectorApp that finalize just persisted.
-    lastPersistedRevisionRef.current = messagesPersistenceRevision(messages);
+    const liveRevision = messagesPersistenceRevision(messages);
     const now = Date.now();
     if (now - lastMetaRefreshAtRef.current < 2_000) return;
     if (metaRefreshInFlightRef.current) return;
@@ -532,12 +483,19 @@ function ConductorChatBridge({
         latestPhaseTurn: data.buildProgress?.latestPhaseTurn ?? null,
         continuationIntent: parseContinuationIntent(data.buildProgress?.continuationIntent),
       });
-      // Bookkeeping may inject a server-owned pickConnectorApp after a reasoning-only
-      // stall; sync the transcript so the picker mounts without requiring a full refresh.
+      // Only replace the live transcript when the server revision is newer. Never wipe
+      // a complete in-memory assistant turn with an older/empty projection.
       if (Array.isArray(data.chatMessages) && data.chatMessages.length > 0) {
         const nextMessages = data.chatMessages as UIMessage[];
-        setMessages(nextMessages);
-        lastPersistedRevisionRef.current = messagesPersistenceRevision(nextMessages);
+        const serverRevision = messagesPersistenceRevision(nextMessages);
+        const shouldReplace = serverRevision !== liveRevision
+          && (nextMessages.length >= messages.length || serverRevision !== lastSyncedRevisionRef.current);
+        if (shouldReplace) {
+          setMessages(nextMessages);
+          lastSyncedRevisionRef.current = serverRevision;
+        } else {
+          lastSyncedRevisionRef.current = liveRevision;
+        }
       }
       lastMetaRefreshAtRef.current = Date.now();
       debugConductorClientTiming(`meta-refresh:${loopId}`, { totalMs: elapsed() });
@@ -547,7 +505,7 @@ function ConductorChatBridge({
     return () => {
       cancelled = true;
     };
-  }, [chatStatus, loopId, setMessages]);
+  }, [chatStatus, loopId, messages, setMessages, toolAnswerBusy]);
 
   return (
     <ConductorChatProvider value={chatContextValue}>
@@ -617,16 +575,66 @@ function ConductorBuilderLive({
     () => findPendingInteractivePrompts(messages, spec, phaseProgress, optimisticallyResolvedToolCallIds),
     [messages, spec, phaseProgress, optimisticallyResolvedToolCallIds],
   );
+  const [queuedQuestionAnswers, setQueuedQuestionAnswers] = useState<
+    Map<string, InteractivePromptAnswer & { skipped?: boolean }>
+  >(() => new Map());
+  const [submittingQuestionBatch, setSubmittingQuestionBatch] = useState(false);
+  const [activeFlushBatch, setActiveFlushBatch] = useState<PendingInteractivePrompt[] | null>(null);
+
+  const pendingQuestionIdsKey = useMemo(
+    () => pendingQuestions.map((prompt) => prompt.toolCallId).join("|"),
+    [pendingQuestions],
+  );
+
+  useEffect(() => {
+    setQueuedQuestionAnswers(new Map());
+    setSubmittingQuestionBatch(false);
+    setActiveFlushBatch(null);
+  }, [loopId]);
+
+  useEffect(() => {
+    setQueuedQuestionAnswers((current) => {
+      if (current.size === 0) return current;
+      const validIds = new Set(pendingQuestions.map((prompt) => prompt.toolCallId));
+      const next = new Map<string, InteractivePromptAnswer & { skipped?: boolean }>();
+      for (const [toolCallId, answer] of current) {
+        if (validIds.has(toolCallId)) next.set(toolCallId, answer);
+      }
+      return next.size === current.size ? current : next;
+    });
+  }, [pendingQuestionIdsKey, pendingQuestions]);
+
+  const questionBatch = useMemo(
+    () => partitionPendingQuestionBatch(pendingQuestions, queuedQuestionAnswers),
+    [pendingQuestions, queuedQuestionAnswers],
+  );
+  const visiblePendingQuestions = useMemo(() => {
+    if (activeFlushBatch?.length) {
+      const last = activeFlushBatch[activeFlushBatch.length - 1];
+      return last
+        ? [{
+          ...last,
+          input: {
+            ...last.input,
+            step: { index: activeFlushBatch.length, total: activeFlushBatch.length },
+          },
+        }]
+        : [];
+    }
+    return questionBatch.remaining;
+  }, [activeFlushBatch, questionBatch.remaining]);
   const pendingOutcomeBrief = useMemo(
-    () => findPendingOutcomeBrief(messages, phaseProgress),
-    [messages, phaseProgress],
+    () => findPendingOutcomeBrief(messages, phaseProgress, optimisticallyResolvedToolCallIds),
+    [messages, phaseProgress, optimisticallyResolvedToolCallIds],
   );
   const pendingReplyOptions = useMemo(
-    () => findPendingPresentReplyOptions(messages),
-    [messages],
+    () => findPendingPresentReplyOptions(messages, optimisticallyResolvedToolCallIds),
+    [messages, optimisticallyResolvedToolCallIds],
   );
 
   const chatBusy = creating || chatStatus === "streaming" || chatStatus === "submitted";
+  const questionSubmitBusy = submittingQuestionBatch
+    || (!questionBatch.batchMode && chatBusy);
   const [longRunningThinking, setLongRunningThinking] = useState(false);
 
   useEffect(() => {
@@ -637,18 +645,6 @@ function ConductorBuilderLive({
     const timer = window.setTimeout(() => setLongRunningThinking(true), 8_000);
     return () => window.clearTimeout(timer);
   }, [chatBusy]);
-
-  const isStalled = useMemo(
-    () => findConductorStall({
-      messages,
-      buildPhase,
-      missingSlots,
-      chatBusy,
-      loopStatus: status,
-      phaseProgress,
-    }).stalled,
-    [messages, buildPhase, missingSlots, chatBusy, status, phaseProgress],
-  );
 
   const budgetExhausted = useMemo(
     () => isConductorBudgetExhausted(messages),
@@ -669,7 +665,7 @@ function ConductorBuilderLive({
       loopStatus: status,
       latestPhaseTurn,
       continuationIntent,
-      hasPendingQuestion: Boolean(pendingQuestions.length || pendingOutcomeBrief),
+      hasPendingQuestion: Boolean(visiblePendingQuestions.length || pendingOutcomeBrief),
     }),
     [
       messages,
@@ -679,14 +675,14 @@ function ConductorBuilderLive({
       status,
       latestPhaseTurn,
       continuationIntent,
-      pendingQuestions.length,
+      visiblePendingQuestions.length,
       pendingOutcomeBrief,
     ],
   );
 
   const promptSuggestionsQuestion = useMemo(
-    () => deriveConductorPromptSuggestionsQuestion(messages, isStalled, budgetExhausted, buildTerminal),
-    [messages, isStalled, budgetExhausted, buildTerminal],
+    () => deriveConductorPromptSuggestionsQuestion(messages, budgetExhausted, buildTerminal),
+    [messages, budgetExhausted, buildTerminal],
   );
 
   const promptSuggestions = useMemo(
@@ -695,10 +691,9 @@ function ConductorBuilderLive({
       missingSlots,
       status,
       buildPhase,
-      isStalled,
       budgetExhausted,
       phaseProgress,
-      hasPendingQuestion: Boolean(pendingQuestions.length || pendingOutcomeBrief),
+      hasPendingQuestion: Boolean(visiblePendingQuestions.length || pendingOutcomeBrief),
       hasPendingReplyOptions: Boolean(pendingReplyOptions),
       chatBusy,
       explicitOptions: pendingReplyOptions?.input.options,
@@ -706,11 +701,10 @@ function ConductorBuilderLive({
     [
       buildPhase,
       chatBusy,
-      isStalled,
       budgetExhausted,
       messages,
       missingSlots,
-      pendingQuestions,
+      visiblePendingQuestions.length,
       pendingOutcomeBrief,
       pendingReplyOptions,
       phaseProgress,
@@ -732,11 +726,15 @@ function ConductorBuilderLive({
       return;
     }
     const pendingUiResolution = tryResolveContinueAsPendingUiToolAnswer(text, phaseProgress);
-    if (pendingUiResolution && chatApi) {
-      void chatApi.addToolOutput(pendingUiResolution);
+    if (pendingUiResolution) {
+      if (!chatApi) {
+        toast.error("Conductor is still loading. Try again in a moment.");
+        return;
+      }
+      void chatApi.answerTool(pendingUiResolution);
       return;
     }
-    if (hasUnansweredUiToolCalls(messages, phaseProgress)) {
+    if (hasUnansweredUiToolCalls(messages, phaseProgress, optimisticallyResolvedToolCallIds)) {
       toast.error("Answer the pending question before sending a message.");
       return;
     }
@@ -747,48 +745,105 @@ function ConductorBuilderLive({
     chatApi?.sendMessage({ text: text.trim() });
   }
 
+  function buildAskQuestionOutput(
+    prompt: PendingInteractivePrompt,
+    answer: InteractivePromptAnswer & { skipped?: boolean },
+  ) {
+    return {
+      questionId: prompt.input.questionId,
+      answerText: answer.answerText,
+      selectedOptionIds: answer.selectedOptionIds,
+      selectedValues: answer.selectedValues,
+      ...(answer.otherText ? { otherText: answer.otherText } : {}),
+      ...(answer.skipped ? { skipped: true } : {}),
+      ...(prompt.input.outcomeId ? { outcomeId: prompt.input.outcomeId } : {}),
+      ...(prompt.input.role ? { role: prompt.input.role } : {}),
+    };
+  }
+
+  async function flushQueuedQuestionAnswers(
+    batch: PendingInteractivePrompt[],
+    answers: Map<string, InteractivePromptAnswer & { skipped?: boolean }>,
+  ) {
+    if (!chatApi || batch.length === 0) return;
+    setActiveFlushBatch(batch);
+    setSubmittingQuestionBatch(true);
+    try {
+      for (const prompt of batch) {
+        const answer = answers.get(prompt.toolCallId);
+        if (!answer) continue;
+        await chatApi.answerTool({
+          tool: prompt.toolName,
+          toolCallId: prompt.toolCallId,
+          output: buildAskQuestionOutput(prompt, answer),
+        });
+      }
+      setQueuedQuestionAnswers(new Map());
+    } finally {
+      setActiveFlushBatch(null);
+      setSubmittingQuestionBatch(false);
+    }
+  }
+
   function submitAskQuestionAnswer(prompt: PendingInteractivePrompt, answer: InteractivePromptAnswer) {
-    if (!chatApi) return;
-    void chatApi.addToolOutput({
+    if (!chatApi) {
+      toast.error("Conductor is still loading. Try again in a moment.");
+      return;
+    }
+    if (questionBatch.batchMode) {
+      const nextQueue = new Map(queuedQuestionAnswers);
+      nextQueue.set(prompt.toolCallId, answer);
+      setQueuedQuestionAnswers(nextQueue);
+      const allAnswered = pendingQuestions.every((item) => nextQueue.has(item.toolCallId));
+      if (allAnswered) {
+        void flushQueuedQuestionAnswers(pendingQuestions, nextQueue);
+      }
+      return;
+    }
+    void chatApi.answerTool({
       tool: prompt.toolName,
       toolCallId: prompt.toolCallId,
-      output: {
-        questionId: prompt.input.questionId,
-        answerText: answer.answerText,
-        selectedOptionIds: answer.selectedOptionIds,
-        selectedValues: answer.selectedValues,
-        ...(answer.otherText ? { otherText: answer.otherText } : {}),
-        ...(prompt.input.outcomeId ? { outcomeId: prompt.input.outcomeId } : {}),
-        ...(prompt.input.role ? { role: prompt.input.role } : {}),
-      },
+      output: buildAskQuestionOutput(prompt, answer),
     });
   }
 
   function dismissAskQuestion(prompt: PendingInteractivePrompt) {
-    if (!chatApi) return;
-    void chatApi.addToolOutput({
+    if (!chatApi) {
+      toast.error("Conductor is still loading. Try again in a moment.");
+      return;
+    }
+    const skippedAnswer: InteractivePromptAnswer & { skipped: boolean } = {
+      answerText: "skipped",
+      selectedOptionIds: [],
+      selectedValues: [],
+      skipped: true,
+    };
+    if (questionBatch.batchMode) {
+      submitAskQuestionAnswer(prompt, skippedAnswer);
+      return;
+    }
+    void chatApi.answerTool({
       tool: prompt.toolName,
       toolCallId: prompt.toolCallId,
-      output: {
-        questionId: prompt.input.questionId,
-        answerText: "skipped",
-        selectedOptionIds: [],
-        selectedValues: [],
-        skipped: true,
-        ...(prompt.input.outcomeId ? { outcomeId: prompt.input.outcomeId } : {}),
-        ...(prompt.input.role ? { role: prompt.input.role } : {}),
-      },
+      output: buildAskQuestionOutput(prompt, skippedAnswer),
     });
   }
 
   function submitOutcomeBriefAnswer(answer: InteractivePromptAnswer) {
-    if (!pendingOutcomeBrief || !chatApi) return;
+    if (!chatApi) {
+      toast.error("Conductor is still loading. Try again in a moment.");
+      return;
+    }
+    if (!pendingOutcomeBrief) {
+      toast.error("That confirmation is no longer pending. Refresh and try again.");
+      return;
+    }
     const action = resolveConfirmOutcomeBriefActionFromSelection({
       selectedOptionIds: answer.selectedOptionIds,
       selectedValues: answer.selectedValues,
       options: pendingOutcomeBrief.confirmPrompt.options,
     });
-    void chatApi.addToolOutput({
+    void chatApi.answerTool({
       tool: "confirmOutcomeBrief",
       toolCallId: pendingOutcomeBrief.toolCallId,
       output: {
@@ -813,9 +868,13 @@ function ConductorBuilderLive({
       return;
     }
 
-    if (pendingReplyOptions && chatApi) {
+    if (pendingReplyOptions) {
+      if (!chatApi) {
+        toast.error("Conductor is still loading. Try again in a moment.");
+        return;
+      }
       const selectedOptionId = answer.selectedOptionIds[0] ?? "custom";
-      void chatApi.addToolOutput({
+      void chatApi.answerTool({
         tool: "presentReplyOptions",
         toolCallId: pendingReplyOptions.toolCallId,
         output: {
@@ -827,12 +886,16 @@ function ConductorBuilderLive({
     }
 
     const pendingUiResolution = tryResolveContinueAsPendingUiToolAnswer(message, phaseProgress);
-    if (pendingUiResolution && chatApi) {
-      void chatApi.addToolOutput(pendingUiResolution);
+    if (pendingUiResolution) {
+      if (!chatApi) {
+        toast.error("Conductor is still loading. Try again in a moment.");
+        return;
+      }
+      void chatApi.answerTool(pendingUiResolution);
       return;
     }
 
-    if (hasUnansweredUiToolCalls(messages, phaseProgress)) {
+    if (hasUnansweredUiToolCalls(messages, phaseProgress, optimisticallyResolvedToolCallIds)) {
       toast.error("Answer the pending question before sending a message.");
       return;
     }
@@ -855,7 +918,9 @@ function ConductorBuilderLive({
       onSubmit={handleSubmit}
       onStop={() => chatApi?.stop()}
       onRetry={() => { void chatApi?.regenerate(); }}
-      pendingQuestions={pendingQuestions}
+      pendingQuestions={visiblePendingQuestions}
+      questionSubmitBusy={questionSubmitBusy}
+      questionBatchMode={questionBatch.batchMode}
       pendingOutcomeBrief={pendingOutcomeBrief}
       pendingReplyOptionsCallId={pendingReplyOptions?.toolCallId ?? null}
       promptSuggestions={promptSuggestions}
@@ -873,7 +938,7 @@ function ConductorBuilderLive({
       thinkingLabel={creating ? "Creating loop…" : longRunningThinking ? "Still working…" : "Thinking…"}
       forceThinking={creating}
       composerDisabled={creating}
-      sendBlocked={hasUnansweredUiToolCalls(messages, phaseProgress)}
+      sendBlocked={hasUnansweredUiToolCalls(messages, phaseProgress, optimisticallyResolvedToolCallIds)}
       chatUsage={chatUsage}
       transcriptError={transcriptError}
     />

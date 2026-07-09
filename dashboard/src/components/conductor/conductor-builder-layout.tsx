@@ -51,6 +51,8 @@ export type ConductorBuilderLayoutProps = {
   onStop?: () => void;
   onRetry?: () => void;
   pendingQuestions: PendingInteractivePrompt[];
+  questionSubmitBusy?: boolean;
+  questionBatchMode?: boolean;
   pendingOutcomeBrief: PendingOutcomeBrief | null;
   promptSuggestions: ConductorPromptSuggestion[];
   promptSuggestionsQuestion: string;
@@ -139,6 +141,8 @@ export function ConductorBuilderLayout({
   onStop,
   onRetry,
   pendingQuestions,
+  questionSubmitBusy = false,
+  questionBatchMode = false,
   pendingOutcomeBrief,
   promptSuggestions,
   promptSuggestionsQuestion,
@@ -287,6 +291,8 @@ export function ConductorBuilderLayout({
                     >
                       <BuilderOutcomeBriefPrompt
                         confirmPrompt={pendingOutcomeBrief.confirmPrompt}
+                        disabled={chatBusy}
+                        submitting={chatBusy}
                         onSubmit={onOutcomeBriefAnswer}
                       />
                     </motion.div>
@@ -302,6 +308,7 @@ export function ConductorBuilderLayout({
                       <BuilderConnectorPrompt
                         allowMultiple={activePendingQuestion.input.allowMultiple}
                         allowOther={activePendingQuestion.input.allowOther ?? true}
+                        disabled={chatBusy || questionSubmitBusy}
                         onDismiss={() => onAskQuestionDismiss(activePendingQuestion)}
                         onSubmit={(answer) => onAskQuestionAnswer(activePendingQuestion, answer)}
                         options={activePendingQuestion.input.options}
@@ -314,13 +321,18 @@ export function ConductorBuilderLayout({
                       <InteractivePromptMenu
                         allowMultiple={activePendingQuestion.input.allowMultiple}
                         allowOther={activePendingQuestion.input.allowOther ?? true}
+                        disabled={chatBusy || questionSubmitBusy}
                         onDismiss={() => onAskQuestionDismiss(activePendingQuestion)}
                         onSubmit={(answer) => onAskQuestionAnswer(activePendingQuestion, answer)}
                         options={activePendingQuestion.input.options}
                         placement="composer"
                         question={activePendingQuestion.input.question}
                         recommendedOptionIds={activePendingQuestion.input.recommendedOptionIds}
+                        selectionHint={questionBatchMode
+                          ? "Answer each question — your answers submit together at the end"
+                          : undefined}
                         step={activePendingQuestionStep}
+                        submitting={questionSubmitBusy}
                         variant={promptVariantForQuestion(activePendingQuestion.input.questionId)}
                       />
                     )}
@@ -336,6 +348,7 @@ export function ConductorBuilderLayout({
                     <InteractivePromptMenu
                       allowOther
                       disabled={chatBusy}
+                      submitting={chatBusy}
                       onDismiss={() => setDismissedSuggestionsKey(suggestionsKey)}
                       onSubmit={onPromptSuggestionsSubmit}
                       options={suggestionOptions}

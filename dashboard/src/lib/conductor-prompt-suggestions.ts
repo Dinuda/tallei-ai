@@ -30,7 +30,6 @@ type DeriveSuggestionsInput = {
   hasPendingReplyOptions: boolean;
   chatBusy: boolean;
   explicitOptions?: ConductorPromptSuggestion[];
-  isStalled?: boolean;
   budgetExhausted?: boolean;
   phaseProgress?: PhaseHandoffProgress | null;
   buildPhase?: ConductorBuildPhase | null;
@@ -135,6 +134,7 @@ function genericYesNoSuggestions(): ConductorPromptSuggestion[] {
 
 export function findPendingPresentReplyOptions(
   messages: UIMessage[],
+  excludeToolCallIds: ReadonlySet<string> = new Set(),
 ): { toolCallId: string; input: PresentReplyOptionsInput } | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
@@ -152,6 +152,7 @@ export function findPendingPresentReplyOptions(
         input?: PresentReplyOptionsInput;
         output?: unknown;
       };
+      if (excludeToolCallIds.has(toolPart.toolCallId)) continue;
       const resumable =
         toolPart.output == null
         && (toolPart.state === "input-available" || toolPart.state === "input-streaming")
@@ -166,13 +167,11 @@ export function findPendingPresentReplyOptions(
 
 export function deriveConductorPromptSuggestionsQuestion(
   messages: UIMessage[],
-  isStalled = false,
   budgetExhausted = false,
   buildTerminal = false,
 ): string {
   if (buildTerminal) return "";
   if (budgetExhausted) return CONDUCTOR_BUDGET_EXHAUSTED_QUESTION;
-  if (isStalled) return "How should I recover this setup step?";
   const text = getLastAssistantText(messages);
   if (!text) return "How would you like to proceed?";
 
@@ -199,7 +198,7 @@ export function deriveConductorPromptSuggestions(input: DeriveSuggestionsInput):
   const pipeline = scanToolPipeline(input.messages);
   if (input.status === "active" || pipeline.activateOk) return [];
 
-  if (input.budgetExhausted || input.isStalled) {
+  if (input.budgetExhausted) {
     const phase = input.buildPhase;
     if (phase === "compile") {
       return [

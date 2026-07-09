@@ -21,7 +21,7 @@ Conductor orchestration reads a **single projection** from the append-only `loop
 | **Phase contracts** | Each `POST /api/loops/:id/chat` request runs **one bounded phase attempt** with an allowed-tool list, optional `nextTool`, and a step budget (`CONDUCTOR_PHASE_STEP_LIMITS`) |
 | **Turn resolution** | `resolveConductorTurnResolution()` decides whether the HTTP turn ends with `next_phase`, `continue_phase`, `wait_for_user`, `budget_exhausted`, or `build_complete` |
 | **Tool evidence** | Server-executed tools append `tool_call.completed` events with execution metadata (`turnOutcome`, `continuation`, `handoffId`, `recoverToPhase`, `noProgressFingerprint`, …) |
-| **Phase turns** | `phase_turn.completed` records terminal outcomes; `phase_handoff.consumed` marks client auto-continues |
+| **Phase turns** | `phase_turn.completed` records terminal outcomes; `phase_handoff.consumed` marks server-owned handoff continues |
 
 **Nine phases:** `intent → blueprint → connectors → bindings → review → compile → test → activation`
 
@@ -39,9 +39,8 @@ Conductor orchestration reads a **single projection** from the append-only `loop
 **User-facing stages** (dashboard progress): `understand` (intent) → `design` (blueprint) → `connect_tools` (connectors + bindings) → `review_and_activate` (review through activation). Mapped by `userFacingStageForPhase()`.
 
 - `blueprint` is server-derived — the model must not call tools during this phase.
-- Phase completion emits `continuation: next_phase` + `handoffId`; a dedicated **phase handoff effect** in `conductor-builder.tsx` auto-sends the next request (not `shouldAutoSendConductorChat`).
-- Mid-phase work remaining emits `continuation: continue_phase` on `phase_turn.completed`; the same handoff effect resumes the bounded phase when `latestPhaseTurn` or transcript tool metadata carries the handoff.
-- `isPhaseHandoffPending()` (`@tallei/shared/conductor-phase-handoff`) mirrors `phaseProgress.handoffPending` from transcript evidence for diagnostics; it does not drive auto-continue directly.
+- Phase completion emits `continuation: next_phase` + `handoffId`; the **server session loop** (`pipeConductorSession` / `consumePendingHandoffIfNeeded`) continues in the same SSE response — the client does not auto-POST empty messages.
+- Mid-phase work remaining emits `continuation: continue_phase` on `phase_turn.completed`; the server resumes the bounded phase when `latestPhaseTurn` or transcript tool metadata carries the handoff.
 - Recoverable failures set `recoverToPhase` / `recoveryPhase` and stop the HTTP turn; the next request resumes from persisted state.
 - Budget exhaustion appends `phase_turn.completed` with `budget_exhausted` and surfaces `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` with Continue chips.
 - **Build continuity:** `reconcileLoopBuildContinuity()` detects stale/missing compile artifacts during `test`/`activation` and can recover to `compile` via `phase.recovery_requested`.
@@ -59,7 +58,9 @@ flowchart TD
   C --> D["/dashboard/loops/:id/conductor"]
 
   D -->|chat stream| E[POST /api/loops/:id/chat]
+  D -->|UI tool answer| E2[POST /api/loops/:id/chat/tool-answer]
   E -->|artifact interpreters| F[(loop_build_events → loop_specs)]
+  E2 -->|resume session SSE| E
 
   D -->|Compile| G[POST /api/loops/:id/compile]
   G -->|Composio tool resolve| H[(compiled_plans)]
@@ -80,7 +81,7 @@ flowchart TD
 | Phase              | What happens                                                      | Key tables                                                                           |
 | ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | **Create**         | Loop row + spec draft from template                               | `loops`, `loop_specs`, `loop_build_events` (seed state)                              |
-| **Conductor chat** | LLM calls phase-scoped tools; server commits artifacts            | `loop_build_events`, `loop_specs` (derived), `loop_chat_threads` (`kind=build`)      |
+| **Conductor chat** | LLM calls phase-scoped tools; server commits artifacts; UI tools answered via `POST …/chat/tool-answer` | `loop_build_events`, `loop_specs` (derived), `loop_chat_threads` (`kind=build`)      |
 | **Compile**        | Bind capabilities → Composio actions; freeze trigger slug on plan | `compiled_plans` (no Composio side effects)                                          |
 | **Activate**       | Provision Composio trigger + subscribe loop; mark plan active     | `loops`, `workspace_trigger_channels`, `loop_trigger_subscriptions`                  |
 | **Run**            | Planner loop + tools + optional approval                          | `loop_runs`, `loop_run_steps`, `loop_chat_threads` (`kind=run`), `approval_requests` |
@@ -89,7 +90,41 @@ flowchart TD
 
 ## Conductor chat
 
-**Route:** `POST /api/loops/:loopId/chat` (SSE stream, proxied by `dashboard/app/api/loops/[...path]/route.ts`)
+### Request routing (dashboard proxy vs backend)
+
+Conductor **execution** lives on the **Express backend** (`src/transport/http/routes/loops.ts`, `src/loops/`). The Next.js dashboard is **UI + auth proxy** — it does not run the session loop, persist build events, or call the LLM.
+
+```mermaid
+flowchart LR
+  Browser["Dashboard React UI<br/>:3001"]
+  Next["Next.js API proxy<br/>dashboard/app/api/loops"]
+  Backend["Express backend<br/>:3000 /api/loops"]
+  DB[(loop_build_events)]
+
+  Browser -->|"POST /api/loops/:id/chat"| Next
+  Browser -->|"POST /api/loops/:id/chat/tool-answer"| Next
+  Next -->|"X-Internal-Secret + X-User-Id"| Backend
+  Backend --> DB
+  Backend -->|"SSE stream"| Next
+  Next -->|"stream passthrough"| Browser
+```
+
+| Layer | Path | Responsibility |
+| ----- | ---- | ---------------- |
+| **Browser** | `dashboard/src/components/conductor-builder.tsx` | Render transcript + composer; call `submitConductorToolAnswer` |
+| **Next.js proxy** | `dashboard/app/api/loops/[...path]/route.ts` | Session auth → forward to `BACKEND_URL` with `INTERNAL_API_SECRET` |
+| **Backend** | `src/transport/http/routes/loops.ts` | `POST /:id/chat`, `POST /:id/chat/tool-answer`, `pipeConductorSession`, tool execute, artifact interpreters |
+| **Backend** | `src/loops/conductor-session-loop.ts` | In-request auto-continue (phase handoffs, stop reasons, UI-tool patch helpers) |
+
+**Streaming:** both `POST …/chat` and `POST …/chat/tool-answer` return **SSE**. The proxy must pass the response body through unchanged (`isStreamingChatPath` matches `/chat` and `/chat/tool-answer`). Buffering the tool-answer stream as JSON breaks session resume.
+
+**Removed (legacy client orchestration):** `PUT /:id/chat`, client `sendAutomaticallyWhen` / empty-message auto-continue, client-side phase-handoff scanners, and `carriedHandoff` metadata on resume. Continuation is **server-owned** only.
+
+**Routes (browser → proxy → backend):**
+
+- `POST /api/loops/:loopId/chat` — typed user message or session start; SSE session loop
+- `POST /api/loops/:loopId/chat/tool-answer` — UI-only tool answer; patches transcript, then resumes the same session loop over SSE
+- `GET /api/loops/:loopId` — authoritative `chatMessages`, `buildProgress`, spec (refreshed after streams / tool answers)
 
 **Model:** `modelGateway.resolveStreaming("conductor")` (via `src/model/`) picks the model by provider and reasoning tier on OpenAI: `gpt-5-nano` when `TALLEI_CONDUCTOR__REASONING_EFFORT` is `none|minimal|low`, otherwise `TALLEI_CONDUCTOR__MODEL` (default `gpt-5-mini`). Optional `TALLEI_CONDUCTOR__LOW_REASONING_MODEL` overrides the nano tier. OpenCode uses `TALLEI_CONDUCTOR__MODEL` / `TALLEI_LLM__OPENCODE_MODEL` as before. Provider-specific SDK details stay inside the Model Gateway adapters.
 
@@ -125,17 +160,22 @@ The dashboard shows a **Loop spec** sheet (`ConductorSpecSheet`) when `spec.task
 
 ```mermaid
 flowchart TB
-  subgraph ui ["Dashboard UI"]
+  subgraph ui ["Dashboard UI (browser)"]
     Page["/loops/:id/conductor"]
-    Bridge["conductor-builder.tsx — useChat, hydration, handoff effect"]
+    Bridge["conductor-builder.tsx — useChat, hydration, tool-answer"]
     Layout["conductor-builder-layout.tsx — composer"]
-    Shared["conductor-shared.ts — UI auto-send, pending prompts"]
+    Shared["conductor-shared.ts — pending prompts, budget helpers"]
     Suggestions["conductor-prompt-suggestions.ts — reply chips"]
     Roster["agent-team-roster.tsx — specialist review"]
   end
 
-  subgraph api ["API"]
-    Chat["POST /api/loops/:id/chat — streamText per phase"]
+  subgraph proxy ["Next.js proxy"]
+    ApiRoute["app/api/loops/[...path]/route.ts"]
+  end
+
+  subgraph api ["Express backend"]
+    Chat["POST /api/loops/:id/chat — pipeConductorSession"]
+    ToolAnswer["POST /api/loops/:id/chat/tool-answer"]
     Prompt["buildConductorSystemPrompt() + phaseContract"]
     Tools["loops.ts — phase-gated tool execute"]
     Resolve["resolveConductorTurnResolution()"]
@@ -148,12 +188,17 @@ flowchart TB
     Discovery["connector-discovery.ts — rank apps"]
     Bindings["binding-discovery.ts — rank actions"]
     Continuity["build-continuity.ts — stale compile recovery"]
+    SessionLoop["conductor-session-loop.ts — auto-continue in SSE"]
   end
 
-  Page --> Bridge --> Chat
+  Page --> Bridge --> ApiRoute
   Layout --> Shared
   Layout --> Suggestions
   Roster --> Shared
+  ApiRoute --> Chat
+  ApiRoute --> ToolAnswer
+  ToolAnswer --> Chat
+  Chat --> SessionLoop
   Chat --> Prompt
   Chat --> Tools
   Chat --> Resolve
@@ -169,24 +214,26 @@ flowchart TB
 
 | File                                                               | Role                                                                                                                  |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, hydration, `useConductorContinuation`, spec meta sync                                            |
-| `dashboard/src/components/conductor/use-conductor-continuation.ts` | Server-projected phase handoff auto-continue after in-session stream completion                                       |
+| `dashboard/app/api/loops/[...path]/route.ts`                       | Next.js proxy: session auth, SSE passthrough for `/chat` and `/chat/tool-answer`                                      |
+| `dashboard/src/components/conductor-builder.tsx`                   | `useChat` transport, hydration, `answerTool` → `submitConductorToolAnswer`, spec meta sync                          |
+| `dashboard/src/lib/conductor-tool-answer.ts`                       | `POST /chat/tool-answer`, `consumeStream`, then `GET /api/loops/:id` for authoritative transcript                   |
+| `src/loops/conductor-session-loop.ts`                              | In-request auto-continue helpers (handoff consume, UI tool patch, stop reasons)                                       |
 | `dashboard/src/components/conductor/conductor-builder-layout.tsx`  | Composer: pending question vs free-text vs thinking indicator                                                         |
 | `dashboard/src/components/conductor/conductor-builder-chat.tsx`    | Transcript + tool part rendering                                                                                      |
-| `dashboard/src/components/conductor/conductor-shared.ts`           | `findPendingInteractivePrompt`, pending UI detection, Yes/No → app picker remap                                       |
+| `dashboard/src/components/conductor/conductor-shared.ts`           | Pending UI detection (`findPending*`, `hasUnansweredUiToolCalls`), optimistic in-flight excludes, Yes/No → app picker remap |
 | `src/loops/conductor-continuation-intent.ts`                     | `projectConductorClientAction` — authoritative continuation intent from event log                                     |
 | `dashboard/src/lib/conductor-continuation-intent.ts`             | Client types + `parseContinuationIntent` for `GET /api/loops/:id`                                                     |
 | `dashboard/src/components/conductor/agent-team-roster.tsx`         | Specialist team review card (`presentAgentTeam` output)                                                               |
 | `dashboard/src/components/conductor/builder-connector-prompt.tsx`  | App card picker (`pickConnectorApp`)                                                                                  |
 | `dashboard/src/components/ai-elements/interactive-prompt-menu.tsx` | Generic `askQuestion` / `confirmOutcomeBrief` answer UI                                                               |
 | `dashboard/src/lib/conductor-prompt-suggestions.ts`                | Heuristic compile/test/activate chips; budget-exhausted Continue                                                      |
-| `@tallei/shared/conductor-phase-handoff`                           | `isPhaseHandoffPending` — transcript-derived `handoffPending` mirror per phase                                        |
+| `@tallei/shared/conductor-phase-handoff`                           | `PhaseHandoffProgress` type — server-projected phase progress mirrored on GET meta                                    |
 | `@tallei/shared/conductor-activation-confirm`                     | `isActivationConfirmationReply`, `findActivationReplyOption`                                                          |
-| `@tallei/shared/conductor-stall-recovery`                          | `isBuildTerminalForStall` — blocks auto-continue when loop is active or phase is terminal                             |
+| `@tallei/shared/conductor-stall-recovery`                          | `isBuildTerminalForStall` — gates prompt suggestions when loop is active or phase is terminal                         |
 
 ### Chat transport behavior
 
-Continuation is **server-authoritative**. The event log projects `buildProgress.continuationIntent` on `GET /api/loops/:id`; the client never infers auto-continue from the transcript on hydration.
+Continuation is **server-owned**. The event log projects `buildProgress.continuationIntent`; the server session loop continues in-request until `wait_for_user` / `wait` / blocked / budget exhausted. The client never auto-POSTs empty messages.
 
 #### Server projection (`projectConductorClientAction`)
 
@@ -200,30 +247,30 @@ Continuation is **server-authoritative**. The event log projects `buildProgress.
 
 `trigger` is `phase_handoff`, `ui_tool_answered`, `budget_exhausted`, or `null`.
 
-#### Client execution (`useConductorContinuation`)
+#### Server session loop
 
-[`dashboard/src/components/conductor/use-conductor-continuation.ts`](dashboard/src/components/conductor/use-conductor-continuation.ts):
+[`src/loops/conductor-session-loop.ts`](src/loops/conductor-session-loop.ts) + `POST /api/loops/:id/chat`:
 
-1. **Hydration** — `GET /api/loops/:id` seeds messages, build progress, and `continuationIntent` before `hydrationReady` is set. No POST on load.
-2. **UI tool answers** — `addToolOutput` persists the answer locally, then calls `sendMessage()` directly (user-initiated).
-3. **Phase handoffs** — after a stream completes (`streaming` → `ready`), if `continuationIntent.action === "auto_continue"` and `trigger === "phase_handoff"`, the hook calls `sendMessage()` once.
+1. **Typed user message** — `POST /chat` with messages; server saves, then runs one or more phase turns in a single SSE response.
+2. **UI tool answers** — `POST /chat/tool-answer` with `{ toolCallId, tool, output }`; server patches the transcript, then resumes the same session loop.
+3. **Phase handoffs** — after turn finalize, if `continuationIntent.action === "auto_continue"` and `trigger === "phase_handoff"`, the server appends `phase_handoff.consumed` and starts the next turn in the same SSE (no client empty `sendMessage`).
+4. **Human gates** — when `pendingUiTool` is set (`wait_for_user`), the stream ends and the UI renders the prompt.
 
-**Phase handoff consumption** — when the client continues a handoff, the server appends `phase_handoff.consumed` for the carried `handoffId` before starting the next phase stream. Superseded handoffs return HTTP 409.
+**Phase handoff consumption** — server-owned between turns inside the same SSE session.
 
-- **PUT `/api/loops/:id/chat`** — debounced transcript persistence (500ms); messages are also mirrored into `loop_build_events`.
-- **GET `/api/loops/:id`** — hydrates `chatMessages`, `buildProgress.phaseProgress`, `buildProgress.latestPhaseTurn`, `buildProgress.continuationIntent`, `buildProgress.consumedHandoffIds`, `buildPhase`, and latest spec on load (polled after each chat revision).
+- **GET `/api/loops/:id`** — hydrates `chatMessages`, `buildProgress.phaseProgress`, `buildProgress.latestPhaseTurn`, `buildProgress.continuationIntent`, `buildProgress.consumedHandoffIds`, `buildPhase`, and latest spec on load (refreshed after streams / tool answers).
 
 ### Phase handoff & budget recovery
 
 **Authority:** phase progress and continuation intent come from the event log via `projectLoopBuild()`.
 
-| Signal | Client behavior |
-|--------|-----------------|
-| `continuationIntent.action: auto_continue`, `trigger: phase_handoff` | `useConductorContinuation` auto-sends after stream completes in session |
-| User answers UI tool | `addToolOutput` then `sendMessage()` |
+| Signal | Behavior |
+|--------|----------|
+| `continuationIntent.action: auto_continue`, `trigger: phase_handoff` | Server continues in the same SSE session |
+| User answers UI tool | `POST /chat/tool-answer` then server resumes |
 | `continuationIntent.trigger: budget_exhausted` | Show `CONDUCTOR_BUDGET_EXHAUSTED_QUESTION` + Continue chips (explicit user send) |
 | `continuationIntent.action: wait_for_user` | Wait for UI tool answer |
-| `continuationIntent.action: wait`, build terminal | No auto-continue (refresh-safe) |
+| `continuationIntent.action: wait`, build terminal | Stop session (refresh-safe) |
 
 **Budget exhaustion:** server appends `phase_turn.completed` with `outcome: budget_exhausted`. The dashboard surfaces Continue chips; the next request resumes from persisted `phaseProgress` and event-log state.
 
@@ -231,14 +278,52 @@ Continuation is **server-authoritative**. The event log projects `buildProgress.
 
 ### UI-only tools (no server `execute`)
 
+Canonical tool list: `CONDUCTOR_UI_ONLY_TOOLS` in `packages/conductor-tools/conductor-tool-names.ts`.
+
 `pickConnectorApp`, `askQuestion`, `confirmOutcomeBrief`, and `presentReplyOptions` are **human-in-the-loop** tools:
 
 1. Conductor calls the tool → part state `input-available`.
 2. Dashboard renders the composer prompt (app picker, question menu, confirm buttons, or reply chips).
-3. User selects → `addToolOutput` → `sendMessage()` continues the turn.
-4. Conductor reads `output` on the next step and proceeds (or the server commits artifacts from the evidence).
+3. User selects → browser `POST /api/loops/:id/chat/tool-answer` (proxied to backend) → backend patches transcript and resumes `pipeConductorSession` over SSE.
+4. Client drains the SSE (`consumeStream`), then `GET /api/loops/:id` for authoritative `chatMessages` + `buildProgress`.
+5. Conductor reads `output` on the next step and proceeds (or the server commits artifacts from the evidence).
 
 **UI remap:** if Conductor wrongly calls `askQuestion` with Yes/No to confirm an app, the dashboard remaps it to the app card picker (`BuilderConnectorPrompt`) using discovery options — user still chooses explicitly.
+
+#### Dashboard client behavior (tool answers)
+
+The dashboard **does not** continue the session itself. It only renders prompts and posts answers.
+
+| Concern | Implementation |
+| ------- | -------------- |
+| **Submit path** | `conductor-builder.tsx` → `chatApi.answerTool()` → `submitConductorToolAnswer()` |
+| **In-flight guard** | `inFlightToolAnswersRef` dedupes concurrent double-clicks per `toolCallId` (not a permanent block — retries work after failure) |
+| **Optimistic UI** | `optimisticallyResolvedToolCallIds` hides pending prompts while POST is in flight; `findPendingInteractivePrompts`, `findPendingOutcomeBrief`, `findPendingPresentReplyOptions`, and `hasUnansweredUiToolCalls` all respect this set |
+| **Composer feedback** | `InteractivePromptMenu` shows **Sending answer…** while busy; single-choice prompts (`!allowMultiple && !allowOther`) auto-submit on click (confirm + connector pick) |
+| **Failure recovery** | Failed `tool-answer` clears optimistic state, shows toast, reopens the prompt |
+| **Continuation display** | `continuationIntent` from `GET /api/loops/:id` is for UI hints only (budget chips, errors) — not for client auto-POST |
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant UI as Dashboard React
+  participant Proxy as Next.js /api/loops
+  participant API as Express loops.ts
+  participant Loop as pipeConductorSession
+
+  U->>UI: Click confirm / pick app / answer question
+  UI->>UI: optimistically hide pending prompt
+  UI->>Proxy: POST …/chat/tool-answer { toolCallId, tool, output }
+  Proxy->>API: forward (X-Internal-Secret, X-User-Id)
+  API->>API: applyUiToolAnswerToMessages + saveBuildChatMessages
+  API->>Loop: resume session (synthetic POST /chat)
+  Loop-->>Proxy: SSE stream (compile, test, …)
+  Proxy-->>UI: SSE passthrough
+  UI->>UI: consumeStream
+  UI->>Proxy: GET /api/loops/:id
+  Proxy->>API: hydrate chatMessages + buildProgress
+  API-->>UI: authoritative transcript + meta
+```
 
 ---
 
@@ -505,7 +590,7 @@ Build and run transcripts share one table with two thread kinds:
 
 | `kind`  | Scope                                       | Linked fields                                                      | Written by                                                                   |
 | ------- | ------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `build` | One row per `(loop_id, tenant_id, user_id)` | `spec_revision`, `compiled_plan_id` updated on spec save / compile | Conductor `POST`/`PUT` chat, `saveSpecDraft`, `saveCompiledPlan`             |
+| `build` | One row per `(loop_id, tenant_id, user_id)` | `spec_revision`, `compiled_plan_id` updated on spec save / compile | Conductor `POST` chat / tool-answer, `saveSpecDraft`, `saveCompiledPlan`     |
 | `run`   | One row per `run_id`                        | `compiled_plan_id`                                                 | `createLoopRun`, `insertRunStep`, `deliverOutputActivity`, `failRunActivity` |
 
 - **GET** `/api/loops/:id` returns `chatMessages`, `buildChat: { specRevision, compiledPlanId }`, `buildPhase`, and `buildProgress: { stage, phaseProgress, latestPhaseTurn, consumedHandoffIds }`.
@@ -732,13 +817,15 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 
 ## HTTP API summary
 
+Paths below are implemented on the **Express backend** (`src/transport/http/routes/loops.ts`). The dashboard calls the same paths via `dashboard/app/api/loops/*` (session auth + `INTERNAL_API_SECRET` proxy). Streaming routes (`POST …/chat`, `POST …/chat/tool-answer`) require SSE passthrough in the proxy.
+
 | Method | Path                                | Purpose                                                   |
 | ------ | ----------------------------------- | --------------------------------------------------------- |
 | `GET`  | `/api/loops`                        | List loops                                                |
 | `POST` | `/api/loops`                        | Create loop                                               |
 | `GET`  | `/api/loops/:id`                    | Loop + spec + `buildProgress` (phase progress, latest phase turn, consumed handoff IDs) |
 | `POST` | `/api/loops/:id/chat`               | **Conductor chat stream** (persists transcript on finish) |
-| `PUT`  | `/api/loops/:id/chat`               | Save Conductor chat messages                              |
+| `POST` | `/api/loops/:id/chat/tool-answer`   | Submit UI tool answer and resume session stream           |
 | `POST` | `/api/loops/:id/compile`            | Compile spec                                              |
 | `POST` | `/api/loops/:id/activate`           | Activate plan                                             |
 | `POST` | `/api/loops/:id/pause` / `resume`   | Lifecycle                                                 |
@@ -769,6 +856,16 @@ Temporal workflows delegate agentic runs to `runAgenticLoopActivity` (no duplica
 ---
 
 ## Environment variables
+
+### Dashboard → backend proxy (local dev)
+
+```env
+# dashboard/.env.local
+BACKEND_URL=http://127.0.0.1:3000          # Express API
+INTERNAL_API_SECRET=<same-as-backend>     # must match TALLEI_HTTP__INTERNAL_API_SECRET on backend
+```
+
+The dashboard proxy refuses requests when `INTERNAL_API_SECRET` is unset. Both processes must share the same secret.
 
 ### Conductor & LLM
 
@@ -824,6 +921,8 @@ src/loops/
   build-events.ts            Event types, chat projection, tool execution dedup
   build-continuity.ts        Stale compile artifact detection during test/activation
   conductor-turn-resolution.ts  resolveConductorTurnResolution — turn outcomes
+  conductor-session-loop.ts     applyUiToolAnswerToMessages, shouldAutoContinueConductorSession
+  conductor-continuation-intent.ts  projectConductorClientAction (continuationIntent)
   conductor-tools.ts         Zod schemas + execution metadata for Conductor tools
   planning-agent.ts          buildConductorSystemPrompt + runtime planner prompts
   connector-discovery.ts     Blueprint app ranking, auto-resolve prior picks
@@ -833,23 +932,31 @@ src/loops/
   service.ts                 create, compile, activate, reconcileLoopBuildContinuity
   store.ts                   Postgres CRUD + loop_build_events
 
-shared/
-  conductor-phase-handoff.ts     isPhaseHandoffPending (transcript mirror)
+packages/shared/
+  conductor-build-phase.ts       BUILD_PHASES / ConductorBuildPhase (canonical)
+  conductor-phase-handoff.ts     PhaseHandoffProgress type
   conductor-activation-confirm.ts isActivationConfirmationReply
-  conductor-turn-budget.ts       CONDUCTOR_PHASE_STEP_LIMITS
-  conductor-stall-recovery.ts    isBuildTerminalForStall (auto-continue terminal gate)
+  conductor-turn-budget.ts       CONDUCTOR_PHASE_STEP_LIMITS, budget helpers
+  conductor-stall-recovery.ts    isBuildTerminalForStall / isPhaseProgressTerminal
+
+packages/conductor-tools/
+  conductor-build-phase.ts       Zod buildPhaseSchema (re-exports BUILD_PHASES)
+  conductor-tool-names.ts        CONDUCTOR_UI_ONLY_TOOLS / internal transcript tools
+  conductor-execution-metadata.ts recoverable execution helpers
+  conductor-tool-input-schemas.ts tool Zod inputs
+  conductor-tool-descriptions.ts tool descriptions
 
 src/temporal/                  loopRunWorkflow, activities, schedules, worker
 src/integrations/composio/     connectors, tools, execute, triggers, webhooks
 src/transport/http/routes/loops.ts   Conductor chat stream + phase-gated tool handlers
 
 dashboard/
+  app/api/loops/[...path]/route.ts   proxy to backend (SSE for /chat + /chat/tool-answer)
   src/components/conductor-builder.tsx
   src/components/conductor/      layout, chat, shared, roster, connector picker, spec sheet
   src/lib/conductor-prompt-suggestions.ts
-  src/lib/conductor-phase-handoff.ts
+  src/lib/conductor-tool-answer.ts
   app/dashboard/loops/[loopId]/conductor/page.tsx
-  app/api/loops/
 ```
 
 ---
@@ -865,6 +972,7 @@ cd dashboard && npm run dev             # UI :3001
 
 1. Open `/dashboard/loops` → pick a starter.
 2. Conductor chat → connect Gmail via `connectToolkit` if needed.
-3. **Compile** → **Activate** → **Run now**.
-4. Watch run at `/dashboard/loops/:id/runs/:runId`; approve sensitive sends inline or in `/dashboard/approvals`.
+3. Answer UI prompts in the composer (questions, apps, confirm, activation) — each posts to `POST /api/loops/:id/chat/tool-answer` and resumes the backend session.
+4. **Compile** → **Activate** → **Run now**.
+5. Watch run at `/dashboard/loops/:id/runs/:runId`; approve sensitive sends inline or in `/dashboard/approvals`.
 

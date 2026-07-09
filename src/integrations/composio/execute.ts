@@ -115,7 +115,7 @@ export async function executeComposioAction(input: {
   auth: AuthContext;
   connector: string;
   actionSlug: string;
-  credentialRef: string;
+  credentialRef?: string;
   args: Record<string, unknown>;
   toolkitVersion?: string;
 }): Promise<unknown> {
@@ -130,9 +130,9 @@ export async function executeComposioAction(input: {
 
   const baseParams = {
     userId,
-    connectedAccountId: input.credentialRef,
     arguments: input.args,
     version,
+    ...(input.credentialRef ? { connectedAccountId: input.credentialRef } : {}),
   };
 
   try {

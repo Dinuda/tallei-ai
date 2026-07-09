@@ -72,7 +72,7 @@ export async function executeToolActivity(input: {
     auth: input.auth,
     toolkit: input.tool.connector,
     actionSlug: input.tool.actionSlug,
-    connectedAccountId: input.tool.credentialRef,
+    ...(input.tool.credentialRef ? { connectedAccountId: input.tool.credentialRef } : {}),
     args,
     toolkitVersion: input.tool.toolkitVersion,
   });

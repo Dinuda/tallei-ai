@@ -31,7 +31,7 @@ async function resolveBackendUserId(req: NextRequest): Promise<string | null> {
 }
 
 function isStreamingChatPath(path: string): boolean {
-  return path.endsWith("/chat");
+  return path.endsWith("/chat") || path.endsWith("/chat/tool-answer");
 }
 
 async function proxy(req: NextRequest, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"): Promise<Response> {

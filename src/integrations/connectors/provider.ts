@@ -9,6 +9,7 @@ export type ConnectorToolkit = {
   connected: boolean;
   connectedAccountId?: string;
   connectable?: boolean;
+  requiresConnection?: boolean;
 };
 
 export type ConnectorAction = {
@@ -65,7 +66,7 @@ export interface ConnectorProvider {
     auth: AuthContext;
     toolkit: string;
     actionSlug: string;
-    connectedAccountId: string;
+    connectedAccountId?: string;
     args: Record<string, unknown>;
     toolkitVersion?: string;
   }): Promise<unknown>;

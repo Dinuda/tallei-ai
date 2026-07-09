@@ -203,6 +203,7 @@ export function BuilderConnectorPrompt({
           allowMultiple={allowMultiple}
           allowOther={allowOther}
           disabled={disabled || busy}
+          submitting={busy}
           onDismiss={onDismiss}
           onSubmit={handleSubmit}
           options={options}

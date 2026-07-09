@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, ChevronLeft, ChevronRight, Circle, CornerDownLeft, Pencil, Search, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -208,6 +208,7 @@ export function InteractivePromptMenu({
   allowMultiple = false,
   allowOther = true,
   disabled = false,
+  submitting = false,
   submittedAnswer,
   placement = "transcript",
   step,
@@ -224,6 +225,8 @@ export function InteractivePromptMenu({
   allowMultiple?: boolean;
   allowOther?: boolean;
   disabled?: boolean;
+  /** Parent is posting the answer to the server (tool-answer stream in flight). */
+  submitting?: boolean;
   submittedAnswer?: InteractivePromptAnswer;
   placement?: "transcript" | "composer";
   step?: { index: number; total: number };
@@ -252,7 +255,9 @@ export function InteractivePromptMenu({
     [recommendedOptionIds]
   );
   const [submittedLocally, setSubmittedLocally] = useState(false);
+  const [lastLocalAnswerText, setLastLocalAnswerText] = useState<string | null>(null);
   const isSubmitted = Boolean(submittedAnswer) || submittedLocally;
+  const autoSubmitSingleChoice = !allowMultiple && !allowOther;
   // Content fingerprint — parent often passes a fresh `options` array reference
   // with the same rows; depend on identity of the question + option ids only.
   const optionsRevision = useMemo(
@@ -262,7 +267,18 @@ export function InteractivePromptMenu({
 
   useEffect(() => {
     setSubmittedLocally(false);
+    setLastLocalAnswerText(null);
   }, [optionsRevision]);
+
+  const prevSubmittingRef = useRef(submitting);
+  useEffect(() => {
+    const wasSubmitting = prevSubmittingRef.current;
+    prevSubmittingRef.current = submitting;
+    if (wasSubmitting && !submitting && submittedLocally && !submittedAnswer) {
+      setSubmittedLocally(false);
+      setLastLocalAnswerText(null);
+    }
+  }, [submitting, submittedLocally, submittedAnswer]);
 
   const hasOutcomeGroups = useMemo(
     () => options.some((option) => Boolean(option.outcomeId)),
@@ -332,10 +348,10 @@ export function InteractivePromptMenu({
         className={cn(
           "flex w-full items-start gap-3 border border-transparent px-3 py-2.5 text-left transition-colors",
           selected ? theme.optionSelected : theme.optionHover,
-          (disabled || isSubmitted) && "cursor-default",
+          (disabled || isSubmitted || submitting) && "cursor-default",
           option.disabled && "cursor-not-allowed opacity-50",
         )}
-        disabled={disabled || isSubmitted || option.disabled}
+        disabled={disabled || isSubmitted || submitting || option.disabled}
         key={option.id ?? `option-${index}`}
         onClick={() => toggle(option.id)}
         type="button"
@@ -382,45 +398,56 @@ export function InteractivePromptMenu({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onDismiss, isSubmitted, disabled]);
 
-  function toggle(optionId: string) {
-    if (disabled || isSubmitted) return;
-    const option = options.find((row) => row.id === optionId);
-    if (option?.disabled) return;
-    setSelectedIds((current) => {
-      if (allowMultiple && option?.outcomeId) {
-        const withoutSameOutcome = current.filter((id) => {
-          const row = options.find((opt) => opt.id === id);
-          return row?.outcomeId !== option.outcomeId;
-        });
-        return current.includes(optionId)
-          ? withoutSameOutcome
-          : [...withoutSameOutcome, optionId];
-      }
-      return allowMultiple
-        ? current.includes(optionId)
-          ? current.filter((id) => id !== optionId)
-          : [...current, optionId]
-        : [optionId];
-    });
-  }
-
-  function submit() {
+  function submitWithSelectedIds(nextSelectedIds: string[], customText = otherText) {
     const selectedOptions = options.filter((option) =>
-      selectedIds.includes(option.id)
+      nextSelectedIds.includes(option.id),
     );
-    const custom = otherText.trim();
+    const custom = customText.trim();
     const answerText = [
       ...selectedOptions.map((option) => option.label),
       ...(custom ? [custom] : []),
     ].join("; ");
     if (!answerText) return;
+    setSelectedIds(nextSelectedIds);
     setSubmittedLocally(true);
+    setLastLocalAnswerText(answerText);
     onSubmit({
       selectedOptionIds: selectedOptions.map((option) => option.id),
       selectedValues: selectedOptions.map((option) => option.value),
       ...(custom ? { otherText: custom } : {}),
       answerText,
     });
+  }
+
+  function toggle(optionId: string) {
+    if (disabled || isSubmitted || submitting) return;
+    const option = options.find((row) => row.id === optionId);
+    if (option?.disabled) return;
+    let nextSelectedIds: string[];
+    if (allowMultiple && option?.outcomeId) {
+      const withoutSameOutcome = selectedIds.filter((id) => {
+        const row = options.find((opt) => opt.id === id);
+        return row?.outcomeId !== option.outcomeId;
+      });
+      nextSelectedIds = selectedIds.includes(optionId)
+        ? withoutSameOutcome
+        : [...withoutSameOutcome, optionId];
+    } else if (allowMultiple) {
+      nextSelectedIds = selectedIds.includes(optionId)
+        ? selectedIds.filter((id) => id !== optionId)
+        : [...selectedIds, optionId];
+    } else {
+      nextSelectedIds = [optionId];
+    }
+    if (autoSubmitSingleChoice) {
+      submitWithSelectedIds(nextSelectedIds);
+      return;
+    }
+    setSelectedIds(nextSelectedIds);
+  }
+
+  function submit() {
+    submitWithSelectedIds(selectedIds);
   }
 
   return (
@@ -536,8 +563,10 @@ export function InteractivePromptMenu({
             </Button>
           )}
           <span className={cn("text-xs", theme.hint)}>
-            {isSubmitted
-              ? `Answered: ${submittedAnswer?.answerText}`
+            {submitting && !isSubmitted
+              ? "Sending answer…"
+              : isSubmitted
+              ? `Answered: ${submittedAnswer?.answerText?.trim() || lastLocalAnswerText?.trim() || otherText.trim() || "saved"}`
               : selectionHint
                 ?? (rankedAppsLayout
                   ? "Search or scroll to find an app"
@@ -550,11 +579,12 @@ export function InteractivePromptMenu({
                       : "Pick an option, or describe your own approach below")}
           </span>
         </div>
-        {!isSubmitted && (
+        {!isSubmitted && !autoSubmitSingleChoice && (
           <Button
             className={cn("text-white", theme.primaryBtn)}
             disabled={
               disabled ||
+              submitting ||
               (selectedIds.length === 0 && !otherText.trim())
             }
             onClick={submit}

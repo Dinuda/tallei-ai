@@ -11,6 +11,38 @@ import {
 } from "../../../src/loops/conductor-chat.js";
 import { interruptionEventsForToolCallIds } from "../../../src/loops/build-events.js";
 
+test("normalizeConductorChatMessages assigns ids to visible assistant turns missing an id", () => {
+  const messages = [
+    { id: "user-1", role: "user", parts: [{ type: "text", text: "Build a loop" }] },
+    {
+      id: "",
+      role: "assistant",
+      parts: [
+        { type: "text", text: "Which review policy?" },
+        {
+          type: "tool-askQuestion",
+          toolCallId: "q1",
+          state: "input-available",
+          input: {
+            questionId: "review",
+            question: "Review?",
+            options: [
+              { id: "a", label: "Yes", value: "yes" },
+              { id: "b", label: "No", value: "no" },
+            ],
+          },
+        },
+      ],
+    },
+  ] as UIMessage[];
+
+  const normalized = normalizeConductorChatMessages(messages);
+  assert.equal(normalized.length, 2);
+  assert.equal(normalized[0]?.id, "user-1");
+  assert.ok(normalized[1]?.id && normalized[1].id.length > 0);
+  assert.notEqual(normalized[1]?.id, "");
+});
+
 test("normalizeConductorChatMessages drops empty assistant placeholders", () => {
   const messages = [
     { id: "user-1", role: "user", parts: [{ type: "text", text: "Build a loop" }] },

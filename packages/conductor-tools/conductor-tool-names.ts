@@ -16,7 +16,7 @@ export type ConductorToolName =
   | "presentReplyOptions"
   | "activateLoop";
 
-/** Tools without server execute — client supplies output via addToolOutput. */
+/** Tools without server execute — client answers via POST /chat/tool-answer. */
 export const CONDUCTOR_UI_ONLY_TOOLS = new Set<string>([
   "askQuestion",
   "pickConnectorApp",
