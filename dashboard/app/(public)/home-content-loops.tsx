@@ -1,18 +1,9 @@
 import Image from "next/image";
 import Link from "next/link";
-import {
-  ArrowRight,
-  Check,
-  FileText,
-  GitBranch,
-  Mail,
-  MessageSquare,
-  Sun,
-  TrendingUp,
-  Users,
-} from "lucide-react";
-import { IntegrationsSection } from "../components/integrations-section";
-import { LoopsApprovalCard } from "./loops-approval-card";
+import { ArrowRight, Check } from "lucide-react";
+import { AgentTeamCard } from "./agent-team-card";
+import { HeroLoopVisual } from "./hero-loop-visual";
+import { HowItWorksSteps } from "./how-it-works-steps";
 import { LoopsScrollReveal } from "./loops-scroll-reveal";
 
 const PRICING_PLANS = [
@@ -61,126 +52,117 @@ const PRICING_PLANS = [
   },
 ] as const;
 
-const PROBLEM_EXAMPLES = [
-  "Weekly newsletters",
-  "Investor updates",
-  "Product changelogs",
-  "Meeting follow-ups",
-  "Customer replies",
-  "Product summaries",
-  "Launch posts",
-  "Founder briefings",
-] as const;
-
 const HOW_IT_WORKS_STEPS = [
   {
     num: "01",
-    title: "Capture",
-    body: "Tallei connects to your AI work, docs, and tools.",
-    embedIntegrations: true,
+    title: "Define the outcome",
+    body: "Tell Tallei what should happen on a schedule.",
+    detail: "“Send our monthly newsletter every Friday”",
   },
   {
     num: "02",
-    title: "Remember",
-    body: "It stores useful company context, preferences, decisions, and outputs.",
+    title: "Tallei spawns a specialized team",
+    body: "Focused agents take the jobs a generalist would muddle.",
+    detail: "Market Researcher · Brand Voice Writer · Editor · Deliverer",
   },
   {
     num: "03",
-    title: "Clean",
-    body: "Tallei cleans and merges memory so it stays useful.",
-  },
-  {
-    num: "04",
-    title: "Detect loops",
-    body: "It finds repeated work patterns across your activity.",
-  },
-  {
-    num: "05",
-    title: "Automate with approval",
-    body: "Tallei prepares recurring drafts or actions and asks before sending, publishing, or changing anything.",
+    title: "The Loop runs reliably",
+    body: "Agents hand off work automatically. You review final output — or only when exceptions occur.",
   },
 ] as const;
 
-const LOOP_CARDS = [
+const EXAMPLE_LOOPS = [
   {
-    icon: Mail,
-    name: "Company newsletter",
-    outcome: "Turn product progress into weekly customer updates.",
+    name: "Newsletter Loop",
+    agents: [
+      {
+        initials: "MR",
+        title: "Market Researcher",
+        description: "Finds metrics & stories",
+      },
+      {
+        initials: "MW",
+        title: "Marketing Writer",
+        description: "Drafts in your tone",
+      },
+      {
+        initials: "ED",
+        title: "Editor",
+        description: "Polishes & formats",
+      },
+      {
+        initials: "SN",
+        title: "Sender",
+        description: "Delivers + tracks engagement",
+      },
+    ],
   },
   {
-    icon: TrendingUp,
-    name: "Investor update",
-    outcome: "Prepare monthly investor emails from company memory and recent work.",
+    name: "Investor Update Loop",
+    agents: [
+      {
+        initials: "MA",
+        title: "Metrics Analyst",
+        description: "Pulls the numbers that matter",
+      },
+      {
+        initials: "ST",
+        title: "Storyteller",
+        description: "Frames progress and risks",
+      },
+      {
+        initials: "DB",
+        title: "Deck Builder",
+        description: "Shapes a clear update",
+      },
+      {
+        initials: "DL",
+        title: "Deliverer",
+        description: "Sends when you approve",
+      },
+    ],
   },
   {
-    icon: GitBranch,
-    name: "Changelog",
-    outcome: "Turn GitHub activity and product notes into release updates.",
-  },
-  {
-    icon: Users,
-    name: "Meeting follow-up",
-    outcome: "Summarize calls and draft follow-up emails.",
-  },
-  {
-    icon: MessageSquare,
-    name: "Customer feedback digest",
-    outcome: "Cluster feedback into product insights.",
-  },
-  {
-    icon: Sun,
-    name: "Founder briefing",
-    outcome: "Get a daily or weekly summary of what changed, what is blocked, and what needs attention.",
+    name: "Meeting Follow-up Loop",
+    agents: [
+      {
+        initials: "SM",
+        title: "Summarizer",
+        description: "Captures what was decided",
+      },
+      {
+        initials: "AO",
+        title: "Action Item Owner",
+        description: "Tracks who owes what",
+      },
+      {
+        initials: "EM",
+        title: "Email Drafter",
+        description: "Writes the follow-up",
+      },
+      {
+        initials: "CB",
+        title: "Calendar Booker",
+        description: "Schedules next steps",
+      },
+    ],
   },
 ] as const;
 
-const COMPARISON_ROWS = [
+const WHY_POINTS = [
   {
-    label: "Normal AI chat",
-    description: "Helps once, then forgets.",
-    highlight: false,
+    title: "Specialization",
+    body: "Each agent is excellent at one job — research, writing, formatting, or delivery.",
   },
   {
-    label: "Memory tools",
-    description: "Store context, but do not turn repeated work into action.",
-    highlight: false,
+    title: "Memory & Context",
+    body: "Agents learn your company, tone, and processes so every run starts informed.",
   },
   {
-    label: "Automation builders",
-    description: "Require users to manually build workflows.",
-    highlight: false,
+    title: "Control & Safety",
+    body: "Human approval, full audit logs, and easy overrides keep you in charge.",
   },
-  {
-    label: "Generic AI agents",
-    description: "Do tasks, but often lack long-term memory and approval structure.",
-    highlight: false,
-  },
-  {
-    label: "Tallei",
-    description:
-      "Remembers scattered AI work, detects repeated loops, and turns them into approved recurring workflows.",
-    highlight: true,
-  },
-] as const;
-
-const APPROVAL_EXAMPLES = [
-  { action: "Approve newsletter draft", detail: "Review before sending" },
-  { action: "Create Gmail draft", detail: "Edit workflow" },
-  { action: "Ignore suggestion", detail: "Pause loop" },
-] as const;
-
-const AUDIENCE = [
-  "Technical founders",
-  "Solo founders",
-  "Startup operators",
-  "Indie hackers",
-  "Product managers",
-  "Engineering leads",
-  "Growth marketers",
-  "Agencies",
-  "Consultants",
-  "Newsletter operators",
-  "Power users of ChatGPT, Claude, Codex, and Cursor",
 ] as const;
 
 const JSON_LD = [
@@ -190,7 +172,7 @@ const JSON_LD = [
     name: "Tallei",
     url: "https://tallei.com",
     description:
-      "Tallei remembers scattered AI work, discovers repeated loops, and turns them into approved recurring workflows.",
+      "Tallei turns recurring tasks across ChatGPT, Claude, Gmail, Docs, Slack, and Notion into specialized AI Loops powered by focused agents.",
   },
   {
     "@context": "https://schema.org",
@@ -199,7 +181,7 @@ const JSON_LD = [
     applicationCategory: "ProductivityApplication",
     operatingSystem: "Web",
     description:
-      "Tallei remembers your scattered work across AI tools, detects repeated patterns, and turns them into approved recurring workflows called loops.",
+      "Tallei turns recurring work into AI Loops — workflows powered by specialized agents that research, write, format, and deliver with approval-first control.",
     url: "https://tallei.com",
     offers: {
       "@type": "Offer",
@@ -208,11 +190,10 @@ const JSON_LD = [
       description: "Free tier available",
     },
     featureList: [
-      "Loop detection from repeated AI work",
-      "Cross-tool memory capture",
-      "Approval-first automation",
-      "Weekly newsletters and investor updates",
-      "Meeting follow-ups and changelogs",
+      "Specialized agent teams for recurring workflows",
+      "Newsletter, investor update, and meeting follow-up loops",
+      "Cross-tool context across ChatGPT, Claude, Gmail, Docs, Slack, and Notion",
+      "Approval-first automation with audit logs",
     ],
   },
   {
@@ -221,10 +202,10 @@ const JSON_LD = [
     mainEntity: [
       {
         "@type": "Question",
-        name: "What is a loop?",
+        name: "What is a Loop?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "A loop is repeated AI work that Tallei detects from your activity — like weekly newsletters or investor updates — and offers to automate with your approval.",
+          text: "A Loop is a recurring workflow powered by a specialized team of AI agents — for example a Newsletter Loop with a researcher, writer, editor, and sender — that runs reliably with your approval.",
         },
       },
       {
@@ -237,10 +218,10 @@ const JSON_LD = [
       },
       {
         "@type": "Question",
-        name: "How is Tallei different from memory tools?",
+        name: "How is Tallei different from a single AI agent?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "Memory tools store context. Tallei goes further — it detects when you repeat similar work and asks if you want to turn that pattern into an approved recurring workflow.",
+          text: "Instead of one generalist, Tallei runs a team of focused agents. Each role is excellent at one job, and agents hand off work automatically while you stay in control.",
         },
       },
     ],
@@ -270,46 +251,29 @@ export function HomeContentLoops() {
 
       {/* ── Hero ─────────────────────────────────────────────── */}
       <section className="loops-hero">
-        <div className="loops-section-inner loops-hero-grid">
-          <div className="loops-hero-copy">
-            <p className="loops-mono loops-eyebrow">Loops by Tallei</p>
-            <h1 className="loops-hero-title">
-              Your AI work has patterns. Tallei turns them into loops.
-            </h1>
-            <p className="loops-hero-sub">
-              Tallei remembers your scattered work across ChatGPT, Claude, Codex, docs,
-              email, and tools. Then it discovers repeated patterns and asks if you want
-              to automate them safely.
-            </p>
-            <div className="loops-hero-actions">
-              <Link href="/login" className="loops-btn loops-btn-primary">
-                Start building loops
-                <ArrowRight size={16} />
-              </Link>
-              <Link href="/#how-it-works" className="loops-btn loops-btn-secondary">
-                See how it works
-              </Link>
-            </div>
-            <div className="loops-hero-stats">
-              <div className="loops-stat">
-                <span className="loops-stat-value">12+</span>
-                <span className="loops-mono loops-stat-label">loop types</span>
-              </div>
-              <div className="loops-stat-divider" aria-hidden />
-              <div className="loops-stat">
-                <span className="loops-stat-value">4hrs</span>
-                <span className="loops-mono loops-stat-label">saved / week</span>
-              </div>
-              <div className="loops-stat-divider" aria-hidden />
-              <div className="loops-stat">
-                <span className="loops-stat-value">100%</span>
-                <span className="loops-mono loops-stat-label">approval-first</span>
-              </div>
-            </div>
+        <div className="loops-section-inner loops-hero-centered">
+          <h1 className="loops-hero-title loops-hero-title--centered">
+            Your repeated work should run itself.
+          </h1>
+          <p className="loops-hero-sub loops-hero-sub--centered">
+            Tallei turns recurring tasks across ChatGPT, Claude, Gmail, Docs, Slack, and
+            Notion into specialized <strong>AI Loops</strong> — workflows powered by focused
+            agents that research, write, format, and deliver.
+          </p>
+          <div className="loops-hero-actions loops-hero-actions--centered">
+            <Link href="/login" className="loops-btn loops-btn-primary">
+              Start building your first Loop
+              <ArrowRight size={16} />
+            </Link>
+            <Link href="/#how-it-works" className="loops-btn loops-btn-secondary">
+              Watch demo (90s)
+            </Link>
           </div>
-
+          <p className="loops-mono loops-hero-trust">
+            4+ hours saved per week · Approval-first · Used by startup operators
+          </p>
           <div className="loops-hero-visual">
-            <LoopsApprovalCard />
+            <HeroLoopVisual />
           </div>
         </div>
       </section>
@@ -317,204 +281,75 @@ export function HomeContentLoops() {
       {/* ── Problem ──────────────────────────────────────────── */}
       <LoopsScrollReveal>
         <section className="loops-section loops-section-band">
-          <div className="loops-section-inner">
+          <div className="loops-section-inner loops-problem-block">
             <p className="loops-mono loops-eyebrow">The problem</p>
-            <h2 className="loops-section-title">AI work is scattered and repetitive.</h2>
-            <div className="loops-prose-grid">
-              <p>
-                People use ChatGPT, Claude, Codex, Cursor, email, docs, GitHub, Notion, and
-                Slack to get work done. But the context is spread everywhere. Every time they
-                start again, they re-explain the company, the project, the tone, the sources,
-                and what happened before.
-              </p>
-              <div className="loops-callout">
-                <p className="loops-callout-label">The hidden problem</p>
-                <p className="loops-callout-text">
-                  Many AI tasks are not one-off tasks. They are <strong>loops</strong>.
-                </p>
-              </div>
-            </div>
-            <ul className="loops-tag-grid">
-              {PROBLEM_EXAMPLES.map((item) => (
-                <li key={item} className="loops-mono loops-tag">
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-      </LoopsScrollReveal>
-
-      {/* ── Solution ─────────────────────────────────────────── */}
-      <LoopsScrollReveal>
-        <section className="loops-section">
-          <div className="loops-section-inner loops-solution-grid">
-            <div>
-              <p className="loops-mono loops-eyebrow">The solution</p>
-              <h2 className="loops-section-title">
-                Tallei discovers the loops inside your AI work.
-              </h2>
-              <p className="loops-section-body">
-                Tallei remembers useful context from your AI activity, cleans it into
-                reliable memory, and groups work into episodes. When similar episodes repeat,
-                Tallei suggests a loop.
-              </p>
-              <p className="loops-section-body loops-section-body--emphasis">
-                You do not manually build automations. Tallei notices repeated work and asks
-                for permission.
-              </p>
-            </div>
-            <blockquote className="loops-quote-card">
-              <p className="loops-quote-text">
-                &ldquo;You&apos;ve written 3 similar newsletters recently. Want me to prepare
-                one every Friday?&rdquo;
-              </p>
-              <footer className="loops-mono loops-quote-footer">Loop suggestion · approval required</footer>
-            </blockquote>
+            <h2 className="loops-section-title">
+              AI has made creation easy.
+              <br />
+              Execution is still manual.
+            </h2>
+            <p className="loops-section-lead">
+              You&apos;re repeating the same workflows every week — gathering data, writing
+              updates, sending newsletters, following up on meetings. Different parts need
+              different skills, and context gets lost every time.
+            </p>
           </div>
         </section>
       </LoopsScrollReveal>
 
       {/* ── How it works ─────────────────────────────────────── */}
-      <section id="how-it-works" className="loops-section loops-section-band">
+      <section id="how-it-works" className="loops-section">
         <div className="loops-section-inner">
           <LoopsScrollReveal>
             <p className="loops-mono loops-eyebrow">How it works</p>
-            <h2 className="loops-section-title">From scattered work to approved loops.</h2>
+            <h2 className="loops-section-title">From outcome to a running Loop.</h2>
             <p className="loops-section-lead">
-              Five steps. Tallei does the noticing — you stay in control of what runs.
+              Three steps. Specialized agents do the hand-offs — you stay in control of what
+              ships.
             </p>
           </LoopsScrollReveal>
-
-          <ol className="loops-steps">
-            {HOW_IT_WORKS_STEPS.map((step) => (
-              <li key={step.num} className="loops-step">
-                <div className="loops-step-header">
-                  <span className="loops-mono loops-step-num">{step.num}</span>
-                  <div>
-                    <h3 className="loops-step-title">{step.title}</h3>
-                    <p className="loops-step-body">{step.body}</p>
-                  </div>
-                </div>
-                {"embedIntegrations" in step && step.embedIntegrations && (
-                  <div className="loops-step-integrations">
-                    <IntegrationsSection />
-                  </div>
-                )}
-              </li>
-            ))}
-          </ol>
+          <LoopsScrollReveal>
+            <HowItWorksSteps steps={HOW_IT_WORKS_STEPS} />
+          </LoopsScrollReveal>
         </div>
       </section>
 
-      {/* ── Example loop ───────────────────────────────────────── */}
-      <LoopsScrollReveal>
-        <section className="loops-section">
-          <div className="loops-section-inner">
-            <p className="loops-mono loops-eyebrow">Example</p>
-            <h2 className="loops-section-title">Weekly company newsletter</h2>
-
-            <ol className="loops-example-flow">
-              <li>You ask ChatGPT or Claude to write a newsletter.</li>
-              <li>Tallei remembers the company context and writing style.</li>
-              <li>
-                After similar work repeats, Tallei suggests: &ldquo;Want me to prepare this
-                every Friday?&rdquo;
-              </li>
-              <li>You approve.</li>
-              <li>Every Friday, Tallei drafts the newsletter using memory and sources.</li>
-              <li>You review, edit, approve, or ignore.</li>
-            </ol>
-
-            <article className="loops-output-card">
-              <header className="loops-output-header">
-                <FileText size={18} aria-hidden />
-                <h3 className="loops-output-name">Weekly Company Newsletter</h3>
-              </header>
-              <dl className="loops-output-meta">
-                <div className="loops-output-row">
-                  <dt className="loops-mono">Runs</dt>
-                  <dd>Every Friday</dd>
-                </div>
-                <div className="loops-output-row">
-                  <dt className="loops-mono">Uses</dt>
-                  <dd>Company memory, product notes, optional GitHub/Notion updates</dd>
-                </div>
-                <div className="loops-output-row">
-                  <dt className="loops-mono">Output</dt>
-                  <dd>Draft newsletter</dd>
-                </div>
-                <div className="loops-output-row">
-                  <dt className="loops-mono">Approval</dt>
-                  <dd>Required before sending</dd>
-                </div>
-              </dl>
-            </article>
-          </div>
-        </section>
-      </LoopsScrollReveal>
-
-      {/* ── Loop library ───────────────────────────────────────── */}
+      {/* ── Specialized team / example loops ─────────────────── */}
       <LoopsScrollReveal>
         <section id="loops" className="loops-section loops-section-band">
           <div className="loops-section-inner">
-            <p className="loops-mono loops-eyebrow">Loop library</p>
-            <h2 className="loops-section-title">What loops can Tallei create?</h2>
+            <p className="loops-mono loops-eyebrow">Build your specialized team</p>
+            <h2 className="loops-section-title">
+              Not one generalist. A team of focused agents.
+            </h2>
             <p className="loops-section-lead">
-              Concrete workflows discovered from how you already work — not templates you
-              have to wire up yourself.
+              Each Loop shows the roles that research, write, polish, and deliver — so
+              recurring work stays sharp instead of generic.
             </p>
 
-            <ul className="loops-card-grid">
-              {LOOP_CARDS.map((card) => {
-                const Icon = card.icon;
-                return (
-                  <li key={card.name} className="loops-loop-card">
-                    <div className="loops-loop-card-icon" aria-hidden>
-                      <Icon size={20} strokeWidth={1.75} />
-                    </div>
-                    <h3 className="loops-loop-card-name">{card.name}</h3>
-                    <p className="loops-loop-card-outcome">{card.outcome}</p>
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="loops-agent-team-grid">
+              {EXAMPLE_LOOPS.map((loop) => (
+                <AgentTeamCard key={loop.name} name={loop.name} agents={loop.agents} />
+              ))}
+            </div>
           </div>
         </section>
       </LoopsScrollReveal>
 
-      {/* ── Comparison ─────────────────────────────────────────── */}
+      {/* ── Why operators choose Tallei ───────────────────────── */}
       <LoopsScrollReveal>
         <section className="loops-section">
           <div className="loops-section-inner">
-            <p className="loops-mono loops-eyebrow">Why Tallei</p>
-            <h2 className="loops-section-title">Not just memory. Not just agents. Loops.</h2>
-
-            <div className="loops-comparison-wrap">
-              <table className="loops-comparison-table">
-                <thead>
-                  <tr>
-                    <th scope="col" className="loops-mono">
-                      Category
-                    </th>
-                    <th scope="col" className="loops-mono">
-                      What you get
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {COMPARISON_ROWS.map((row) => (
-                    <tr
-                      key={row.label}
-                      className={row.highlight ? "loops-comparison-row--highlight" : undefined}
-                    >
-                      <td className="loops-mono loops-comparison-label">{row.label}</td>
-                      <td className="loops-mono loops-comparison-desc">{row.description}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <p className="loops-mono loops-eyebrow">Why operators choose Tallei</p>
+            <h2 className="loops-section-title">Built for people who run the work.</h2>
+            <ul className="loops-why-grid">
+              {WHY_POINTS.map((point) => (
+                <li key={point.title} className="loops-why-card">
+                  <h3 className="loops-why-title">{point.title}</h3>
+                  <p className="loops-why-body">{point.body}</p>
+                </li>
+              ))}
+            </ul>
           </div>
         </section>
       </LoopsScrollReveal>
@@ -583,74 +418,20 @@ export function HomeContentLoops() {
         </div>
       </section>
 
-      {/* ── Trust & approval ───────────────────────────────────── */}
-      <LoopsScrollReveal>
-        <section className="loops-section loops-section-band">
-          <div className="loops-section-inner loops-trust-grid">
-            <div>
-              <p className="loops-mono loops-eyebrow">Trust</p>
-              <h2 className="loops-section-title">Automation, but never reckless.</h2>
-              <p className="loops-section-body">
-                Tallei is built around approval. It can draft, prepare, summarize, and
-                suggest. Risky actions like sending emails, publishing posts, or updating
-                external systems require user approval.
-              </p>
-              <p className="loops-trust-tagline">
-                Tallei prepares the work. <strong>You stay in control.</strong>
-              </p>
-            </div>
-
-            <ul className="loops-approval-examples">
-              {APPROVAL_EXAMPLES.map((item) => (
-                <li key={item.action} className="loops-approval-example">
-                  <span className="loops-approval-example-action">{item.action}</span>
-                  <span className="loops-mono loops-approval-example-detail">{item.detail}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-      </LoopsScrollReveal>
-
-      {/* ── Customer base ──────────────────────────────────────── */}
-      <LoopsScrollReveal>
-        <section className="loops-section">
-          <div className="loops-section-inner">
-            <p className="loops-mono loops-eyebrow">Built for</p>
-            <h2 className="loops-section-title">AI-native workers.</h2>
-            <ul className="loops-audience-grid">
-              {AUDIENCE.map((item) => (
-                <li key={item} className="loops-mono loops-audience-item">
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-      </LoopsScrollReveal>
-
       {/* ── Final CTA ──────────────────────────────────────────── */}
       <LoopsScrollReveal>
         <section className="loops-section loops-final-cta">
           <div className="loops-section-inner loops-final-cta-inner">
-            <h2 className="loops-final-cta-title">Find the loops in your AI work.</h2>
+            <h2 className="loops-final-cta-title">Stop doing the same work twice.</h2>
             <p className="loops-final-cta-sub">
-              Tallei remembers your context, detects repeated work, and helps you automate
-              it safely.
+              Build your first specialized Loop in minutes.
             </p>
             <div className="loops-hero-actions loops-final-cta-actions">
               <Link href="/login" className="loops-btn loops-btn-primary">
-                Start with Tallei
+                Get started free
                 <ArrowRight size={16} />
               </Link>
-              <Link href="/login" className="loops-btn loops-btn-secondary">
-                Join waitlist
-              </Link>
             </div>
-            <p className="loops-mono loops-final-cta-note">
-              Your first loop could be a newsletter, investor update, changelog, or meeting
-              follow-up.
-            </p>
           </div>
         </section>
       </LoopsScrollReveal>

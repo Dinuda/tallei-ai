@@ -3,17 +3,17 @@ import { HomeContentLoops } from "./home-content-loops";
 
 export const metadata: Metadata = {
   title: {
-    absolute: "Tallei — Turn Repeated AI Work Into Loops",
+    absolute: "Tallei — Your repeated work should run itself",
   },
   description:
-    "Tallei remembers your scattered AI work, discovers repeated loops, and turns them into approved recurring workflows.",
+    "Tallei turns recurring tasks across ChatGPT, Claude, Gmail, Docs, Slack, and Notion into specialized AI Loops — workflows powered by focused agents that research, write, format, and deliver.",
   alternates: {
     canonical: "https://tallei.com",
   },
   openGraph: {
-    title: "Tallei — Turn Repeated AI Work Into Loops",
+    title: "Tallei — Your repeated work should run itself",
     description:
-      "Tallei remembers your scattered AI work, discovers repeated loops, and turns them into approved recurring workflows.",
+      "Tallei turns recurring tasks into specialized AI Loops powered by focused agents — with approval-first control.",
     url: "https://tallei.com",
     siteName: "Tallei",
   },
