@@ -8,7 +8,6 @@ import { AspectRatio } from "@/components/ui/aspect-ratio";
 export type SaveMode = "instant" | "on_request";
 export type Provider = "claude" | "chatgpt";
 const CHATGPT_ACTIONS_SPEC_TAG = "stable";
-const CLAUDE_AUTOMATION_ENABLED = false;
 // Regression guard phrases validated by integration-assets tests:
 // prepare_response(message="<exact user message>")
 // conversation_history=[{role, content}, ...]
@@ -55,76 +54,6 @@ type ChatGptTokenStatus = {
   rawToken: string | null;
 };
 
-type ClaudeOnboardingState =
-  | "queued"
-  | "browser_started"
-  | "claude_authenticated"
-  | "connector_connected"
-  | "project_upserted"
-  | "instructions_applied"
-  | "verified";
-
-type ClaudeOnboardingStatus =
-  | "queued"
-  | "running"
-  | "checkpoint_required"
-  | "completed"
-  | "failed"
-  | "canceled";
-
-type ClaudeOnboardingCheckpoint = {
-  type: "auth" | "captcha" | "manual_review";
-  blockedState: Exclude<ClaudeOnboardingState, "queued">;
-  message: string;
-  resumeHint: string;
-  actionUrl?: string;
-  action_url?: string;
-};
-
-type ClaudeOnboardingSession = {
-  id: string;
-  status: ClaudeOnboardingStatus;
-  currentState: ClaudeOnboardingState;
-  projectName: string;
-  checkpoint: ClaudeOnboardingCheckpoint | null;
-  metadata?: Record<string, unknown>;
-  lastError: string | null;
-  completedAt: string | null;
-  canceledAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type ClaudeOnboardingEvent = {
-  id: number;
-  eventType: string;
-  state: string | null;
-  payload: Record<string, unknown> | null;
-  createdAt: string;
-};
-
-function getCheckpointActionUrl(
-  checkpoint: ClaudeOnboardingCheckpoint | null | undefined
-): string | null {
-  if (!checkpoint) return null;
-  if (typeof checkpoint.actionUrl === "string" && checkpoint.actionUrl.trim().length > 0) {
-    return checkpoint.actionUrl;
-  }
-  if (typeof checkpoint.action_url === "string" && checkpoint.action_url.trim().length > 0) {
-    return checkpoint.action_url;
-  }
-  return null;
-}
-
-function getSessionLiveUrl(
-  session: ClaudeOnboardingSession | null | undefined
-): string | null {
-  const candidate = session?.metadata?.["liveSessionUrl"];
-  if (typeof candidate === "string" && candidate.trim().length > 0) {
-    return candidate;
-  }
-  return null;
-}
 
 async function verifyConnectivityEvent(
   provider: Provider,
@@ -789,67 +718,21 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
   const [showConfetti, setShowConfetti] = useState(false);
-  const [onboardingSession, setOnboardingSession] = useState<ClaudeOnboardingSession | null>(null);
-  const [onboardingEvents, setOnboardingEvents] = useState<ClaudeOnboardingEvent[]>([]);
-  const [onboardingBusy, setOnboardingBusy] = useState(false);
-  const [onboardingError, setOnboardingError] = useState<string | null>(null);
-  const autoResumeAttemptRef = useRef<{ signature: string; at: number } | null>(null);
   const previousVerifiedRef = useRef(false);
-  const checkpointActionUrl = useMemo(
-    () => getCheckpointActionUrl(onboardingSession?.checkpoint),
-    [onboardingSession?.checkpoint]
-  );
-  const sessionLiveUrl = useMemo(
-    () => getSessionLiveUrl(onboardingSession),
-    [onboardingSession]
-  );
-  const liveSessionUrl = checkpointActionUrl || sessionLiveUrl;
-  const liveInputRequired =
-    onboardingSession?.status === "checkpoint_required" ||
-    (onboardingSession?.status === "running" &&
-      (onboardingSession?.currentState === "browser_started" ||
-        onboardingSession?.currentState === "claude_authenticated"));
-  const displayState =
-    onboardingSession?.status === "checkpoint_required" && onboardingSession?.checkpoint
-      ? onboardingSession.checkpoint.blockedState
-      : onboardingSession?.currentState;
 
   const totalSteps = 3;
-  const step3Verified = connectionVerified || onboardingSession?.status === "completed";
+  const step3Verified = connectionVerified;
   const stepTitles = [
     "Create a Claude connector",
     "Set up your Claude project",
     step3Verified ? "You're all set!" : "Verify your setup",
   ];
 
-
   const resetConnectionVerification = useCallback(() => {
     setVerificationStartedAt(Date.now());
     setConnectionVerified(false);
     setConnectionVerificationMessage(null);
   }, []);
-
-  const isTerminal = (status: ClaudeOnboardingStatus) =>
-    status === "completed" || status === "failed" || status === "canceled";
-
-  const stateLabel = (state: ClaudeOnboardingState) => {
-    switch (state) {
-      case "browser_started":
-        return "Browser Started";
-      case "claude_authenticated":
-        return "Claude Authenticated";
-      case "connector_connected":
-        return "Connector Connected";
-      case "project_upserted":
-        return "Project Ready";
-      case "instructions_applied":
-        return "Instructions Applied";
-      case "verified":
-        return "Verified";
-      default:
-        return "Queued";
-    }
-  };
 
   const handleNext = () => {
     if (step < totalSteps) {
@@ -871,194 +754,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     if (step === 3) return step3Verified;
     return true;
   };
-
-  const refreshOnboardingSession = useCallback(async (sessionId: string) => {
-    const [sessionRes, eventsRes] = await Promise.all([
-      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}`, { cache: "no-store" }),
-      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/events`, { cache: "no-store" }),
-    ]);
-    const sessionData = await sessionRes.json().catch(() => ({}));
-    const eventsData = await eventsRes.json().catch(() => ({}));
-
-    if (!sessionRes.ok) {
-      throw new Error(
-        typeof sessionData?.error === "string"
-          ? sessionData.error
-          : "Failed to fetch onboarding session"
-      );
-    }
-
-    const session = sessionData?.session as ClaudeOnboardingSession | undefined;
-    if (!session || typeof session.id !== "string") {
-      throw new Error("Malformed onboarding session response");
-    }
-
-    setOnboardingSession(session);
-    setOnboardingEvents(Array.isArray(eventsData?.events) ? (eventsData.events as ClaudeOnboardingEvent[]) : []);
-    return session;
-  }, []);
-
-  const startAutomatedSetup = useCallback(async () => {
-    setOnboardingBusy(true);
-    setOnboardingError(null);
-    try {
-      const res = await fetch("/api/integrations/claude-onboarding/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectName: "Tallei Memory",
-          applyProjectInstructions: true,
-          projectInstructions: claudeInstructions,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(typeof data?.error === "string" ? data.error : "Failed to start automated setup.");
-      }
-      const session = data?.session as ClaudeOnboardingSession | undefined;
-      if (!session || typeof session.id !== "string") {
-        throw new Error("Malformed onboarding start response.");
-      }
-      setOnboardingSession(session);
-      setOnboardingEvents([]);
-      setConnectionVerificationMessage("Automated setup started.");
-      setStep(4);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to start automated setup.");
-    } finally {
-      setOnboardingBusy(false);
-    }
-  }, [claudeInstructions]);
-
-  const resumeAutomatedSetup = useCallback(async (options?: {
-    authCompleted?: boolean;
-    setBusy?: boolean;
-    sessionId?: string;
-  }) => {
-    const sessionId = options?.sessionId ?? onboardingSession?.id;
-    if (!sessionId) return;
-    const setBusy = options?.setBusy ?? true;
-    if (setBusy) {
-      setOnboardingBusy(true);
-      setOnboardingError(null);
-    }
-
-    try {
-      const payload = options?.authCompleted === true ? { authCompleted: true } : {};
-      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/resume`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(typeof data?.error === "string" ? data.error : "Failed to resume automated setup.");
-      }
-      const session = data?.session as ClaudeOnboardingSession | undefined;
-      if (!session || typeof session.id !== "string") {
-        throw new Error("Malformed onboarding resume response.");
-      }
-      setOnboardingSession(session);
-      await refreshOnboardingSession(session.id);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to resume automated setup.");
-    } finally {
-      if (setBusy) {
-        setOnboardingBusy(false);
-      }
-    }
-  }, [onboardingSession, refreshOnboardingSession]);
-
-  const cancelAutomatedSetup = useCallback(async () => {
-    if (!onboardingSession) return;
-    setOnboardingBusy(true);
-    setOnboardingError(null);
-    try {
-      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${onboardingSession.id}/cancel`, {
-        method: "POST",
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(typeof data?.error === "string" ? data.error : "Failed to cancel automated setup.");
-      }
-      const session = data?.session as ClaudeOnboardingSession | undefined;
-      if (!session || typeof session.id !== "string") {
-        throw new Error("Malformed onboarding cancel response.");
-      }
-      setOnboardingSession(session);
-      await refreshOnboardingSession(session.id);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to cancel automated setup.");
-    } finally {
-      setOnboardingBusy(false);
-    }
-  }, [onboardingSession, refreshOnboardingSession]);
-
-  const manualRefreshOnboarding = useCallback(async () => {
-    if (!onboardingSession) return;
-    setOnboardingBusy(true);
-    setOnboardingError(null);
-    try {
-      await refreshOnboardingSession(onboardingSession.id);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
-    } finally {
-      setOnboardingBusy(false);
-    }
-  }, [onboardingSession, refreshOnboardingSession]);
-
-  useEffect(() => {
-    if (!isOpen || !onboardingSession) return;
-    if (isTerminal(onboardingSession.status)) return;
-
-    let stopped = false;
-    const tick = async () => {
-      try {
-        const session = await refreshOnboardingSession(onboardingSession.id);
-        if (stopped) return;
-        if (session.status === "completed") {
-          setConnectionVerified(true);
-          setConnectionVerificationMessage("Automated setup completed successfully.");
-        }
-        if (session.status === "checkpoint_required" && session.checkpoint) {
-          const checkpointType = session.checkpoint.type;
-          if (checkpointType === "auth" || checkpointType === "manual_review") {
-            const signature =
-              `${session.id}:${session.checkpoint.blockedState}:${checkpointType}:${session.updatedAt}`;
-            const nowMs = Date.now();
-            const lastAttempt = autoResumeAttemptRef.current;
-            const shouldAttempt =
-              !lastAttempt ||
-              lastAttempt.signature !== signature ||
-              nowMs - lastAttempt.at >= 10_000;
-
-            if (shouldAttempt) {
-              autoResumeAttemptRef.current = { signature, at: nowMs };
-              void resumeAutomatedSetup({
-                sessionId: session.id,
-                authCompleted: checkpointType === "auth",
-                setBusy: false,
-              });
-            }
-          }
-        }
-      } catch (error) {
-        if (!stopped) {
-          setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
-        }
-      }
-    };
-
-    void tick();
-    const timer = setInterval(() => {
-      void tick();
-    }, 2000);
-
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  }, [isOpen, onboardingSession, refreshOnboardingSession, resumeAutomatedSetup]);
 
   useEffect(() => {
     if (!isOpen || step !== 3) {
@@ -1200,101 +895,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       {step === 3 && (
         <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "1.25rem", padding: "1rem", animation: "fadeIn 0.4s ease-out", minHeight: "100%", boxSizing: "border-box" }}>
           <ConfettiBurst active={showConfetti} />
-
-          {CLAUDE_AUTOMATION_ENABLED && onboardingSession && (
-            <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "0", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
-              <div style={{ color: "#374151" }}>
-                <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
-              </div>
-              {onboardingSession.checkpoint && (
-                <div style={{ marginTop: "0.55rem", color: "#9a3412" }}>
-                  {onboardingSession.checkpoint.message}
-                  <div style={{ marginTop: "0.35rem" }}>{onboardingSession.checkpoint.resumeHint}</div>
-                  {checkpointActionUrl && (
-                    <div style={{ marginTop: "0.5rem" }}>
-                      <Button
-                        variant="outline"
-                        onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
-                      >
-                        Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
-                {onboardingSession.status === "checkpoint_required" && (
-                  <Button
-                    variant="outline"
-                    onClick={() =>
-                      void resumeAutomatedSetup({
-                        authCompleted: onboardingSession.checkpoint?.type === "auth",
-                      })
-                    }
-                    disabled={onboardingBusy}
-                  >
-                    {onboardingBusy ? "Resuming..." : "Resume"}
-                  </Button>
-                )}
-                {!isTerminal(onboardingSession.status) && (
-                  <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
-                    {onboardingBusy ? "Canceling..." : "Cancel"}
-                  </Button>
-                )}
-                {isTerminal(onboardingSession.status) && onboardingSession.status !== "completed" && (
-                  <Button variant="outline" onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
-                    {onboardingBusy ? "Starting..." : "Run Repair"}
-                  </Button>
-                )}
-                <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
-                  Refresh
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => window.open("https://claude.ai/settings/connectors", "_blank", "noopener,noreferrer")}
-                >
-                  Open Claude Connectors <ExternalLink size={12} style={{ marginLeft: "6px" }} />
-                </Button>
-              </div>
-              {onboardingSession.lastError && (
-                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingSession.lastError}</div>
-              )}
-              {onboardingEvents.length > 0 && (
-                <div style={{ marginTop: "0.35rem", fontSize: "0.78rem", color: "#6b7280" }}>
-                  Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
-                </div>
-              )}
-              {onboardingError && (
-                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingError}</div>
-              )}
-            </div>
-          )}
-
-          {CLAUDE_AUTOMATION_ENABLED && liveSessionUrl && (
-            <div style={{ width: "100%", maxWidth: "720px", textAlign: "left" }}>
-              <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#111827", marginBottom: "0.45rem" }}>
-                Live automation session
-              </div>
-              <div style={{ position: "relative", borderRadius: "0", overflow: "hidden", border: "1px solid #e5e7eb", background: "#111827" }}>
-                <iframe
-                  src={liveSessionUrl}
-                  title="Claude live automation session"
-                  style={{ width: "100%", height: "420px", border: "none", display: "block", pointerEvents: liveInputRequired ? "auto" : "none" }}
-                  allow="clipboard-read; clipboard-write"
-                />
-                {!liveInputRequired && (
-                  <div style={{ position: "absolute", inset: 0, background: "rgba(17, 24, 39, 0.56)", color: "#f3f4f6", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: "0.85rem", padding: "1rem" }}>
-                    Automation is running. Input is locked until user action is required.
-                  </div>
-                )}
-              </div>
-              <div style={{ marginTop: "0.45rem", fontSize: "0.78rem", color: "#6b7280" }}>
-                {liveInputRequired
-                  ? "User input is needed now. Complete login/approval in the live session. The flow auto-resumes; Resume remains available as fallback."
-                  : "Live view only. Controls unlock automatically if a checkpoint requires your input."}
-              </div>
-            </div>
-          )}
 
           <VerifySection
             verifyingConnection={verifyingConnection}

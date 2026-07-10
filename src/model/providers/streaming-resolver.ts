@@ -1,3 +1,4 @@
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
@@ -96,6 +97,16 @@ export class GatewayStreamingResolver {
       };
     }
 
+    if (route.provider === "anthropic") {
+      const model = this.createAnthropicStreamingModel(route.modelId);
+      return {
+        model,
+        modelId: route.modelId,
+        surface: "anthropic",
+        provider: route.provider,
+      };
+    }
+
     if (route.provider !== "openai") {
       throw new Error(`Streaming is not configured for provider ${route.provider}`);
     }
@@ -153,6 +164,14 @@ export class GatewayStreamingResolver {
       fetch: createPooledLlmFetch(pool, "nvidia", userId),
     });
     return provider.chatModel(modelName);
+  }
+
+  private createAnthropicStreamingModel(modelName: string): LanguageModel {
+    if (!config.anthropicApiKey.trim()) {
+      throw new Error("TALLEI_LLM__ANTHROPIC_API_KEY is required for streaming inference");
+    }
+    const provider = createAnthropic({ apiKey: config.anthropicApiKey });
+    return provider(modelName);
   }
 }
 

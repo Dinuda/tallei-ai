@@ -92,13 +92,15 @@ All `CREATE TABLE` / RLS blocks for those tables were removed from schema init.
 **Unchanged**
 
 - Memory MCP tools (`save_memory`, `recall_memories`, preferences, documents, etc.)
-- Loops + Conductor (`/dashboard/loops`, `streamSpecRunChat`, compile/activate)
-- Temporal worker (`src/temporal/worker.ts`), schedules, headless runs
 - Developer section: **Memory Cleanup** and **Activity** (MCP events)
+
+**Also removed (see ADR-014, ADR-015)**
+
+- Loops + Conductor, Temporal worker, Composio connectors, browser automation, in-app operator scheduling
 
 **Breaking change for external integrations**
 
-Claude MCP connectors and ChatGPT Custom GPTs that call collab tools or actions will fail after deploy. Users must migrate automations to Loops or direct memory/document tools.
+Claude MCP connectors and ChatGPT Custom GPTs that call collab tools or actions will fail after deploy. Users should use memory/document tools directly.
 
 ---
 

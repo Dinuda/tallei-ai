@@ -17,7 +17,6 @@ const LEGACY_BASELINE = {
   "src/transport/shared/chat-actions.ts": 1761,
   "src/orchestration/memory/chatgpt-import.usecase.ts": 1688,
   "src/services/documents.ts": 1659,
-  "src/infrastructure/browser/claude-browser-worker.ts": 1525,
   "src/transport/mcp/tools/index.ts": 1004,
   "src/infrastructure/auth/auth.ts": 886,
   "src/transport/http/routes/memories.ts": 842,

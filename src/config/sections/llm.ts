@@ -11,7 +11,7 @@ import {
   resolveChatModelForCompatibleProvider,
 } from "../../model/routing.js";
 
-export type LlmProviderName = "openai" | "ollama" | "google" | "opencode" | "nvidia";
+export type LlmProviderName = "openai" | "ollama" | "google" | "opencode" | "nvidia" | "anthropic";
 export type EmbedProviderName = "openai" | "ollama" | "google";
 
 const REASONING_EFFORT_VALUES = new Set<ReasoningEffort>([
@@ -83,6 +83,7 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
   const defaultOllamaModel = readStringEnv(env, "TALLEI_LLM__OLLAMA_MODEL", "qwen3:14b");
   const defaultOpenCodeModel = readStringEnv(env, "TALLEI_LLM__OPENCODE_MODEL", "big-pickle");
   const defaultNvidiaModel = readStringEnv(env, "TALLEI_LLM__NVIDIA_MODEL", "meta/llama-3.3-70b-instruct");
+  const defaultAnthropicModel = readStringEnv(env, "TALLEI_LLM__ANTHROPIC_MODEL", "claude-sonnet-4-20250514");
 
   const openaiApiKeys = readLlmApiKeyList(env, { prefix: "TALLEI_LLM__OPENAI" });
   const opencodeApiKeys = readLlmApiKeyList(env, {
@@ -99,11 +100,12 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
   function compatibleDefaultModel(): string {
     if (llmProvider === "opencode") return defaultOpenCodeModel;
     if (llmProvider === "nvidia") return defaultNvidiaModel;
+    if (llmProvider === "anthropic") return defaultAnthropicModel;
     return "gpt-5-nano";
   }
 
   function readResolvedChatModel(key: string, productionDefault: string): string {
-    const cloudDefault = llmProvider === "opencode" || llmProvider === "nvidia"
+    const cloudDefault = llmProvider === "opencode" || llmProvider === "nvidia" || llmProvider === "anthropic"
       ? compatibleDefaultModel()
       : productionDefault;
     const fallback = ctx.localModelMode ? defaultOllamaModel : cloudDefault;
@@ -111,7 +113,7 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
     if (ctx.localModelMode) {
       return coerceChatModelForLocalMode(raw, ctx.localModelMode, defaultOllamaModel);
     }
-    if (llmProvider === "opencode" || llmProvider === "nvidia") {
+    if (llmProvider === "opencode" || llmProvider === "nvidia" || llmProvider === "anthropic") {
       return resolveChatModelForCompatibleProvider(raw, compatibleDefaultModel());
     }
     if (llmProvider === "openai") {
@@ -126,7 +128,7 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
     if (ctx.localModelMode) {
       return coerceChatModelForLocalMode(raw, ctx.localModelMode, defaultOllamaModel);
     }
-    if (llmProvider === "opencode" || llmProvider === "nvidia") {
+    if (llmProvider === "opencode" || llmProvider === "nvidia" || llmProvider === "anthropic") {
       return resolveChatModelForCompatibleProvider(raw, compatibleDefaultModel());
     }
     if (llmProvider === "openai") {
@@ -144,6 +146,7 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
     openaiApiKey: openaiApiKeys[0] ?? "",
     openaiApiKeys,
     anthropicApiKey: readStringEnv(env, "TALLEI_LLM__ANTHROPIC_API_KEY"),
+    anthropicModel: defaultAnthropicModel,
     openaiModel: readResolvedChatModel("TALLEI_LLM__CHAT_MODEL", "gpt-5-nano"),
     googleModel: readStringEnv(env, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
     intentClassifierModel: readResolvedChatModel("TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),

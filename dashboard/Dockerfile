@@ -20,8 +20,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json ./
 COPY packages ./packages
 COPY dashboard ./dashboard
-RUN npm run build -w @tallei/shared \
-  && npm run build -w @tallei/conductor-tools \
+RUN npm run build -w @tallei/mcp-tools \
   && npm run build -w dashboard
 
 FROM node:22-bookworm-slim AS runner

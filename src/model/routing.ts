@@ -1,5 +1,3 @@
-import type { ReasoningEffort } from "../config/load.js";
-
 export function looksLikeHostedOpenAiModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   if (!normalized) return false;

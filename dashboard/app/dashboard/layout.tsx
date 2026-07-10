@@ -106,9 +106,7 @@ const NAV: NavSection[] = [
     items: [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
-      { id: "channels", label: "Channels", href: "/dashboard/channels", icon: ICONS.channels },
       { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
-      { id: "connected-apps", label: "Connected Apps", href: "/dashboard/integrations", icon: ICONS.connectedApps },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
     ],
   },

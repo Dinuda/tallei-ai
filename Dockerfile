@@ -29,9 +29,6 @@ COPY packages ./packages
 COPY dashboard/package.json ./dashboard/package.json
 RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/packages/shared/dist ./packages/shared/dist
-COPY --from=build /app/packages/conductor-tools/dist ./packages/conductor-tools/dist
-COPY --from=build /app/packages/composio-tools/dist ./packages/composio-tools/dist
 COPY --from=build /app/packages/mcp-tools/dist ./packages/mcp-tools/dist
 
 EXPOSE 8080

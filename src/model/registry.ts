@@ -82,6 +82,20 @@ const OLLAMA_DEFAULTS: Omit<ModelCapabilities, "provider" | "modelId" | "surface
   contextWindow: 32_000,
 };
 
+const ANTHROPIC_DEFAULTS: Omit<ModelCapabilities, "provider" | "modelId" | "surface"> = {
+  supportsTools: true,
+  supportsForcedToolChoice: false,
+  supportsStreaming: true,
+  supportsReasoningSummaries: false,
+  supportsReasoningTags: false,
+  supportsJsonMode: true,
+  supportsJsonSchema: false,
+  supportsWebSearch: false,
+  supportsEmbeddings: false,
+  supportsVision: true,
+  contextWindow: 200_000,
+};
+
 const NVIDIA_DEFAULTS: Omit<ModelCapabilities, "provider" | "modelId" | "surface"> = {
   supportsTools: true,
   supportsForcedToolChoice: false,
@@ -152,6 +166,13 @@ const STATIC_ENTRIES: RegistryEntry[] = [
     ...GOOGLE_DEFAULTS,
   },
   {
+    provider: "anthropic",
+    modelId: "claude-sonnet-4-20250514",
+    surface: "anthropic",
+    ...ANTHROPIC_DEFAULTS,
+    aliases: ["claude-sonnet-4", "claude-3-5-sonnet-latest"],
+  },
+  {
     provider: "ollama",
     modelId: "qwen3:14b",
     surface: "chat",
@@ -187,6 +208,7 @@ function inferSurface(provider: GatewayProviderId, modelId: string): ModelSurfac
 
 function defaultsFor(provider: GatewayProviderId, surface: ModelSurface): Omit<ModelCapabilities, "provider" | "modelId" | "surface"> {
   if (provider === "nvidia") return NVIDIA_DEFAULTS;
+  if (provider === "anthropic" || surface === "anthropic") return ANTHROPIC_DEFAULTS;
   if (provider === "opencode" || surface === "opencode") return OPENCODE_DEFAULTS;
   if (provider === "google" || surface === "google") return GOOGLE_DEFAULTS;
   if (provider === "ollama") return OLLAMA_DEFAULTS;

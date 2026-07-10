@@ -15,7 +15,7 @@ Keep entries newest-first. Each entry should include:
 - Summary:
   - Removed **Collab** feature end-to-end (MCP tools, `/api/tasks`, ChatGPT Actions, dashboard UI, DB tables, collab memories).
   - Removed dead **Developer Workflows** nav link and `/api/developer` dashboard proxy.
-  - Temporal worker and loop execution unchanged.
+  - Removed Loops, Conductor, Temporal, Composio connectors, and browser automation (foundation cleanup).
 - Notes:
   - Breaking change for Claude/ChatGPT integrations using collab tools or actions.
   - `initDb()` drops `collab_tasks`, `orchestration_sessions`, `user_task_preferences` and purges `memory_type = 'collab'` on next boot with auto-migrate enabled.

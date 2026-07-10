@@ -11,7 +11,7 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 
 **Primary goal:** Make memory I/O blazingly fast so MCP tools never block.
 
-**Removed (July 2026):** Conductor, Loops, Temporal, Composio, collab, workspace KB, loop-miner. See [ADR-014](docs/adr/014-loops-teardown.md), [ADR-013](docs/adr/013-remove-collab-and-developer-workflows.md), and [product scope](docs/product-scope.md).
+**Removed (July 2026):** Conductor, Loops, Temporal, Composio, collab, workspace KB, loop-miner, browser automation. See [ADR-014](docs/adr/014-loops-teardown.md), [ADR-015](docs/adr/015-execution-engine-boundary.md), [ADR-013](docs/adr/013-remove-collab-and-developer-workflows.md), and [product scope](docs/product-scope.md).
 
 ---
 
@@ -57,7 +57,8 @@ Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemin
 
 ## Model Gateway
 
-- Purposes: `chat`, `embed` only (conductor/planner/loop-miner purposes removed)
+- Purposes: `chat`, `embed` only
+- Providers: OpenAI, Anthropic, Google, Ollama, OpenCode, NVIDIA
 - Config: `TALLEI_LLM__*` and `TALLEI_EMBED__*` in `.env.example`
 - Registry: `src/model/registry.ts`, routing: `src/model/routing.ts`
 - Resilience wraps provider calls via `src/resilience/policies.ts`

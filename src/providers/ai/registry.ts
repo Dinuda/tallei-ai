@@ -21,6 +21,8 @@ import { modelRegistry } from "../../model/registry.js";
 import type { AiProvider } from "./ai-provider.js";
 import { isRetriableProviderError } from "./errors.js";
 import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
+import { AnthropicProvider } from "./anthropic-provider.js";
 import { GoogleProvider } from "./google-provider.js";
 import { OllamaProvider } from "./ollama-provider.js";
 import { NvidiaProvider } from "./nvidia-provider.js";
@@ -90,6 +92,12 @@ function requireOpenCodeKeyIfNeeded(providerNames: readonly AiProviderName[]): v
 function requireNvidiaKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
   if (providerNames.includes("nvidia") && getNvidiaApiKeyPool().size === 0) {
     throw new Error("TALLEI_LLM__NVIDIA_API_KEY (or NIM_API_KEY) is required when TALLEI_LLM__PROVIDER=nvidia");
+  }
+}
+
+function requireAnthropicKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("anthropic") && !config.anthropicApiKey.trim()) {
+    throw new Error("TALLEI_LLM__ANTHROPIC_API_KEY is required when TALLEI_LLM__PROVIDER=anthropic");
   }
 }
 
@@ -163,6 +171,7 @@ export class ProviderRegistry {
     requireOpenAiKeyIfNeeded(requiredNames);
     requireOpenCodeKeyIfNeeded(requiredNames);
     requireNvidiaKeyIfNeeded(requiredNames);
+    requireAnthropicKeyIfNeeded(requiredNames);
 
     if (requiredNames.includes("openai")) {
       const openAiPool = getOpenAiApiKeyPool();
@@ -226,6 +235,14 @@ export class ProviderRegistry {
         defaultEmbeddingDimensions: config.embeddingDims,
       });
       this.providers.set(googleProvider.name, googleProvider);
+    }
+
+    if (requiredNames.includes("anthropic")) {
+      const anthropicProvider = new AnthropicProvider({
+        client: new Anthropic({ apiKey: config.anthropicApiKey }),
+        defaultChatModel: config.anthropicModel,
+      });
+      this.providers.set(anthropicProvider.name, anthropicProvider);
     }
   }
 

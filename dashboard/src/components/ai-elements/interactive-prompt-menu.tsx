@@ -160,9 +160,7 @@ function ProviderLogo({
   useConnectorLogos: boolean;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const src = useConnectorLogos && icon && !imageFailed
-    ? `https://logos.composio.dev/api/${icon}`
-    : undefined;
+  const src = undefined;
 
   if (!src) {
     return (

@@ -8,7 +8,6 @@ export interface FeatureFlags {
   readonly useNewListUseCase: boolean;
   readonly useNewDeleteUseCase: boolean;
   readonly rerankEnabled: boolean;
-  readonly browserLlmFallbackEnabled: boolean;
 }
 
 export function getFeatureFlags(config: Config): FeatureFlags {
@@ -20,6 +19,5 @@ export function getFeatureFlags(config: Config): FeatureFlags {
     useNewListUseCase: config.useNewListUseCase,
     useNewDeleteUseCase: config.useNewDeleteUseCase,
     rerankEnabled: config.rerankEnabled,
-    browserLlmFallbackEnabled: config.browserLlmFallbackEnabled,
   };
 }

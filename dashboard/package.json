@@ -7,7 +7,6 @@
     "build": "node ./scripts/run-next.mjs build",
     "start": "node ./scripts/run-next.mjs start -p ${PORT:-3001}",
     "lint": "eslint",
-    "test:e2e": "playwright test",
     "check:dashboard-legacy-classes": "./scripts/check-dashboard-legacy-classes.sh"
   },
   "dependencies": {
@@ -59,7 +58,6 @@
     "vaul": "^1.1.2"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.1",
     "@tailwindcss/postcss": "^4.2.2",
     "@types/node": "^20",
     "@types/react": "^19",

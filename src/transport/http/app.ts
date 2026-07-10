@@ -99,9 +99,6 @@ export function createApp(deps: AppFactoryDeps): Express {
   app.use("/api/chatgpt", deps.memoryRateLimit, chatgptRouter);
   app.use("/api/integrations", integrationsRouter);
   app.use("/api/integration-updates", integrationUpdatesRouter);
-  // Browser automation is intentionally disabled for production rollout.
-  // app.use("/api/claude-onboarding", claudeOnboardingRouter);
-  // app.use("/api/browser-use", browserUseRouter);
   app.use("/api/billing", billingRouter);
   app.use("/api/mcp/events", mcpEventsRouter);
   app.use("/api/mcp", mcpCodeRouter);

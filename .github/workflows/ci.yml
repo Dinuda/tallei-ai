@@ -34,7 +34,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --legacy-peer-deps
-      - run: npm run build -w @tallei/shared && npm run build -w @tallei/conductor-tools
+      - run: npm run build -w @tallei/mcp-tools
       - run: npm run lint -w dashboard
       - run: npm run build -w dashboard
         env:

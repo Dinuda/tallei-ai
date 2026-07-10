@@ -32,6 +32,7 @@ Start here to understand Tallei after the memory-core refactor.
 | [012](./adr/012-remove-graph-layer.md) | Remove graph layer |
 | [013](./adr/013-remove-collab-and-developer-workflows.md) | Remove collab and developer workflows |
 | [014](./adr/014-loops-teardown.md) | Conductor / Loops teardown |
+| [015](./adr/015-execution-engine-boundary.md) | Execution engine boundary |
 
 ## Deployment & Operations
 

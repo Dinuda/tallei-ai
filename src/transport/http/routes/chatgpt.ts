@@ -28,6 +28,14 @@ import {
 import { logChatGptActionAsync } from "../../shared/chatgpt-action-events.js";
 import { chatGptActionAuthMiddleware, resolveChatGptActionAuth } from "../auth/chatgpt-action-auth.js";
 
+function zodValidationResponseBody(error: z.ZodError, received?: unknown) {
+  return {
+    error: "validation_failed",
+    issues: error.issues,
+    ...(received !== undefined ? { received } : {}),
+  };
+}
+
 const router = Router();
 const memoryTypeSchema = z.enum(["preference", "fact", "event", "decision", "note", "lesson", "failure", "checkpoint"]);
 const rememberKindSchema = z.enum(["fact", "preference", "document-note", "document-blob"]);

@@ -9,7 +9,7 @@ Tallei had grown a large automation surface: Conductor (loop authoring chat), Lo
 
 ## Decision
 
-Strip Conductor, Loops, Temporal, Composio, and related packages/tables/env from the repo. Keep memory/MCP, providers, model gateway, resilience, collab, and reusable dashboard UI (`ai-elements/`, `ui/`).
+Strip Conductor, Loops, Temporal, Composio, browser automation, and related packages/tables/env from the repo. Keep memory/MCP, model gateway, resilience, and reusable dashboard UI (`ai-elements/`, `ui/`).
 
 ### Deleted
 
@@ -24,8 +24,9 @@ Strip Conductor, Loops, Temporal, Composio, and related packages/tables/env from
 
 - `src/model/`, `src/resilience/` — trimmed to `chat` / `embed` purposes only
 - `packages/mcp-tools/`
-- `src/orchestration/memory/`, memory cleanup, collab
+- `src/orchestration/memory/`, memory cleanup
 - `dashboard/src/components/ai-elements/`, `ui/`
+- Ingest job workers (ChatGPT import, upload ingest, Vertex backfill)
 
 ## Consequences
 
@@ -38,14 +39,13 @@ Strip Conductor, Loops, Temporal, Composio, and related packages/tables/env from
 
 ### Negative
 
-- No loop authoring, scheduling, or connector execution until a future rebuild
+- No loop authoring, scheduling, or connector execution in-repo; see [ADR-015](./015-execution-engine-boundary.md) for the future engine boundary
 - Production deployments must not expect `/api/loops` or Temporal worker
-- Some dashboard nav items (Channels, Connected Apps) remain without pages
 
 ### Follow-up (out of scope for this ADR)
 
-- Skill-based Conductor rebuild on top of `ai-elements` + model gateway
-- Implement `/dashboard/integrations` for non-Composio connected apps if needed
+- Execution engine for operator schedules — [ADR-015](./015-execution-engine-boundary.md)
+- Skill-based operator UI on top of `ai-elements` + model gateway
 
 ## References
 

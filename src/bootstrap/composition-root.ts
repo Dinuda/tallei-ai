@@ -1,4 +1,3 @@
-import type { Express } from "express";
 import http from "node:http";
 
 import { config } from "../config/index.js";
