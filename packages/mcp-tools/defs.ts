@@ -81,47 +81,6 @@ export const mcpToolDefs = {
         conversation_id: conversationIdSchema,
       },
   },
-  collab_check_turn: {
-    name: "collab_check_turn" as const,
-    title: "Check Claude Collab Turn",
-    description: "Checks if it's Claude's turn on a collab task and returns task context.",
-    inputSchema: {
-        task_id: z.string().uuid().describe("Collab task ID."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
-  },
-  collab_take_turn: {
-    name: "collab_take_turn" as const,
-    title: "Submit Claude Collab Turn",
-    description: "Submits Claude's full user-facing content for a collab task turn. Summary-only submissions are rejected. After this tool returns, Claude must show the full submitted output visibly in the Claude chat before any summary/handoff.",
-    inputSchema: {
-        task_id: z.string().uuid().describe("Collab task ID."),
-        content: z.string().min(1).describe("Full user-facing turn output content. Do not submit summary-only text when the deliverable is longer."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
-  },
-  collab_list_pending: {
-    name: "collab_list_pending" as const,
-    title: "List Pending Collab Tasks",
-    description: "Lists collab tasks currently waiting on Claude.",
-    inputSchema: {},
-  },
-  collab_create_task: {
-    name: "collab_create_task" as const,
-    title: "Create Collab Task",
-    description: "Creates a new collab task for ChatGPT and Claude turn-taking. Performs recall preflight (supports include_doc_refs) before creation and returns preflight context.",
-    inputSchema: {
-        title: z.string().min(1).describe("Task title."),
-        brief: z.string().optional().describe("Optional task brief."),
-        first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt").describe("Which model takes the first turn."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        include_doc_refs: z.array(z.string()).max(20).optional(),
-        recall_query: z.string().min(1).max(500).optional(),
-        conversation_id: conversationIdSchema,
-      },
-  },
   list_preferences: {
     name: "list_preferences" as const,
     title: "List Preferences",

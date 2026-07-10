@@ -112,7 +112,8 @@ Never await the full pipeline in the MCP handler. Background worker handles the 
 ## Docs
 
 - [Setup guide](./setup.md)
-- [Deployment](./docs/README.md)
+- [Documentation](./docs/README.md)
+- [Product scope](./docs/product-scope.md)
 - [ADR-011: Three-bucket recall](docs/adr/011-three-bucket-recall.md)
 - [ADR-012: Graph layer removal](docs/adr/012-remove-graph-layer.md)
 

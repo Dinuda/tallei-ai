@@ -4,6 +4,18 @@ All notable changes are documented here. Each entry covers what changed, why it 
 
 ---
 
+## [Unreleased] — 2026-07-10
+
+### refactor: Conductor / Loops / Temporal / Composio teardown
+
+Removed loop authoring, Temporal scheduling, Composio connectors, workspace KB, and related packages. Memory/MCP core, model gateway, and dashboard `ai-elements` kit retained. See [ADR-014](docs/adr/014-loops-teardown.md).
+
+### docs: post-teardown documentation refresh
+
+Updated architecture pointers, setup guide, product scope, flow docs, and contributor guides. Deleted stale graph-layer and Temporal migration docs.
+
+---
+
 ## [Unreleased] — 2026-04-16
 
 ### The Recall Latency Arc

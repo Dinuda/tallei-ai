@@ -1,20 +1,5 @@
 import type { ReasoningEffort } from "../config/load.js";
 
-/** Map conductor reasoning effort to OpenAI model tier (nano vs mini). */
-export function isLowConductorReasoningEffort(
-  effort: ReasoningEffort | undefined,
-): boolean {
-  return effort === "none" || effort === "minimal" || effort === "low";
-}
-
-export function resolveConductorModelForOpenAi(
-  effort: ReasoningEffort | undefined,
-  options: { lowModel: string; highModel: string },
-): string {
-  if (isLowConductorReasoningEffort(effort)) return options.lowModel;
-  return options.highModel;
-}
-
 export function looksLikeHostedOpenAiModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   if (!normalized) return false;

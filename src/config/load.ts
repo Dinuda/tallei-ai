@@ -26,7 +26,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const localModelModeDefault = nodeEnv !== "production";
   const localModelMode = readBooleanEnv(e, "TALLEI_LLM__LOCAL_MODEL_MODE", localModelModeDefault);
   const defaultQdrantCollectionName = localModelMode ? "memories_local_v1" : "memories_v1";
-  const defaultLoopQdrantCollectionName = `${defaultQdrantCollectionName}_loop_episodes`;
   const localBaseUrl = `http://localhost:${port}`;
   const configuredPublicBaseUrl = e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl;
   const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
@@ -102,7 +101,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     qdrantUrl: readStringEnv(e, "TALLEI_QDRANT__URL"),
     qdrantApiKey: readStringEnv(e, "TALLEI_QDRANT__API_KEY"),
     qdrantCollectionName: readStringEnv(e, "TALLEI_QDRANT__COLLECTION", defaultQdrantCollectionName),
-    loopQdrantCollectionName: readStringEnv(e, "TALLEI_QDRANT__LOOP_COLLECTION", defaultLoopQdrantCollectionName),
     memoryVectorUpsertTimeoutMs: readIntEnv(
       e,
       "TALLEI_RESILIENCE__VECTOR_UPSERT_TIMEOUT_MS",
@@ -150,14 +148,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     vertexSearchDataStore: readStringEnv(e, "TALLEI_VERTEX_SEARCH__DATA_STORE"),
     vertexSearchServingConfig: readStringEnv(e, "TALLEI_VERTEX_SEARCH__SERVING_CONFIG"),
     agentEngineIssuer: readStringEnv(e, "TALLEI_AGENT_ENGINE__ISSUER", "tallei-agent-engine"),
-    loopTestRunMaxSteps: readIntEnv(e, "TALLEI_LOOPS__TEST_RUN_MAX_STEPS", 2),
-    loopTestRunTimeoutMs: readIntEnv(
-      e,
-      "TALLEI_LOOPS__TEST_RUN_TIMEOUT_MS",
-      Math.max(600_000, llm.plannerRequestTimeoutMs * 4),
-    ),
-    /** Max simultaneous event-triggered runs per workspace; 0 = unlimited. */
-    loopMaxConcurrentEventRuns: Math.max(0, readIntEnv(e, "TALLEI_LOOPS__MAX_CONCURRENT_EVENT_RUNS", 0)),
     logLevel: readStringEnv(e, "TALLEI_OBS__LOG_LEVEL", "info") as "debug" | "info" | "warn" | "error",
     prettyLogsEnabled: readBooleanEnv(e, "TALLEI_OBS__PRETTY_LOGS", nodeEnv === "development"),
     vertexSearchVerboseLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__VERTEX_SEARCH_VERBOSE", false),
@@ -227,33 +217,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     channelsResendInboundDomain: readStringEnv(e, "TALLEI_CHANNELS__RESEND_INBOUND_DOMAIN"),
     adminEmail: readStringEnv(e, "TALLEI_ADMIN__EMAIL"),
     adminSlackWebhookUrl: readStringEnv(e, "TALLEI_ADMIN__SLACK_WEBHOOK_URL"),
-    composioApiKey: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_API_KEY"),
-    composioBaseUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_BASE_URL", "https://backend.composio.dev")),
-    composioAuthConfigId: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_AUTH_CONFIG_ID"),
-    composioWebhookSecret: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_WEBHOOK_SECRET"),
-    composioEntityPrefix: readStringEnv(e, "TALLEI_CONNECTORS__COMPOSIO_ENTITY_PREFIX", "tallei"),
-    composioStrictMode: readBooleanEnv(e, "TALLEI_CONNECTORS__COMPOSIO_STRICT_MODE", false),
-    resendPortalUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CONNECTORS__RESEND_PORTAL_URL", "https://resend.com/overview")),
-    resendApiKeysUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CONNECTORS__RESEND_API_KEYS_URL", "https://resend.com/api-keys")),
-    resendDocsUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CONNECTORS__RESEND_DOCS_URL", "https://resend.com/docs/dashboard/api-keys/introduction")),
-    workflowTargetWorld: readStringEnv(e, "TALLEI_WORKFLOW__TARGET_WORLD", ""),
-    workflowPostgresJobPrefix: readStringEnv(e, "TALLEI_WORKFLOW__POSTGRES_JOB_PREFIX", "tallei"),
-    workflowPostgresQueueConcurrency: readIntEnv(e, "TALLEI_WORKFLOW__POSTGRES_QUEUE_CONCURRENCY", 10),
-    loopExecutorScheduler: readStringEnv(e, "TALLEI_LOOP_EXECUTOR__SCHEDULER", "internal") === "cloudflare"
-      ? "cloudflare" as const
-      : "internal" as const,
-    loopExecutorPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__POLL_MS", 30_000),
-    loopExecutorSchedulerBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__BATCH_SIZE", 4),
-    loopExecutorHeartbeatDispatch: readStringEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_DISPATCH", "internal") === "cloudflare"
-      ? "cloudflare" as const
-      : "internal" as const,
-    loopExecutorHeartbeatPollMs: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_POLL_MS", 2_000),
-    loopExecutorHeartbeatBatchSize: readIntEnv(e, "TALLEI_LOOP_EXECUTOR__HEARTBEAT_BATCH_SIZE", 4),
-    temporalEnabled: readBooleanEnv(e, "TALLEI_TEMPORAL__ENABLED", false),
-    temporalAddress: readStringEnv(e, "TALLEI_TEMPORAL__ADDRESS", "localhost:7233"),
-    temporalNamespace: readStringEnv(e, "TALLEI_TEMPORAL__NAMESPACE", "default"),
-    temporalTaskQueue: readStringEnv(e, "TALLEI_TEMPORAL__TASK_QUEUE", "tallei-loops"),
-    loopExecutorNewsletterLiveWebSearchEnabled: readBooleanEnv(e, "TALLEI_LOOP_EXECUTOR__NEWSLETTER_LIVE_WEB_SEARCH_ENABLED", nodeEnv === "production"),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),

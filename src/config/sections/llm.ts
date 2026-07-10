@@ -95,16 +95,11 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
   });
 
   const llmProvider = readStringEnv(env, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as LlmProviderName;
-  const defaultConductorCloudModel = llmProvider === "opencode"
-    ? defaultOpenCodeModel
-    : llmProvider === "nvidia"
-      ? defaultNvidiaModel
-      : "gpt-5-mini";
 
   function compatibleDefaultModel(): string {
     if (llmProvider === "opencode") return defaultOpenCodeModel;
     if (llmProvider === "nvidia") return defaultNvidiaModel;
-    return defaultConductorCloudModel;
+    return "gpt-5-nano";
   }
 
   function readResolvedChatModel(key: string, productionDefault: string): string {
@@ -135,7 +130,7 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
       return resolveChatModelForCompatibleProvider(raw, compatibleDefaultModel());
     }
     if (llmProvider === "openai") {
-      return coerceChatModelForOpenAiProvider(raw, defaultConductorCloudModel);
+      return coerceChatModelForOpenAiProvider(raw, "gpt-5-mini");
     }
     return raw;
   }
@@ -152,23 +147,6 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
     openaiModel: readResolvedChatModel("TALLEI_LLM__CHAT_MODEL", "gpt-5-nano"),
     googleModel: readStringEnv(env, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
     intentClassifierModel: readResolvedChatModel("TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
-    plannerModel: readResolvedChatModel("TALLEI_PLANNER__MODEL", "gpt-5-nano"),
-    plannerMaxQuestions: readIntEnv(env, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
-    plannerWebSearchBudget: readIntEnv(env, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
-    plannerRequestTimeoutMs: readIntEnv(env, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 300_000),
-    plannerReasoningEffort: readReasoningEffort(env, "TALLEI_PLANNER__REASONING_EFFORT"),
-    loopMinerModel: readResolvedChatModel("TALLEI_LOOP_MINER__MODEL", "gpt-5-nano"),
-    loopMinerEpisodeModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__EPISODE_MODEL"),
-    loopMinerDetectorModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__DETECTOR_MODEL"),
-    loopMinerEvaluatorModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__EVALUATOR_MODEL"),
-    loopMinerDnaModel: readResolvedOptionalChatModel("TALLEI_LOOP_MINER__DNA_MODEL"),
-    loopMinerPromptBudgetTokens: readIntEnv(env, "TALLEI_LOOP_MINER__PROMPT_BUDGET_TOKENS", 4000),
-    loopMinerEventSummaryCharCap: readIntEnv(env, "TALLEI_LOOP_MINER__EVENT_SUMMARY_CHAR_CAP", 900),
-    loopMinerTranscriptSnippetsMax: readIntEnv(env, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPETS_MAX", 2),
-    loopMinerTranscriptSnippetCharCap: readIntEnv(env, "TALLEI_LOOP_MINER__TRANSCRIPT_SNIPPET_CHAR_CAP", 220),
-    loopMinerChatTimeoutMs: readIntEnv(env, "TALLEI_LOOP_MINER__CHAT_TIMEOUT_MS", 300_000),
-    loopMinerMaxEvidenceDays: readIntEnv(env, "TALLEI_LOOP_MINER__MAX_EVIDENCE_DAYS", 14),
-    loopMinerMaxEventsPerRun: readIntEnv(env, "TALLEI_LOOP_MINER__MAX_EVENTS_PER_RUN", 0),
     openaiPayloadLoggingEnabled: readBooleanEnv(env, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),
     openaiPayloadLoggingMaxChars: Math.max(
       64,
@@ -186,9 +164,6 @@ export function loadLlmConfig(env: NodeJS.ProcessEnv, ctx: LlmConfigContext) {
     nvidiaModel: defaultNvidiaModel,
     nvidiaApiKey: nvidiaApiKeys[0] ?? "",
     nvidiaApiKeys,
-    conductorModel: readResolvedChatModel("TALLEI_CONDUCTOR__MODEL", defaultConductorCloudModel),
-    conductorLowReasoningModel: readResolvedChatModel("TALLEI_CONDUCTOR__LOW_REASONING_MODEL", "gpt-5-nano"),
-    conductorReasoningEffort: readReasoningEffort(env, "TALLEI_CONDUCTOR__REASONING_EFFORT"),
     importMemoryExtractModel: readResolvedChatModel("TALLEI_IMPORT__MEMORY_EXTRACT_MODEL", "gpt-5-nano"),
     importKeepHighThreshold: readFloatEnv(env, "TALLEI_IMPORT__KEEP_HIGH_THRESHOLD", 0.45),
     importKeepWeakThreshold: readFloatEnv(env, "TALLEI_IMPORT__KEEP_WEAK_THRESHOLD", 0.35),

@@ -120,9 +120,8 @@ The daily cleanup path has extra protection:
 - it skips if another daily cleanup is already running
 - it skips if the user already had a completed daily cleanup today
 - it uses `buildDailyCleanupOptions(firstProcessedRun)` to throttle the first successful pass
-- it keeps loop miner out of the daily path for now
 
-That last point matters because the daily intelligence pipeline currently wants a cleanup-first, loop-miner-disabled flow.
+Triggered from the daily intelligence hook in `src/services/workflow-automation/daily-intelligence.ts` and manually from `/dashboard/memory-cleanup`.
 
 ## Selection And Bucketing
 

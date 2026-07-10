@@ -35,7 +35,9 @@ export type AppToolCall = {
   arguments: unknown;
 };
 
-export type AppToolChoice = "auto" | "none" | "required";
+export type AppSpecificToolChoice = { type: "tool"; toolName: string };
+
+export type AppToolChoice = "auto" | "none" | "required" | AppSpecificToolChoice;
 
 export type AppResponseFormat = "text" | "json" | "json_schema";
 
@@ -45,12 +47,7 @@ export type AppReasoningOptions = {
   includeEncryptedContent?: boolean;
 };
 
-export type AppModelPurpose =
-  | "chat"
-  | "embed"
-  | "conductor"
-  | "planner"
-  | "collab-planner";
+export type AppModelPurpose = "chat" | "embed";
 
 export type AppJsonSchemaSpec = {
   name: string;

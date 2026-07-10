@@ -2,10 +2,6 @@ import { assertUploadThingConfigured } from "../../infrastructure/storage/upload
 import type { AuthContext } from "../../domain/auth/index.js";
 import { recallMemories, saveMemory, savePreference } from "../../services/memory.js";
 import {
-  listRecentCollabTasks,
-  getCollabTaskContentForContext,
-} from "../../services/collab/collab.service.js";
-import {
   stashDocument,
   stashDocumentNote,
   recallDocument,
@@ -158,59 +154,6 @@ function trimDocBriefForResponse<T extends { preview?: string; blob?: unknown }>
   return { ...rest, preview: `${(rest.preview as string).slice(0, DOC_BRIEF_PREVIEW_MAX_CHARS)}…` } as Omit<T, "blob">;
 }
 
-function extractTaskIdFromCollabMemory(text: string): string | null {
-  const match = text.match(/^Collab Task ([a-f0-9-]+)/im);
-  return match?.[1] ?? null;
-}
-
-async function fetchRecentCollabTasks(
-  auth: AuthContext,
-  query: string
-): Promise<Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>> {
-  const directTasks = await listRecentCollabTasks(auth, 4);
-  const result: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }> = directTasks.map((task) => ({
-    id: task.id,
-    title: task.title,
-    state: task.state,
-    summary: `Collab Task ${task.id}\nTitle: ${task.title}${task.brief ? `\nBrief: ${task.brief}` : ""}\nState: ${task.state}\nProgress: iteration ${task.iteration}`,
-
-    source: "direct",
-  }));
-
-  if (result.length >= 4) return result;
-
-  try {
-    const recalled = await recallMemories(query, auth, 4 - result.length, undefined, { types: ["collab"] });
-    const seenIds = new Set(result.map((d) => d.id));
-    for (const memory of recalled.memories) {
-      const text = typeof memory.text === "string" ? memory.text : "";
-      const id = extractTaskIdFromCollabMemory(text);
-      const key = id ?? text.slice(0, 80);
-      if (seenIds.has(key)) continue;
-      seenIds.add(key);
-      result.push({
-        id: id ?? "unknown",
-        title: "Collab summary",
-        state: "unknown",
-        summary: text,
-        source: "vector",
-      });
-      if (result.length >= 4) break;
-    }
-  } catch {
-    // ignore vector search failures
-  }
-
-  return result;
-}
-
-function detectFocusedCollabTaskId(message: string): string | null {
-  const explicitMatch = message.match(/\b(?:continue|resume|proceed|task)\s+(?:collab\s+)?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/i);
-  if (explicitMatch) return explicitMatch[1];
-  const standaloneMatch = message.match(/\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/i);
-  return standaloneMatch?.[1] ?? null;
-}
-
 function buildContextBlockWithDocuments(
   memories: Array<{ text: string; metadata?: Record<string, unknown> }>,
   inlineDocuments: Array<{ ref: string; title: string | null; content: string }>
@@ -303,7 +246,6 @@ export type RecallActionResult =
       autoSaveNotice?: string;
       autoSaveErrors?: Array<{ file_id: string; filename: string; error: string }>;
       conflictHints?: ConflictHint[];
-      recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
     };
   }
   | {
@@ -423,8 +365,6 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
     autoSaveErrors.push(...errors);
   }
 
-  const recentCollabTasks = await fetchRecentCollabTasks(auth, input.query);
-
   if (uploadedFiles.length > 0 && autoSaveErrors.length > 0) {
     return {
       status: 422,
@@ -452,7 +392,6 @@ export async function executeRecallAction(auth: AuthContext, input: RecallAction
       matchedDocuments: deduplicatedMatchedDocs,
       referencedDocuments,
       recentCompletedIngests,
-      recentCollabTasks,
       autoSave: {
         requested: uploadedFiles.length,
         complete: autoSaveErrors.length === 0,
@@ -868,8 +807,6 @@ export interface PrepareResponseActionResult {
     };
     replyInstructions: string[];
     intent: PrepareResponseIntent;
-    recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
-    focusedCollabContext?: string | null;
   };
 }
 
@@ -917,14 +854,6 @@ reusePreviousContext boolean,
 contextDependent boolean,
 saveCandidates array.
 
-COLLAB STAGE TAGS — check first, they override normal classification:
-If message starts with [COLLAB:CONTINUE:...] or [COLLAB:MY_TURN:...]:
-  return { needsRecall: false, needsDocumentLookup: false, reusePreviousContext: true, contextDependent: false, saveCandidates: [] }.
-If message starts with [COLLAB:CREATE]:
-  return { needsRecall: true, needsDocumentLookup: true, reusePreviousContext: false, contextDependent: true, saveCandidates: [] }
-  unless the remainder of the message contains durable facts or preferences — save those only.
-
-NORMAL CLASSIFICATION (no collab tag):
 saveCandidates items have kind fact|preference|document-note and concise content/title/summary/key_points/source_hint/category/preference_key when relevant.
 Save any reusable information: facts, preferences, goals, decisions, corrections, beliefs, opinions, stances, frustrations, instructions, plans, reusable debugging context, project details, notes, and reference material.
 If the information is reusable but does not fit fact or preference, use kind=document-note and category="other".
@@ -1237,7 +1166,7 @@ function buildHandoffHistorySaveCandidate(input: PrepareResponseActionInput): Pr
     key_points: [
       `Target provider: ${target}`,
       `Captured ${history.length} visible message(s) from the ChatGPT window.`,
-      "Use this as task context before continuing the collab turn.",
+      "Use this as task context before continuing the handoff.",
     ],
     content,
   };
@@ -1450,7 +1379,6 @@ type PrepareRecallBody = {
   recentCompletedIngests: unknown[];
   autoSave: PrepareResponseActionResult["body"]["autoSave"];
   inlineDocuments?: Array<{ ref: string; title: string | null; content: string }>;
-  recentCollabTasks?: Array<{ id: string; title: string; state: string; summary: string; source: "direct" | "vector" }>;
 };
 
 function emptyPrepareRecallBody(): PrepareRecallBody {
@@ -1656,19 +1584,6 @@ export async function executePrepareResponseAction(
     setRequestTimingField("prepare_doc_fetch_ms", 0);
   }
 
-  const focusedTaskId = detectFocusedCollabTaskId(input.message);
-  let focusedCollabContext: string | null = null;
-  if (focusedTaskId) {
-    try {
-      focusedCollabContext = await timed("prepare_focused_collab_ms", () => getCollabTaskContentForContext(focusedTaskId, auth));
-    } catch {
-      // Invalid task id or DB error; continue without focused collab context.
-      focusedCollabContext = null;
-    }
-  } else {
-    setRequestTimingField("prepare_focused_collab_ms", 0);
-  }
-
   const handoffHistoryCandidate = buildHandoffHistorySaveCandidate(input);
   const checkpointCandidate = (isExplicitSaveCommand(input.message.trim()) || hasCheckpointWorthyContent(input.conversation_history))
     ? await buildConversationCheckpointCandidate(input, auth)
@@ -1735,10 +1650,7 @@ export async function executePrepareResponseAction(
       : []),
   ];
 
-  const baseContextBlock = appendInlineDocsToContext(recallBody.contextBlock, inlineDocuments);
-  const contextBlock = focusedCollabContext
-    ? `--- Focused Collab Task ---\n${focusedCollabContext}\n---\n${baseContextBlock}`
-    : baseContextBlock;
+  const contextBlock = appendInlineDocsToContext(recallBody.contextBlock, inlineDocuments);
 
   return {
     status,
@@ -1755,8 +1667,6 @@ export async function executePrepareResponseAction(
       autoSave: recallBody.autoSave,
       replyInstructions,
       intent: intentForResponse,
-      recentCollabTasks: recallBody.recentCollabTasks,
-      focusedCollabContext,
     },
   };
 }

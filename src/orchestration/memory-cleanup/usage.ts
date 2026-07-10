@@ -3,6 +3,8 @@ import type { CleanupAiUsage } from "./types.js";
 
 type Pricing = { inputPerMillion: number; outputPerMillion: number };
 
+const DEFAULT_UNKNOWN_MODEL_PRICING: Pricing = { inputPerMillion: 0.2, outputPerMillion: 0.4 };
+
 const PRICING_BY_MODEL: Record<string, Pricing> = {
   "gpt-5-nano": { inputPerMillion: 0.05, outputPerMillion: 0.4 },
   "gpt-5-mini": { inputPerMillion: 0.25, outputPerMillion: 2 },
@@ -34,12 +36,12 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function pricingForModel(model: string): Pricing | null {
+function pricingForModel(model: string): Pricing {
   const normalized = model.toLowerCase();
   for (const [key, value] of Object.entries(PRICING_BY_MODEL)) {
     if (normalized.includes(key)) return value;
   }
-  return null;
+  return DEFAULT_UNKNOWN_MODEL_PRICING;
 }
 
 export function recordCleanupAiUsage(
@@ -69,11 +71,9 @@ export function recordCleanupAiUsage(
   usage.estimatedCompletionTokens += completionEstimate;
   usage.estimatedTotalTokens += promptEstimate + completionEstimate;
   usage.models[response.model] = (usage.models[response.model] ?? 0) + 1;
-  if (pricing) {
-    usage.estimatedCostUsd +=
-      (billablePromptTokens / 1_000_000) * pricing.inputPerMillion +
-      (billableCompletionTokens / 1_000_000) * pricing.outputPerMillion;
-  }
+  usage.estimatedCostUsd +=
+    (billablePromptTokens / 1_000_000) * pricing.inputPerMillion +
+    (billableCompletionTokens / 1_000_000) * pricing.outputPerMillion;
 }
 
 export function mergeCleanupAiUsage(target: CleanupAiUsage, source: CleanupAiUsage): void {

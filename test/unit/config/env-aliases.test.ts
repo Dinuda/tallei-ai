@@ -9,11 +9,9 @@ test("applyEnvAliases maps legacy keys to canonical TALLEI_* names", () => {
   const resolved = applyEnvAliases({
     OPENAI_API_KEY: "sk-legacy",
     DATABASE_URL: "postgresql://legacy",
-    TALLEI_LOOP_BUILDER__OPENAI_MODEL: "gpt-5-mini",
   });
   assert.equal(resolved.TALLEI_LLM__OPENAI_API_KEY, "sk-legacy");
   assert.equal(resolved.TALLEI_DB__URL, "postgresql://legacy");
-  assert.equal(resolved.TALLEI_CONDUCTOR__MODEL, "gpt-5-mini");
 });
 
 test("applyEnvAliases does not override canonical values", () => {
@@ -24,7 +22,7 @@ test("applyEnvAliases does not override canonical values", () => {
   assert.equal(resolved.TALLEI_LLM__OPENAI_API_KEY, "sk-canonical");
 });
 
-test("loadConfig resolves conductor model from legacy loop builder alias", () => {
+test("loadConfig resolves chat model from OpenAI provider defaults", () => {
   const cfg = loadConfig({
     NODE_ENV: "test",
     TALLEI_HTTP__INTERNAL_API_SECRET: "secret",
@@ -33,7 +31,7 @@ test("loadConfig resolves conductor model from legacy loop builder alias", () =>
     TALLEI_LLM__LOCAL_MODEL_MODE: "false",
     TALLEI_LLM__PROVIDER: "openai",
     TALLEI_LLM__OPENAI_API_KEY: "sk-test",
-    TALLEI_LOOP_BUILDER__OPENAI_MODEL: "gpt-5-mini",
+    TALLEI_LLM__CHAT_MODEL: "gpt-5-mini",
   });
-  assert.equal(cfg.conductorModel, "gpt-5-mini");
+  assert.equal(cfg.openaiModel, "gpt-5-mini");
 });

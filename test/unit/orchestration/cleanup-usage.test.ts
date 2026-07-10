@@ -28,3 +28,23 @@ test("recordCleanupAiUsage prices versioned gpt-5-nano models", () => {
   assert.equal(usage.calls, 1);
   assert.equal(usage.estimatedCostUsd, 0.45);
 });
+
+test("recordCleanupAiUsage uses default pricing for unknown models like big-pickle", () => {
+  const usage = emptyCleanupAiUsage();
+  const response: AppModelResponse = {
+    text: "world",
+    model: "big-pickle",
+    finishReason: "stop",
+    provider: "opencode",
+    usage: {
+      promptTokens: 1_000_000,
+      completionTokens: 1_000_000,
+      totalTokens: 2_000_000,
+    },
+  };
+
+  recordCleanupAiUsage(usage, request, response);
+
+  assert.equal(usage.calls, 1);
+  assert.ok(Math.abs(usage.estimatedCostUsd - 0.6) < 1e-9);
+});

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Activity,
@@ -20,7 +19,6 @@ type McpEvent = {
   ok: boolean;
   error: string | null;
   createdAt: string;
-  collabTaskId: string | null;
   metadata: Record<string, unknown>;
 };
 
@@ -215,11 +213,6 @@ export default function McpEventsPage() {
                         <div className={styles.errorBox}>{event.error}</div>
                       ) : (
                         <div className={styles.detailsCell}>
-                          {event.collabTaskId ? (
-                            <Link className={styles.taskLink} href={`/dashboard/tasks/${event.collabTaskId}`}>
-                              Task {event.collabTaskId.slice(0, 8)}…
-                            </Link>
-                          ) : null}
                           {preview ? <p className={styles.previewText}>{preview}</p> : <span className={styles.noDetail}>—</span>}
                           {contentLength !== null ? (
                             <span className={styles.lengthText}>{contentLength} chars</span>

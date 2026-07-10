@@ -1,23 +1,37 @@
 # Services Contributor Guide
 
-Use this folder for orchestration-facing application services only.
+Application services called from HTTP routes, MCP tools, and orchestration use cases.
 
-## High-traffic files
+## High-traffic modules
 
-- `loop-runtime/`: durable command worker, gates, attempts, artifacts, and run projections.
-- `connectors/`: connector account/auth integrations, including Composio.
-- `memory-cleanup.ts`: cleanup pipeline orchestration and admin reporting.
-- `memory.ts`: memory save/recall service facade.
+| Module | Role |
+|--------|------|
+| `memory.ts` | Save/recall facade; caching; fire-and-forget saves |
+| `memory-cleanup.ts` | Admin cleanup pipeline orchestration |
+| `documents.ts` | Document notes, blobs, search |
 
-## Service Modules
+## Service packages
 
-- `chatgpt-import/`: ChatGPT import job orchestration + import artifact storage.
-- `notifications/`: email templates, resend delivery, signup/payment notification flows.
-- `collab/`: collaboration task orchestration service.
-- `loop-executor/`: v3 loop authoring and stable agent/tool execution helpers.
+| Directory | Role |
+|-----------|------|
+| `chatgpt-import/` | ChatGPT export import jobs and artifact storage |
+| `notifications/` | Email templates and outbound delivery |
+
+## Top-level files
+
+- `uploaded-file-ingest.ts` / `uploaded-file-ingest-jobs.ts` — file ingest from ChatGPT/OpenAI refs
+- `chatgpt-import-jobs.ts` — bulk import job runner
+- `vertex-document-backfill.ts` — Vertex document embedding backfill
 
 ## Editing rules
 
-- Keep exported service APIs stable unless route contracts explicitly change.
-- Split by responsibility into submodules under `src/services/<service-name>/` when logic grows.
-- Route files should call service functions; avoid embedding business logic directly in transport.
+- Keep exported service APIs stable unless route/MCP contracts change.
+- Split growing modules under `src/services/<name>/` by responsibility.
+- Route handlers stay thin — call one service or use-case function per action.
+- Do not reintroduce loop/conductor/composio/collab service layers; see [ADR-014](../../docs/adr/014-loops-teardown.md).
+
+## Related docs
+
+- Orchestration use cases: `src/orchestration/memory/`
+- Infrastructure repos: `src/infrastructure/repositories/`
+- [Architecture](../../docs/architecture.md)

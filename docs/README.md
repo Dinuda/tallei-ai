@@ -1,46 +1,47 @@
 # Documentation
 
-## Core Architecture & Design
+Start here to understand Tallei after the memory-core refactor.
 
-Start here to understand the system:
+## Product & Architecture
 
-- **[Technical Architecture](../ARCHITECTURE.md)** — Deep dive into the graph-aware memory system, async extraction pipeline, dual recall modes, and performance optimizations
-- **[Stable Loop Runtime](./flows/loop-engine-v3-run-end-to-end.md)** — Durable command worker, gates, retries, leases, projection API, and legacy cutover
-- **[Architecture Diagrams](./DIAGRAMS.md)** — Visual walkthroughs of the system with ASCII diagrams:
-  - High-level architecture
-  - Fire-and-forget save flow
-  - Dual recall modes (vector + graph)
-  - Contradiction detection
-  - Entity relationship graphs
-  - Database schema
-- **[Runtime Flows](./flows/README.md)** — End-to-end Mermaid docs for the hottest operational paths:
-  - [Conductor](./conductor.md) — loop authoring chat, compile, activate, run
-  - Loop Miner
-  - Memory Cleanup
-  - Vertex document embeddings and search
+- **[Product Scope](./product-scope.md)** — what ships today vs what was removed
+- **[Technical Architecture](./architecture.md)** — layered backend, MCP save/recall flows, model gateway, frozen contracts
+- **[Current Memory Retrieval](./memory-retrieval-current.md)** — `list_memories` vs `recall_memories`, bucket recall tuning
 
-## Memory Model Update (April 2026)
+## Runtime Flows
 
-- Memory records are now typed (`preference`, `fact`, `event`, `decision`, `note`) with pinning and supersede support.
-- Recall is preference-first and type-aware (decay + similarity floor + context dedup).
-- New MCP preference tools:
-  - `save_preference`
-  - `list_preferences`
-  - `forget_preference`
-- `recall_memories` now supports optional type filters via `types`.
-- ChatGPT Actions importer URL:
-  - `/chatgpt/actions/openapi.json`
+- **[Flows index](./flows/README.md)** — end-to-end operational paths
+- [Memory Cleanup](./flows/memory-cleanup-end-to-end.md)
+- [Vertex Document Embeddings](./flows/vertex-document-embeddings.md)
+
+## Architecture Decision Records
+
+| ADR | Topic |
+|-----|-------|
+| [001](./adr/001-provider-adapter-interface.md) | Provider adapter interface |
+| [002](./adr/002-single-provider-resilience.md) | Single-provider resilience |
+| [003](./adr/003-layered-architecture.md) | Layered architecture |
+| [004](./adr/004-remove-legacymemory.md) | Remove LegacyMemory |
+| [005](./adr/005-config-schema-zod.md) | Config schema (Zod) |
+| [006](./adr/006-structured-logging-metrics.md) | Structured logging & metrics |
+| [007](./adr/007-feature-flagged-shadow-cutover.md) | Feature-flagged shadow cutover |
+| [008](./adr/008-frozen-http-mcp-contract.md) | Frozen HTTP/MCP contract |
+| [009](./adr/009-composition-root.md) | Composition root |
+| [010](./adr/010-embedding-cache-in-infrastructure.md) | Embedding cache in infrastructure |
+| [011](./adr/011-three-bucket-recall.md) | Three-bucket recall |
+| [012](./adr/012-remove-graph-layer.md) | Remove graph layer |
+| [013](./adr/013-remove-collab-and-developer-workflows.md) | Remove collab and developer workflows |
+| [014](./adr/014-loops-teardown.md) | Conductor / Loops teardown |
 
 ## Deployment & Operations
 
-- Production deployment:
-  - [Cloud Run Guide](./production/cloudrun/README.md)
-  - [Flow (Step-by-step)](./production/cloudrun/flow.md)
-  - [Domains and DNS](./production/cloudrun/dns.md)
-  - [Troubleshooting](./production/cloudrun/troubleshooting.md)
-  - [Production Changelog](./production/cloudrun/changelog.md)
+- [Cloud Run Guide](./production/cloudrun/README.md)
+- [Flow (step-by-step)](./production/cloudrun/flow.md)
+- [Domains and DNS](./production/cloudrun/dns.md)
+- [Troubleshooting](./production/cloudrun/troubleshooting.md)
+- [Production Changelog](./production/cloudrun/changelog.md)
 
 ## Getting Started
 
-- Local development:
-  - [Local Setup](../setup.md)
+- [Local Setup](../setup.md)
+- [Root README](../README.md)

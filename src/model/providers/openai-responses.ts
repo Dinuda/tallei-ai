@@ -1,7 +1,8 @@
 import type { z } from "zod";
 
+import OpenAI from "openai";
+
 import { config } from "../../config/index.js";
-import { createLoopChatOpenAiSdk } from "../../services/llm/loop-chat-client.js";
 import type {
   AppJsonSchemaSpec,
   AppModelRequest,
@@ -41,7 +42,7 @@ export class OpenAiResponsesAdapter implements ModelProviderAdapter {
     if (config.llmProvider !== "openai") {
       throw new Error("OpenAI Responses structured output requires TALLEI_LLM__PROVIDER=openai");
     }
-    const client = createLoopChatOpenAiSdk({ userId: request.userId });
+    const client = new OpenAI({ apiKey: config.openaiApiKey });
     const response = await (client.responses as unknown as {
       create: (
         body: Record<string, unknown>,
@@ -49,7 +50,7 @@ export class OpenAiResponsesAdapter implements ModelProviderAdapter {
       ) => Promise<unknown>;
     }).create(
       {
-        model: request.model ?? config.plannerModel,
+        model: request.model ?? config.openaiModel,
         input: toResponsesInput(request.messages),
         tools: (request.webSearchBudget ?? 0) > 0 ? [{ type: "web_search_preview" }] : [],
         text: {
@@ -66,7 +67,7 @@ export class OpenAiResponsesAdapter implements ModelProviderAdapter {
     return {
       text: extractResponseText(response),
       finishReason: "stop",
-      model: request.model ?? config.plannerModel,
+      model: request.model ?? config.openaiModel,
       provider: "openai",
       raw: response,
     };

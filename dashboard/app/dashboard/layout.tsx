@@ -4,10 +4,8 @@ import Image from "next/image";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, Suspense } from "react";
-import { Code2, Menu, Sparkles, Workflow, X, Settings } from "lucide-react";
-import { ConductorHeader } from "@/components/conductor-header";
-import { ConductorLayoutProvider } from "@/components/conductor/conductor-layout-context";
+import { useEffect, useState } from "react";
+import { Menu, Sparkles, X } from "lucide-react";
 import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -15,8 +13,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
-import { WorkspaceProvider } from "@/lib/workspace-context";
-import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 
 /* Suppress known React DevTools false-positive in React 19 / Next.js 16 */
 if (typeof window !== "undefined" && window.console && window.console.error) {
@@ -60,13 +56,6 @@ const ICONS = {
       <path d="M5 5.5h5M5 7.5h5M5 9.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
-  collab: (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="10.8" cy="10.8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M5.8 5.3 9.2 8.7M9.2 5.3 5.8 8.7" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  ),
   documents: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M4 2h5l3 3v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
@@ -104,19 +93,6 @@ const ICONS = {
       <path d="M4.5 6v3A1.5 1.5 0 0 0 6 10.5h.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
-  loops: (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <path d="M2.5 5a5 5 0 0 1 8-1.5M11 4v2.5H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12.5 10a5 5 0 0 1-8 1.5M4 11V8.5h2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  workflows: (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <rect x="1.5" y="2.5" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
-      <rect x="9.5" y="8.5" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M5.5 4.5h2v2h2M3.5 6.5v2h2M9.5 6.5v2h2M7.5 8.5h2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  ),
   cleanup: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M7.5 1.8 12 3.6v3.2c0 2.8-1.8 5.2-4.5 6.4C4.8 12 3 9.6 3 6.8V3.6l4.5-1.8Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
@@ -129,13 +105,10 @@ const NAV: NavSection[] = [
   {
     items: [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
-      { id: "collab", label: "Collab", href: "/dashboard/tasks", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
-      { id: "loops", label: "Loops", href: "/dashboard/loops", icon: ICONS.loops },
       { id: "channels", label: "Channels", href: "/dashboard/channels", icon: ICONS.channels },
       { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
       { id: "connected-apps", label: "Connected Apps", href: "/dashboard/integrations", icon: ICONS.connectedApps },
-      { id: "workspace-settings", label: "Workspace Settings", href: "/dashboard/workspace/settings", icon: <Settings size={15} aria-hidden /> },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
     ],
   },
@@ -143,17 +116,13 @@ const NAV: NavSection[] = [
     label: "DEVELOPER",
     items: [
       { id: "cleanup", label: "Memory Cleanup", href: "/dashboard/memory-cleanup", icon: ICONS.cleanup },
-      { id: "live-loops", label: "Live Loops", href: "/dashboard/loops/developer", icon: <Code2 size={15} aria-hidden /> },
-      { id: "workflows", label: "Workflows", href: "/dashboard/developer/workflows", icon: <Workflow size={15} aria-hidden /> },
       { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
-      { id: "integrations", label: "Integrations", href: "/dashboard/developer/integrations", icon: ICONS.integrations },
     ],
   },
 ];
 
 function isActive(pathname: string, item: NavItem) {
   if (item.href === "/dashboard") return pathname === "/dashboard";
-  if (item.href === "/dashboard/loops" && pathname.startsWith("/dashboard/loops/developer")) return false;
   return pathname.startsWith(item.href);
 }
 
@@ -247,9 +216,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     };
   }, [mobileOpen]);
 
-  const isConductorRoute =
-    pathname === "/dashboard/loops/new"
-    || /\/dashboard\/loops\/[^/]+\/conductor$/.test(pathname);
   const initials = getInitials(session?.user?.name, session?.user?.email);
   const sessionPlan = session?.user?.plan ?? "free";
   const isFreePlan = sessionPlan === "free";
@@ -259,8 +225,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   } as const;
   const headerUiFont = dashboardUiFont;
   return (
-    <WorkspaceProvider>
-    <ConductorLayoutProvider>
     <div className="logged-in-shell-light min-h-screen overflow-x-hidden bg-white text-slate-900" style={dashboardUiFont}>
       <a
         href="#main-content"
@@ -286,22 +250,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </Link>
           </div>
 
-          {isConductorRoute ? (
-            <div className="flex min-w-0 flex-1 items-center px-3 md:px-4">
-              <Suspense fallback={
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold leading-none text-slate-900">New loop</div>
-                </div>
-              }>
-                <ConductorHeader />
-              </Suspense>
-            </div>
-          ) : (
-            <div className="flex-1" aria-hidden />
-          )}
+          <div className="flex-1" aria-hidden />
 
           <div className="flex shrink-0 items-center gap-2 px-4 sm:px-6">
-            <WorkspaceSwitcher />
             {isFreePlan ? (
               <>
                 <div
@@ -385,7 +336,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <NavSectionContent pathname={pathname} onNavigate={() => setMobileOpen(false)} />
       </aside>
 
-      <main id="main-content" className={cn("min-h-screen min-w-0 pt-14 md:ml-[248px]", isConductorRoute ? "bg-white" : "bg-[#f4f4f4]")}>
+      <main id="main-content" className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
         <div className="mx-auto w-full">
           <DashboardUpdateBanner />
           {children}
@@ -393,7 +344,5 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </main>
       <Toaster position="top-right" />
     </div>
-    </ConductorLayoutProvider>
-    </WorkspaceProvider>
   );
 }

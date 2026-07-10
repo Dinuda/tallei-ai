@@ -12,7 +12,7 @@ import {
 } from "../../services/llm/api-key-pool.js";
 import { looksLikeHostedOpenAiModel } from "../routing.js";
 import { modelRegistry } from "../registry.js";
-import type { AppModelPurpose, ModelSurface, ResolvedModelRoute } from "../types.js";
+import type { AppModelPurpose, AppToolChoice, ModelSurface, ResolvedModelRoute } from "../types.js";
 
 export type StreamingProviderOptions = {
   openai?: {
@@ -51,12 +51,15 @@ export class GatewayStreamingResolver {
     return modelRegistry.resolveModelRoute({ purpose }).modelId;
   }
 
-  resolveToolChoice(activeToolCount: number): "auto" | "none" | "required" {
-    return modelRegistry.resolveConductorToolChoice(activeToolCount);
+  resolveToolChoice(
+    activeToolCount: number,
+    options?: { nextTool?: string | null; allowedTools?: readonly string[] },
+  ): AppToolChoice {
+    return modelRegistry.resolveConductorToolChoice(activeToolCount, options);
   }
 
-  shouldApplyReasoningTagExtraction(provider: ResolvedModelRoute["provider"], surface: ModelSurface, purpose: AppModelPurpose): boolean {
-    return modelRegistry.shouldApplyReasoningTagExtraction(provider, surface, purpose);
+  shouldApplyReasoningTagExtraction(provider: ResolvedModelRoute["provider"], surface: ModelSurface): boolean {
+    return modelRegistry.shouldApplyReasoningTagExtraction(provider, surface);
   }
 
   shouldSendReasoning(surface: ModelSurface): boolean {
@@ -69,7 +72,7 @@ export class GatewayStreamingResolver {
 
     if (route.provider === "opencode") {
       const model = this.createOpenCodeStreamingModel(route.modelId, userId);
-      const wrapped = this.shouldApplyReasoningTagExtraction(route.provider, route.capabilities.surface, purpose)
+      const wrapped = this.shouldApplyReasoningTagExtraction(route.provider, route.capabilities.surface)
         ? withReasoningExtraction(model)
         : model;
       return {
@@ -82,7 +85,7 @@ export class GatewayStreamingResolver {
 
     if (route.provider === "nvidia") {
       const model = this.createNvidiaStreamingModel(route.modelId, userId);
-      const wrapped = this.shouldApplyReasoningTagExtraction(route.provider, route.capabilities.surface, purpose)
+      const wrapped = this.shouldApplyReasoningTagExtraction(route.provider, route.capabilities.surface)
         ? withReasoningExtraction(model)
         : model;
       return {
@@ -98,7 +101,7 @@ export class GatewayStreamingResolver {
     }
 
     const { model: baseModel, surface } = this.createOpenAiStreamingModel(route.modelId, userId);
-    const applyTagExtraction = this.shouldApplyReasoningTagExtraction(route.provider, surface, purpose);
+    const applyTagExtraction = this.shouldApplyReasoningTagExtraction(route.provider, surface);
     const model = applyTagExtraction ? withReasoningExtraction(baseModel) : baseModel;
     const providerOptions = toStreamingProviderOptions(route);
     return providerOptions

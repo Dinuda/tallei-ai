@@ -32,7 +32,6 @@ type MemoryType =
   | "lesson"
   | "failure"
   | "checkpoint"
-  | "collab"
   | "unknown";
 
 type UIMemory = MemoryItem & {
@@ -329,7 +328,6 @@ function normalizeMemoryType(raw: unknown): MemoryType {
   if (value === "lesson") return "lesson";
   if (value === "failure") return "failure";
   if (value === "checkpoint") return "checkpoint";
-  if (value === "collab") return "collab";
   return "unknown";
 }
 

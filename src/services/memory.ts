@@ -349,7 +349,7 @@ const chatGptMemoryImportUseCase = new ChatGptMemoryImportUseCase({
     skipSummary,
   }) => {
     const persistedMemoryType: MemoryType =
-      memoryType === "lesson" || memoryType === "failure" || memoryType === "collab"
+      memoryType === "lesson" || memoryType === "failure"
         ? "fact"
         : memoryType;
 

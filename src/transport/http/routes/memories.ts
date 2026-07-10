@@ -32,18 +32,11 @@ import {
   runMemoryCleanupForUser,
   sendMemoryCleanupAdminEmail,
 } from "../../../services/memory-cleanup.js";
-import {
-  getLoopMinerRunEmbeddingMapForUser,
-  getLoopMinerRunStatusForUser,
-  listLoopMinerRunsForUser,
-  queueLoopMinerRunForUser,
-} from "../../../orchestration/loop-miner/loop-miner.js";
 import { createLogger } from "../../../observability/index.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
 const logger = createLogger({ baseFields: { component: "memories_http_routes" } });
-const LOOP_MINER_STALE_RUNNING_MAX_AGE_MS = 60 * 60 * 1000;
 
 interface ChatGptImportUploadMeta {
   storageRef: string;
@@ -94,13 +87,6 @@ const cleanupRunSchema = z.object({
   selectionStrategy: z.enum(["newest_hybrid", "current_priority"]).optional(),
   newestLimit: z.number().int().min(1).max(5000).optional(),
   interestingLimit: z.number().int().min(0).max(5000).optional(),
-});
-
-const loopMinerRunSchema = z.object({
-  lookbackDays: z.number().int().min(1).max(90).optional(),
-  processAll: z.boolean().optional(),
-  memoryNewestLimit: z.number().int().min(1).max(5000).optional(),
-  memoryInterestingLimit: z.number().int().min(0).max(5000).optional(),
 });
 
 const bulkJsonRoleSchema = z.enum([
@@ -628,172 +614,6 @@ router.get("/cleanup/runs/:id", requireScopes(["memory:read"]), async (req: Auth
   } catch (error) {
     console.error("Error reading memory cleanup run:", error);
     res.status(500).json({ error: "Failed to read memory cleanup run" });
-  }
-});
-
-router.get("/cleanup/loop-miner/runs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const runs = await listLoopMinerRunsForUser(req.authContext!);
-    res.json({ runs });
-  } catch (error) {
-    console.error("Error listing loop miner runs:", error);
-    res.status(500).json({ error: "Failed to list loop miner runs" });
-  }
-});
-
-router.get("/cleanup/loop-miner/runs/:id/embedding-map", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const runId = String(req.params.id);
-    const map = await getLoopMinerRunEmbeddingMapForUser(req.authContext!, runId);
-    if (!map) {
-      res.status(404).json({ error: "Loop miner run not found" });
-      return;
-    }
-    res.json({ map });
-  } catch (error) {
-    console.error("Error building loop miner embedding map:", error);
-    res.status(500).json({ error: "Failed to build loop miner embedding map" });
-  }
-});
-
-router.get("/cleanup/loop-miner/runs/:id/status", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const runId = String(req.params.id);
-    const status = await getLoopMinerRunStatusForUser(req.authContext!, runId);
-    if (!status) {
-      res.status(404).json({ error: "Run not found" });
-      return;
-    }
-    res.json(status);
-  } catch (error) {
-    logger.error("loop miner run status request failed", { error });
-    res.status(500).json({ error: "Failed to get loop miner run status" });
-  }
-});
-
-router.get("/cleanup/loop-miner/runs/:id/status/stream", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
-  const runId = String(req.params.id);
-  const maxStreamAgeMs = 10 * 60 * 1000;
-  const streamStartedAt = Date.now();
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders();
-
-  const send = (data: unknown) => {
-    try {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    } catch {
-      // Client disconnected
-    }
-  };
-
-  let closed = false;
-  let polling = false;
-
-  const poll = async (): Promise<boolean> => {
-    if (polling) return false;
-    polling = true;
-    try {
-      if (Date.now() - streamStartedAt > maxStreamAgeMs) {
-        send({ error: "Loop miner status stream timed out" });
-        return true;
-      }
-      const status = await getLoopMinerRunStatusForUser(req.authContext!, runId);
-      if (!status) {
-        send({ error: "Run not found" });
-        return true;
-      }
-      send(status);
-      return status.status !== "running";
-    } catch (error) {
-      logger.error("loop miner status stream poll failed", { runId, error });
-      return true;
-    } finally {
-      polling = false;
-    }
-  };
-
-  const done = await poll();
-  if (done || closed) {
-    res.end();
-    return;
-  }
-
-  const interval = setInterval(async () => {
-    if (closed) {
-      clearInterval(interval);
-      return;
-    }
-    const done = await poll();
-    if (done) {
-      clearInterval(interval);
-      res.end();
-    }
-  }, 2000);
-
-  req.on("close", () => {
-    closed = true;
-    clearInterval(interval);
-  });
-});
-
-router.post("/cleanup/loop-miner/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
-  try {
-    const body = loopMinerRunSchema.parse(req.body ?? {});
-    logger.info("loop miner run requested", {
-      userId: req.authContext?.userId,
-      tenantId: req.authContext?.tenantId,
-      lookbackDays: body.lookbackDays ?? 30,
-    });
-
-    const existingRuns = await listLoopMinerRunsForUser(req.authContext!, 5);
-    const now = Date.now();
-    const activeRun = existingRuns.find((run) => {
-      if (run.status !== "running") return false;
-      const ageMs = now - Date.parse(run.createdAt ?? "");
-      return Number.isFinite(ageMs) && ageMs >= 0 && ageMs < LOOP_MINER_STALE_RUNNING_MAX_AGE_MS;
-    }) ?? null;
-    if (activeRun) {
-      res.status(202).json({
-        run: activeRun,
-        queued: false,
-        message: "Loop miner run already in progress. Slack will notify when it finishes; refresh this page to update.",
-      });
-      return;
-    }
-
-    const run = await queueLoopMinerRunForUser(req.authContext!, {
-      runReason: "manual",
-      lookbackDays: body.lookbackDays ?? 30,
-      processAll: body.processAll ?? true,
-      memoryNewestLimit: body.memoryNewestLimit,
-      memoryInterestingLimit: body.memoryInterestingLimit,
-    });
-    logger.info("loop miner run queued response", {
-      runId: run?.id ?? null,
-      status: run?.status ?? null,
-    });
-    res.status(202).json({
-      run: run ?? null,
-      queued: true,
-      message: "Loop miner run queued. Slack will notify when it finishes; refresh this page to update.",
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      res.status(400).json({ error: "Validation failed", details: error.errors });
-      return;
-    }
-    logger.error("loop miner run request failed", {
-      error: error instanceof Error
-        ? { name: error.name, message: error.message, stack: error.stack }
-        : error,
-    });
-    res.status(500).json({
-      error: "Failed to run loop miner",
-      details: error instanceof Error ? error.message : String(error),
-    });
   }
 });
 

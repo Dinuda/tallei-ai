@@ -146,11 +146,11 @@ export function TopNav() {
               How it works
             </Link>
             <Link
-              href="/#loops"
-              onClick={handleAnchorClick("#loops")}
+              href="/#integrations"
+              onClick={handleAnchorClick("#integrations")}
               style={{ color: "var(--text-2)", fontSize: "0.95rem", fontWeight: 500 }}
             >
-              Loops
+              Integrations
             </Link>
             <Link
               href="/#pricing"
@@ -287,7 +287,7 @@ export function TopNav() {
         {isHome && (
           <div className="site-mobile-menu-links">
             <Link href="/#how-it-works" onClick={handleAnchorClick("#how-it-works", () => setMobileMenuOpen(false))}>How it works</Link>
-            <Link href="/#loops" onClick={handleAnchorClick("#loops", () => setMobileMenuOpen(false))}>Loops</Link>
+            <Link href="/#integrations" onClick={handleAnchorClick("#integrations", () => setMobileMenuOpen(false))}>Integrations</Link>
             <Link href="/#pricing" onClick={handleAnchorClick("#pricing", () => setMobileMenuOpen(false))}>Pricing</Link>
           </div>
         )}

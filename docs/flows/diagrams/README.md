@@ -10,11 +10,6 @@ npm run docs:render
 
 Outputs are written to `docs/flows/rendered/` as SVG files.
 
-## Loop Miner
-
-- [loop-miner-flow.mmd](./loop-miner-flow.mmd)
-- [loop-miner-sequence.mmd](./loop-miner-sequence.mmd)
-
 ## Memory Cleanup
 
 - [memory-cleanup-flow.mmd](./memory-cleanup-flow.mmd)

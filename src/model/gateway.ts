@@ -21,6 +21,7 @@ import type {
   AppModelPurpose,
   AppModelRequest,
   AppModelResponse,
+  AppToolChoice,
   GatewayProviderId,
   ResolvedModelRoute,
   StructuredOutputResult,
@@ -95,8 +96,11 @@ export class ModelGateway {
     return this.streaming.resolve(purpose, options);
   }
 
-  resolveToolChoice(activeToolCount: number): "auto" | "none" | "required" {
-    return this.streaming.resolveToolChoice(activeToolCount);
+  resolveToolChoice(
+    activeToolCount: number,
+    options?: { nextTool?: string | null; allowedTools?: readonly string[] },
+  ): AppToolChoice {
+    return this.streaming.resolveToolChoice(activeToolCount, options);
   }
 
   shouldSendReasoning(surface: ResolvedStreamingModel["surface"]): boolean {

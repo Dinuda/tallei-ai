@@ -49,23 +49,19 @@ const baseConfigEnv = {
   TALLEI_AUTH__JWT_SECRET: "jwt-secret",
 };
 
-test("development defaults disable outbound email and live newsletter web search", () => {
+test("development defaults disable outbound email in non-production", () => {
   const devConfig = loadConfig({ ...baseConfigEnv, NODE_ENV: "development" });
   assert.equal(devConfig.notificationsOutboundEmailEnabled, false);
-  assert.equal(devConfig.loopExecutorNewsletterLiveWebSearchEnabled, false);
 
   const productionConfig = loadConfig({ ...baseConfigEnv, NODE_ENV: "production" });
   assert.equal(productionConfig.notificationsOutboundEmailEnabled, true);
-  assert.equal(productionConfig.loopExecutorNewsletterLiveWebSearchEnabled, true);
 
   const overriddenConfig = loadConfig({
     ...baseConfigEnv,
     NODE_ENV: "development",
     TALLEI_NOTIFICATIONS__OUTBOUND_EMAIL_ENABLED: "true",
-    TALLEI_LOOP_EXECUTOR__NEWSLETTER_LIVE_WEB_SEARCH_ENABLED: "true",
   });
   assert.equal(overriddenConfig.notificationsOutboundEmailEnabled, true);
-  assert.equal(overriddenConfig.loopExecutorNewsletterLiveWebSearchEnabled, true);
 });
 
 test("parsePrepareResponseIntent accepts valid classifier JSON", () => {

@@ -240,11 +240,15 @@ export function InteractivePromptMenu({
 }) {
   const theme = PROMPT_THEMES[variant];
   const useConnectorLogos = variant === "connector" || rankedAppsLayout;
+  const visibleOptions = useMemo(
+    () => options.filter((option) => option.label.trim().length > 0),
+    [options],
+  );
   const [selectedIds, setSelectedIds] = useState<string[]>(() => {
     if (submittedAnswer?.selectedOptionIds?.length) return submittedAnswer.selectedOptionIds;
     if (!allowMultiple && recommendedOptionIds.length === 1) {
       const recommendedId = recommendedOptionIds[0];
-      if (options.some((option) => option.id === recommendedId)) return [recommendedId];
+      if (visibleOptions.some((option) => option.id === recommendedId)) return [recommendedId];
     }
     return [];
   });
@@ -261,13 +265,27 @@ export function InteractivePromptMenu({
   // Content fingerprint — parent often passes a fresh `options` array reference
   // with the same rows; depend on identity of the question + option ids only.
   const optionsRevision = useMemo(
-    () => `${question}\0${options.map((option) => option.id).join("\0")}`,
-    [question, options],
+    () => `${question}\0${visibleOptions.map((option) => option.id).join("\0")}`,
+    [question, visibleOptions],
   );
 
   useEffect(() => {
     setSubmittedLocally(false);
     setLastLocalAnswerText(null);
+    setOtherText(submittedAnswer?.otherText ?? "");
+    setAppSearch("");
+    if (submittedAnswer?.selectedOptionIds?.length) {
+      setSelectedIds(submittedAnswer.selectedOptionIds);
+      return;
+    }
+    if (!allowMultiple && recommendedOptionIds.length === 1) {
+      const recommendedId = recommendedOptionIds[0];
+      if (visibleOptions.some((option) => option.id === recommendedId)) {
+        setSelectedIds([recommendedId]);
+        return;
+      }
+    }
+    setSelectedIds([]);
   }, [optionsRevision]);
 
   const prevSubmittingRef = useRef(submitting);
@@ -281,27 +299,27 @@ export function InteractivePromptMenu({
   }, [submitting, submittedLocally, submittedAnswer]);
 
   const hasOutcomeGroups = useMemo(
-    () => options.some((option) => Boolean(option.outcomeId)),
-    [options]
+    () => visibleOptions.some((option) => Boolean(option.outcomeId)),
+    [visibleOptions],
   );
 
   const { topOptions, moreOptions, rankedDisplayOptions } = useMemo(() => {
     if (!rankedAppsLayout) {
       return {
-        topOptions: options,
+        topOptions: visibleOptions,
         moreOptions: [] as InteractivePromptOption[],
-        rankedDisplayOptions: options,
+        rankedDisplayOptions: visibleOptions,
       };
     }
 
     const topIds = recommendedOptionIds.slice(0, topAppCount);
     const top = topIds
-      .map((id) => options.find((option) => option.id === id))
+      .map((id) => visibleOptions.find((option) => option.id === id))
       .filter((option): option is InteractivePromptOption => Boolean(option));
 
-    const resolvedTop = top.length > 0 ? top : options.slice(0, topAppCount);
+    const resolvedTop = top.length > 0 ? top : visibleOptions.slice(0, topAppCount);
     const topIdSet = new Set(resolvedTop.map((option) => option.id));
-    const rest = options.filter((option) => !topIdSet.has(option.id));
+    const rest = visibleOptions.filter((option) => !topIdSet.has(option.id));
 
     const query = appSearch.trim().toLowerCase();
     const filterOptions = (rows: InteractivePromptOption[]) => {
@@ -320,26 +338,26 @@ export function InteractivePromptMenu({
       topOptions: resolvedTop,
       moreOptions: rest,
       rankedDisplayOptions: searching
-        ? filterOptions(options)
+        ? filterOptions(visibleOptions)
         : [...filteredTop, ...filteredMore],
     };
-  }, [options, rankedAppsLayout, recommendedOptionIds, topAppCount, appSearch]);
+  }, [visibleOptions, rankedAppsLayout, recommendedOptionIds, topAppCount, appSearch]);
 
   const isSearching = rankedAppsLayout && appSearch.trim().length > 0;
   const showRankedMoreLabel = rankedAppsLayout && !isSearching && moreOptions.length > 0;
 
   const { primaryOptions, overflowOptions } = useMemo(() => {
-    if (rankedAppsLayout || options.length <= MAX_PRIMARY_OPTIONS) {
+    if (rankedAppsLayout || visibleOptions.length <= MAX_PRIMARY_OPTIONS) {
       return {
-        primaryOptions: options,
+        primaryOptions: visibleOptions,
         overflowOptions: [] as InteractivePromptOption[],
       };
     }
     return {
-      primaryOptions: options.slice(0, MAX_PRIMARY_OPTIONS),
-      overflowOptions: options.slice(MAX_PRIMARY_OPTIONS),
+      primaryOptions: visibleOptions.slice(0, MAX_PRIMARY_OPTIONS),
+      overflowOptions: visibleOptions.slice(MAX_PRIMARY_OPTIONS),
     };
-  }, [options, rankedAppsLayout]);
+  }, [visibleOptions, rankedAppsLayout]);
 
   function renderOption(option: InteractivePromptOption, index: number) {
     const selected = selectedIds.includes(option.id);
@@ -399,7 +417,7 @@ export function InteractivePromptMenu({
   }, [onDismiss, isSubmitted, disabled]);
 
   function submitWithSelectedIds(nextSelectedIds: string[], customText = otherText) {
-    const selectedOptions = options.filter((option) =>
+    const selectedOptions = visibleOptions.filter((option) =>
       nextSelectedIds.includes(option.id),
     );
     const custom = customText.trim();
@@ -421,12 +439,12 @@ export function InteractivePromptMenu({
 
   function toggle(optionId: string) {
     if (disabled || isSubmitted || submitting) return;
-    const option = options.find((row) => row.id === optionId);
+    const option = visibleOptions.find((row) => row.id === optionId);
     if (option?.disabled) return;
     let nextSelectedIds: string[];
     if (allowMultiple && option?.outcomeId) {
       const withoutSameOutcome = selectedIds.filter((id) => {
-        const row = options.find((opt) => opt.id === id);
+        const row = visibleOptions.find((opt) => opt.id === id);
         return row?.outcomeId !== option.outcomeId;
       });
       nextSelectedIds = selectedIds.includes(optionId)

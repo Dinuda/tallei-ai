@@ -20,10 +20,10 @@ function conversationBundle(text: string, id = "conv-1"): BulkConversationBundle
   };
 }
 
-test("inclusive hardDrop keeps email paste, collab UUID, assistant markdown, and task prompts", () => {
+test("inclusive hardDrop keeps email paste, UUID task prompts, assistant markdown, and creative prompts", () => {
   const samples = [
     "Please review this Gmail thread about pricing: inbox@company.com sent updates to team@company.com",
-    "continue task 550e8400-e29b-41d4-a716-446655440000 with MCP tool collab_check_turn",
+    "continue task 550e8400-e29b-41d4-a716-446655440000 with MCP tool prepare_response",
     "ASSISTANT: Here is the system architecture with modules for auth, billing, and ingestion pipeline.",
     "create 20 images of product mockups for the landing page hero section",
   ];

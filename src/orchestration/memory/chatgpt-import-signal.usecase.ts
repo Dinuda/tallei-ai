@@ -227,11 +227,11 @@ function computeSignalScores(textBundle: string, importProfile: "curated" | "inc
     }
     if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(textBundle)) {
       inclusiveBoost += 0.1;
-      reasons.push("collab_ref");
+      reasons.push("uuid_ref");
     }
-    if (/\bmcp tool\b|\bcollab_\w+\b|\bcontinue task\b/i.test(textBundle)) {
+    if (/\bmcp tool\b|\bcontinue task\b/i.test(textBundle)) {
       inclusiveBoost += 0.08;
-      reasons.push("collab_command");
+      reasons.push("task_command");
     }
     if (/[├└│]/.test(textBundle)) {
       inclusiveBoost += 0.06;

@@ -3,7 +3,6 @@ import Link from "next/link";
 import { ArrowRight, Check } from "lucide-react";
 import { HeroSection } from "../components/landing/hero-section";
 import { ShowcaseSection } from "../components/landing/showcase-section";
-import { HowLoopsWorkSection } from "../components/landing/how-loops-work-section";
 import { MemorySection } from "../components/landing/memory-section";
 import { IntegrationsSection } from "../components/integrations-section";
 import { PerformanceSection } from "../components/performance-section";
@@ -15,7 +14,7 @@ const PRICING_PLANS = [
     name: "Free",
     price: "$0",
     period: "",
-    description: "Get started with loops and memory",
+    description: "Get started with cross-AI memory",
     features: ["50 saves/month", "200 recalls/month", "All 3 AI platforms"],
     href: "/login",
     cta: "Get Tallei",
@@ -26,7 +25,7 @@ const PRICING_PLANS = [
     name: "Pro",
     price: "$9",
     period: "/mo",
-    description: "For people running loops every day",
+    description: "For people using memory every day",
     features: ["5,000 saves/month included", "100,000 recalls/month included", "All 3 AI platforms", "Link memories to PDFs"],
     href: "/login?plan=pro",
     cta: "Get Tallei Pro",
@@ -51,7 +50,7 @@ const JSON_LD = [
     "@type": "WebSite",
     name: "Tallei",
     url: "https://tallei.com",
-    description: "Intent-driven agent loops with shared memory across ChatGPT, Claude, and Gemini",
+    description: "Intent-driven memory across ChatGPT, Claude, and Gemini",
   },
   {
     "@context": "https://schema.org",
@@ -60,7 +59,7 @@ const JSON_LD = [
     applicationCategory: "ProductivityApplication",
     operatingSystem: "Web",
     description:
-      "Tallei designs and runs agent loops from your intent, with shared memory across ChatGPT, Claude, and Gemini.",
+      "Tallei syncs memory across ChatGPT, Claude, and Gemini so your context follows you everywhere.",
     url: "https://tallei.com",
     offers: {
       "@type": "Offer",
@@ -69,11 +68,10 @@ const JSON_LD = [
       description: "Free tier available",
     },
     featureList: [
-      "Intent-driven agent loops",
       "Sync memory across ChatGPT, Claude, and Gemini",
       "MCP protocol support for Claude Desktop",
-      "Scheduled loop execution",
       "Automatic context retrieval",
+      "Vector search recall",
     ],
   },
   {
@@ -94,14 +92,6 @@ const JSON_LD = [
         acceptedAnswer: {
           "@type": "Answer",
           text: "We use the open MCP protocol for desktop apps and secure API keys for web environments. Setup takes minutes.",
-        },
-      },
-      {
-        "@type": "Question",
-        name: "What is a loop?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "A loop is a recurring workflow designed from your intent — agents, tools, and schedule included.",
         },
       },
     ],
@@ -131,7 +121,6 @@ export function HomeContent() {
 
       <HeroSection />
       <ShowcaseSection />
-      <HowLoopsWorkSection />
       <MemorySection />
 
       <section id="integrations" className="landing-proof">
@@ -150,7 +139,7 @@ export function HomeContent() {
         <div className="pricing-inner">
           <h2 className="section-h2 pricing-heading">Simple pricing</h2>
           <p className="pricing-sub">
-            Start free. Upgrade when your loops need more room.
+            Start free. Upgrade when you need more room.
           </p>
 
           <div className="pricing-grid">
@@ -212,12 +201,6 @@ export function HomeContent() {
               </p>
             </li>
             <li className="solid-card detail-card">
-              <h3 className="detail-h4">What is a loop?</h3>
-              <p className="detail-p">
-                Describe what should repeat. Tallei designs the agents, tools, and schedule — then runs it for you.
-              </p>
-            </li>
-            <li className="solid-card detail-card">
               <h3 className="detail-h4">How does it connect?</h3>
               <p className="detail-p">
                 MCP for desktop apps like Claude. Secure API keys for web. Setup takes a few minutes.
@@ -232,10 +215,10 @@ export function HomeContent() {
           <div className="solid-card cta-card">
             <h2 className="section-h2 text-center mt-0">Stop repeating yourself.</h2>
             <p className="cta-sub">
-              Start a loop. Let every AI already know how you work.
+              Connect Tallei once. Let every AI already know how you work.
             </p>
             <Link href="/login" className="landing-btn landing-btn-base landing-cta--lime">
-              Start a loop
+              Get started
             </Link>
           </div>
         </div>

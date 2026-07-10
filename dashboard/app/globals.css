@@ -1,7 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "./dashboard/loops/conductor-builder.css";
 
 @custom-variant dark (&:is(.dark *));
 @source "./components";
@@ -270,21 +269,7 @@
   }
 }
 
-/* Collab actor semantic tokens */
 :root {
-  --actor-chatgpt: #10a37f;
-  --actor-chatgpt-bg: #ecfdf5;
-  --actor-chatgpt-border: #bbf7d0;
-  --actor-chatgpt-text: #166534;
-  --actor-claude: #d97757;
-  --actor-claude-bg: #fff7ed;
-  --actor-claude-border: #fdba74;
-  --actor-claude-text: #9a3412;
-  --actor-user: #6b7280;
-  --actor-user-bg: #f8fafc;
-  --actor-user-border: #cbd5e1;
-  --actor-user-text: #334155;
-
   /* Status semantic tokens */
   --status-success-bg: #ecfdf5;
   --status-success-border: #bbf7d0;

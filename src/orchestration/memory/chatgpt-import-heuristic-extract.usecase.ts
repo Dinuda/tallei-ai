@@ -23,7 +23,7 @@ const MEMORY_LINE_PATTERNS: Array<{ type: ExtractedImportMemoryType; pattern: Re
 const USER_CONFIRMED = /\b(sounds good|yes use that|let's go with|looks good|approved)\b/i;
 const ASSISTANT_DURABLE = /\b(architecture|roadmap|spec|positioning|business model|tech stack|system design)\b/i;
 const EMAIL_PASTE = /@\w+\.\w+|\binbox\b|\bgmail\b|\boutlook\b/i;
-const COLLAB_COMMAND = /\bmcp tool\b|\bcollab_\w+\b|\bcontinue task\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+const TASK_COMMAND = /\bmcp tool\b|\bcontinue task\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 const TASK_PROMPT = /\bcreate \d+ (images|photos|videos)\b/i;
 
 function normalizeWhitespace(value: string): string {
@@ -85,7 +85,7 @@ function scoreMemoryLine(text: string): number {
 
 function inclusiveSourceReason(message: { role: "user" | "assistant"; text: string }): string {
   if (EMAIL_PASTE.test(message.text)) return "pasted_email";
-  if (COLLAB_COMMAND.test(message.text)) return "collab_command";
+  if (TASK_COMMAND.test(message.text)) return "task_command";
   if (TASK_PROMPT.test(message.text)) return "task_prompt";
   if (message.role === "assistant") return "assistant_content";
   return "High-signal user message from filtered conversation";

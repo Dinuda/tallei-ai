@@ -1,12 +1,7 @@
 import { config } from "../config/index.js";
-import type { ReasoningEffort } from "../config/load.js";
-import {
-  isLowConductorReasoningEffort,
-  looksLikeHostedOpenAiModel,
-  resolveConductorModelForOpenAi,
-} from "./routing.js";
 import type {
   AppModelPurpose,
+  AppToolChoice,
   GatewayProviderId,
   ModelCapabilities,
   ModelSurface,
@@ -172,6 +167,16 @@ function activeEmbedProvider(): GatewayProviderId {
   return config.embeddingProvider as GatewayProviderId;
 }
 
+function looksLikeHostedOpenAiModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.startsWith("openai/")) return true;
+  return normalized.startsWith("gpt-")
+    || normalized.startsWith("o1")
+    || normalized.startsWith("o3")
+    || normalized.startsWith("o4");
+}
+
 function inferSurface(provider: GatewayProviderId, modelId: string): ModelSurface {
   if (provider === "opencode") return "opencode";
   if (provider === "google") return "google";
@@ -210,79 +215,19 @@ export function resolveModelCapabilities(modelId: string, provider?: GatewayProv
 }
 
 function defaultModelForPurpose(purpose: AppModelPurpose): string {
-  switch (purpose) {
-    case "embed":
-      return activeEmbedProvider() === "google" ? config.googleEmbeddingModel : config.embeddingModel;
-    case "conductor":
-      if (config.llmProvider === "openai") {
-        return resolveConductorModelForOpenAi(config.conductorReasoningEffort, {
-          lowModel: config.conductorLowReasoningModel,
-          highModel: config.conductorModel,
-        });
-      }
-      return config.conductorModel;
-    case "planner":
-      if (config.llmProvider === "opencode") return config.opencodeModel;
-      if (config.llmProvider === "nvidia") return config.nvidiaModel;
-      return config.plannerModel;
-    case "collab-planner":
-      return config.plannerModel;
-    case "chat":
-    default:
-      if (config.llmProvider === "ollama") return config.ollamaModel;
-      if (config.llmProvider === "opencode") return config.opencodeModel;
-      if (config.llmProvider === "nvidia") return config.nvidiaModel;
-      if (config.llmProvider === "google") return config.googleModel;
-      return config.openaiModel;
+  if (purpose === "embed") {
+    return activeEmbedProvider() === "google" ? config.googleEmbeddingModel : config.embeddingModel;
   }
+  if (config.llmProvider === "ollama") return config.ollamaModel;
+  if (config.llmProvider === "opencode") return config.opencodeModel;
+  if (config.llmProvider === "nvidia") return config.nvidiaModel;
+  if (config.llmProvider === "google") return config.googleModel;
+  return config.openaiModel;
 }
 
 function providerForPurpose(purpose: AppModelPurpose): GatewayProviderId {
   if (purpose === "embed") return activeEmbedProvider();
   return activeChatProvider();
-}
-
-function resolveConductorReasoningEffort(): ReasoningEffort | undefined {
-  if (config.conductorReasoningEffort === "none") return undefined;
-  return config.conductorReasoningEffort ?? "medium";
-}
-
-function buildReasoningOptions(
-  purpose: AppModelPurpose,
-  capabilities: ModelCapabilities,
-): ResolvedModelRoute["reasoning"] {
-  const effort: ReasoningEffort | undefined = purpose === "conductor"
-    ? resolveConductorReasoningEffort()
-    : purpose === "planner"
-      ? config.plannerReasoningEffort
-      : undefined;
-  if (!effort) return undefined;
-  return {
-    effort,
-    ...(capabilities.supportsReasoningSummaries && purpose === "conductor"
-      ? { summary: "auto" as const, includeEncryptedContent: true }
-      : {}),
-  };
-}
-
-function buildProviderOptions(
-  capabilities: ModelCapabilities,
-  reasoning?: ResolvedModelRoute["reasoning"],
-): Record<string, unknown> | undefined {
-  if (!reasoning?.effort) return undefined;
-  if (capabilities.provider === "openai" && capabilities.surface === "responses") {
-    return {
-      openai: {
-        reasoningEffort: reasoning.effort,
-        ...(reasoning.summary ? { reasoningSummary: reasoning.summary } : {}),
-        ...(reasoning.includeEncryptedContent ? { include: ["reasoning.encrypted_content"] } : {}),
-      },
-    };
-  }
-  if (capabilities.provider === "openai") {
-    return { openai: { reasoningEffort: reasoning.effort } };
-  }
-  return undefined;
 }
 
 export function resolveModelRoute(input: {
@@ -292,20 +237,29 @@ export function resolveModelRoute(input: {
   const provider = providerForPurpose(input.purpose);
   const modelId = input.modelId?.trim() || defaultModelForPurpose(input.purpose);
   const capabilities = resolveModelCapabilities(modelId, provider);
-  const reasoning = buildReasoningOptions(input.purpose, capabilities);
   return {
     modelId,
     provider,
     capabilities,
-    reasoning,
-    providerOptions: buildProviderOptions(capabilities, reasoning),
   };
 }
 
-export function resolveConductorToolChoice(activeToolCount: number): "auto" | "none" | "required" {
+export function resolveRequiredToolChoice(
+  activeToolCount: number,
+  options?: { nextTool?: string | null; allowedTools?: readonly string[] },
+): AppToolChoice {
   if (activeToolCount === 0) return "none";
+  const nextTool = options?.nextTool?.trim();
+  const canPinNextTool = Boolean(
+    nextTool && (!options?.allowedTools || options.allowedTools.includes(nextTool)),
+  );
   const provider = activeChatProvider();
-  if (provider === "opencode" || provider === "nvidia") return "auto";
+  if (provider === "opencode" || provider === "nvidia") {
+    return "required";
+  }
+  if (canPinNextTool) {
+    return { type: "tool", toolName: nextTool! };
+  }
   return "required";
 }
 
@@ -316,22 +270,17 @@ export function shouldSendReasoning(surface: ModelSurface): boolean {
 export function shouldApplyReasoningTagExtraction(
   provider: GatewayProviderId,
   surface: ModelSurface,
-  purpose: AppModelPurpose,
 ): boolean {
-  if (purpose !== "conductor") return false;
   if (provider === "opencode" || surface === "opencode") return true;
   if (provider === "nvidia") return true;
   return surface === "chat";
 }
 
-export function isLowReasoningEffort(effort: ReasoningEffort | undefined): boolean {
-  return isLowConductorReasoningEffort(effort);
-}
-
 export const modelRegistry = {
   resolveModelRoute,
   resolveModelCapabilities,
-  resolveConductorToolChoice,
+  resolveRequiredToolChoice,
+  resolveConductorToolChoice: resolveRequiredToolChoice,
   shouldSendReasoning,
   shouldApplyReasoningTagExtraction,
 };

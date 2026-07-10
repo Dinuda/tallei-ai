@@ -15,17 +15,11 @@ export type ChatGptActionMethod =
   | "chatgpt/actions/undo_save"
   | "chatgpt/actions/recent_documents"
   | "chatgpt/actions/search_documents"
-  | "chatgpt/actions/recall_document"
-  | "chatgpt/collab/create-task"
-  | "chatgpt/collab/run-turn"
-  | "chatgpt/collab/submit-turn"
-  | "chatgpt/collab/continue"
-  | "chatgpt/collab/tasks";
+  | "chatgpt/actions/recall_document";
 
 export async function logChatGptAction(input: {
   auth: AuthContext | null | undefined;
   method: ChatGptActionMethod;
-  collabTaskId?: string | null;
   metadata?: EventMetadata | null;
   ok: boolean;
   error?: string | null;
@@ -36,16 +30,15 @@ export async function logChatGptAction(input: {
   try {
     await pool.query(
       `INSERT INTO mcp_call_events (
-        tenant_id, user_id, key_id, auth_mode, method, tool_name, collab_task_id, metadata_json, ok, error
+        tenant_id, user_id, key_id, auth_mode, method, tool_name, metadata_json, ok, error
       )
-       VALUES ($1, $2, $3, $4, $5, NULL, $6, $7::jsonb, $8, $9)`,
+       VALUES ($1, $2, $3, $4, $5, NULL, $6::jsonb, $7, $8)`,
       [
         auth.tenantId,
         auth.userId,
         auth.keyId ?? null,
         auth.authMode,
         input.method,
-        input.collabTaskId ?? null,
         JSON.stringify(input.metadata ?? {}),
         input.ok,
         input.error ?? null,

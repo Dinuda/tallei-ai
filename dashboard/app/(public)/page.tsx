@@ -1,24 +1,24 @@
 import type { Metadata } from "next";
-import { HomeContentLoops } from "./home-content-loops";
+import { HomeContent } from "./home-content";
 
 export const metadata: Metadata = {
   title: {
-    absolute: "Tallei — Turn Repeated AI Work Into Loops",
+    absolute: "Tallei — Cross-AI Memory",
   },
   description:
-    "Tallei remembers your scattered AI work, discovers repeated loops, and turns them into approved recurring workflows.",
+    "Tallei remembers your work across ChatGPT, Claude, and Gemini so every AI already knows your context.",
   alternates: {
     canonical: "https://tallei.com",
   },
   openGraph: {
-    title: "Tallei — Turn Repeated AI Work Into Loops",
+    title: "Tallei — Cross-AI Memory",
     description:
-      "Tallei remembers your scattered AI work, discovers repeated loops, and turns them into approved recurring workflows.",
+      "Tallei remembers your work across ChatGPT, Claude, and Gemini so every AI already knows your context.",
     url: "https://tallei.com",
     siteName: "Tallei",
   },
 };
 
 export default function Page() {
-  return <HomeContentLoops />;
+  return <HomeContent />;
 }

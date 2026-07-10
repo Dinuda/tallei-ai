@@ -14,6 +14,7 @@ export type {
   AppResponseFormat,
   AppTool,
   AppToolCall,
+  AppSpecificToolChoice,
   AppToolChoice,
   GatewayProviderId,
   ModelCapabilities,
@@ -28,10 +29,8 @@ export { modelGateway, ModelGateway } from "./gateway.js";
 export {
   coerceChatModelForLocalMode,
   coerceChatModelForOpenAiProvider,
-  isLowConductorReasoningEffort,
   looksLikeHostedOpenAiModel,
   resolveChatModelForCompatibleProvider,
-  resolveConductorModelForOpenAi,
 } from "./routing.js";
 export {
   gatewayStreamingResolver,

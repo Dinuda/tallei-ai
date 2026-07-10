@@ -1,235 +1,178 @@
 # Tallei — Claude Project Guide
 
 ## Overview
-Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemini via:
-- **MCP server** (Node.js/Express backend) — handles memory save/recall via vector search
-- **Next.js dashboard** — UI for managing memories and OAuth connector setup
-- **PostgreSQL + pgvector** — persistent vector store with mem0ai SDK
-- **OpenAI** — embeddings (text-embedding-3-small) and summarization (gpt-gpt-5-nano)
 
-**Primary goal**: Make memory I/O blazingly fast so Claude's MCP tools never block.
+Tallei is a cross-AI ghost memory system that bridges Claude, ChatGPT, and Gemini via:
+
+- **MCP server** (Node.js/Express) — memory save/recall via vector search
+- **Next.js dashboard** — memories, documents, connector setup, billing
+- **PostgreSQL + Qdrant** — persistent store and vector index
+- **Model gateway** (`src/model/`, `src/resilience/`) — chat and embed workloads
+
+**Primary goal:** Make memory I/O blazingly fast so MCP tools never block.
+
+**Removed (July 2026):** Conductor, Loops, Temporal, Composio, collab, workspace KB, loop-miner. See [ADR-014](docs/adr/014-loops-teardown.md), [ADR-013](docs/adr/013-remove-collab-and-developer-workflows.md), and [product scope](docs/product-scope.md).
 
 ---
 
 ## Architecture & Key Files
 
 ### Backend (`src/`)
+
 | Path | Purpose |
 |------|---------|
-| `src/index.ts` | Express server entry point |
-| `src/mcp/server.ts` | MCP tool definitions + OAuth auth; token caching + scope checks |
-| `src/services/memory.ts` | Singleton Memory instance, fire-and-forget saves, recall cache |
-| `src/services/summarizer.ts` | OpenAI gpt-gpt-5-nano summarization (title, key points, decisions) |
-| `src/services/auth.ts` | Google OAuth + session JWT for dashboard auth |
-| `src/routes/*.ts` | HTTP route handlers |
-| `src/db/index.ts` | PostgreSQL connection pool & schema init |
+| `src/index.ts` | Process entry; boots composition root |
+| `src/bootstrap/composition-root.ts` | Sole wiring point for services and transport |
+| `src/transport/http/app.ts` | Express app + route mounts |
+| `src/transport/http/routes/*.ts` | HTTP API handlers |
+| `src/transport/mcp/server.ts` | MCP server + OAuth |
+| `src/transport/mcp/tools/index.ts` | MCP tool handlers |
+| `packages/mcp-tools/defs.ts` | MCP tool JSON schemas (contract-tested) |
+| `src/services/memory.ts` | Memory save/recall facade; fire-and-forget saves |
+| `src/orchestration/memory/` | Save/recall/list use cases |
+| `src/infrastructure/recall/bucket-recall.ts` | Three-bucket recall |
+| `src/infrastructure/db/index.ts` | PostgreSQL pool, schema init |
+| `src/infrastructure/auth/` | JWT, OAuth token verification |
+| `src/model/` | Model registry, routing, providers (`chat` / `embed` only) |
+| `src/resilience/` | Retry, timeout, circuit breaker policies |
+| `src/services/memory-cleanup.ts` | Admin memory cleanup pipeline |
 
 ### Frontend (`dashboard/`)
+
 | Path | Purpose |
 |------|---------|
-| `dashboard/app/globals.css` | **NEW THEME**: light greenish-yellow, lime accent (#7eb71b), DM Sans + Plus Jakarta Sans fonts |
-| `dashboard/app/layout.tsx` | Root layout (with Providers, TopNav from linter) |
-| `dashboard/app/page.tsx` | Landing page — hero, feature grid, decorative radial blobs |
-| `dashboard/app/(auth)/login/page.tsx` | Google OAuth login card |
-| `dashboard/app/dashboard/setup/page.tsx` | **Step-by-step connector wizard** — 4-step flow with progress dots, auto-advance on copy |
-| `dashboard/app/dashboard/page.tsx` | Memory feed with search, platform color badges, shimmer skeleton |
-| `dashboard/app/dashboard/keys/page.tsx` | API key deprecation notice (OAuth migration) |
-| `dashboard/app/dashboard/layout.tsx` | Sidebar nav + topbar, uses next-auth signOut |
-| `dashboard/lib/api.ts` | API URL builder, `mcpServerUrl()` helper |
+| `dashboard/app/globals.css` | Theme CSS variables (lime accent `#7eb71b`) |
+| `dashboard/app/(public)/page.tsx` | Landing page |
+| `dashboard/app/dashboard/page.tsx` | Memory feed |
+| `dashboard/app/dashboard/setup/page.tsx` | MCP connector wizard |
+| `dashboard/app/dashboard/documents/page.tsx` | Document library |
+| `dashboard/app/dashboard/memory-cleanup/page.tsx` | Cleanup admin UI |
+| `dashboard/app/dashboard/mcp-events/page.tsx` | MCP activity log |
+| `dashboard/app/dashboard/layout.tsx` | Sidebar nav + topbar |
+| `dashboard/src/components/ai-elements/` | Reusable chat UI kit (kept for future rebuild) |
+| `dashboard/src/components/ui/` | shadcn-style primitives |
+| `dashboard/next.config.ts` | API rewrites (local vs backend proxy) |
 
 ---
 
-## Core Performance Optimizations (Recent)
+## Model Gateway
+
+- Purposes: `chat`, `embed` only (conductor/planner/loop-miner purposes removed)
+- Config: `TALLEI_LLM__*` and `TALLEI_EMBED__*` in `.env.example`
+- Registry: `src/model/registry.ts`, routing: `src/model/routing.ts`
+- Resilience wraps provider calls via `src/resilience/policies.ts`
+
+## Packages
+
+Workspace packages: `@tallei/mcp-tools` only. Build with `npm run build:packages`.
+
+---
+
+## Core Performance Optimizations
 
 ### Memory Service (`src/services/memory.ts`)
-- **Singleton Memory instance**: Reused across all requests; was creating new instances (re-initializing connections) on every call
-- **Fire-and-forget `saveMemory()`**: Returns immediately with stub; heavy work (summarize → embed → store) runs in background
-  - **Result**: `save_memory` MCP tool now ~10ms latency (was 2–4s)
-- **Recall result cache (60s TTL)**: Vector search results cached per `(userId, query, limit)`; invalidates on new saves
-  - **Result**: `recall_memories` ~5ms on warm cache (was 300–500ms on every call)
 
-### MCP Server (`src/mcp/server.ts`)
-- **OAuth token cache (10min TTL)**: `oauthVerifier.verifyAccessToken()` results cached per token
-  - **Result**: Avoids repeated crypto/DB verification on every request
+- **Fire-and-forget `saveMemory()`** — returns immediately; summarize → embed → store runs in background (~10–30ms p50)
+- **Recall caches** — in-process LRU (10 min) + Redis exact match (120s) before bucket recall
 
-**When adding new MCP tools**: Always consider caching if the operation hits OpenAI, a vector DB, or repeats frequently within a short window.
+### MCP Server (`src/transport/mcp/server.ts`)
+
+- **OAuth token cache (10 min TTL)** — avoids repeated crypto/DB verification
+
+**When adding MCP tools:** cache anything that hits OpenAI, Qdrant, or repeats within a short window.
 
 ---
 
-## Design System (New Theme)
+## Design System
 
-### Colors
-- **Background**: `#f8fdf2` (off-white, very pale yellow-green)
-- **Surface/Cards**: `#ffffff` (pure white)
-- **Accent**: `#7eb71b` (lime green) — used for primary buttons, active states, highlights
-- **Text primary**: `#182506` (dark green)
-- **Text secondary**: `#3d5c18` (muted green)
-- **Text muted**: `#7a9a4a` (lighter green)
-- **Border light**: `#e4f5c6` (very pale lime)
-- **Border**: `#cce89e` (pale lime)
-
-### Fonts
-- **Display/Headlines** (`h1`–`h3`): `DM Sans` 700–800 wt
-- **Body/UI**: `Plus Jakarta Sans` 400–600 wt
-
-### Common CSS Variables
-```css
---bg: #f8fdf2
---surface: #ffffff
---accent: #7eb71b
---accent-hover: #6aa015
---accent-light: #e6f5c8
---accent-dim: #cde99a
---text: #182506
---text-2: #3d5c18
---text-muted: #7a9a4a
---border: #cce89e
---border-light: #e4f5c6
---radius-md: 14px
---radius-lg: 20px
-```
-
-### Card/Button patterns
-- Cards: `background: var(--surface)`, `border: 1px solid var(--border-light)`, `box-shadow: var(--shadow-sm)`, rounded `var(--radius-lg)`
-- Primary buttons: `background: var(--accent)`, white text, shadow with accent glow
-- On hover: buttons lift (`translateY(-1px)`), cards lift slightly, shadows deepen
-- Form inputs: `background: var(--surface)`, `border: var(--border)`, focus ring is `3px rgba(126,183,27,.18)`
+See `dashboard/app/globals.css` for CSS variables (`--bg`, `--accent`, `--surface`, etc.). Display font: DM Sans; body: Plus Jakarta Sans.
 
 ---
 
 ## Common Tasks
 
 ### Adding a new MCP tool
-1. Define the tool in `src/mcp/server.ts` in `buildMcpServer()`
-2. Implement the handler in `src/services/` (or inline if very simple)
-3. **Consider caching**: If the handler hits OpenAI, pgvector, or repeats frequently, cache results
-4. Return results as `{ content: [{ type: "text", text: "..." }] }` or error
+
+1. Add schema to `packages/mcp-tools/defs.ts`
+2. Register handler in `src/transport/mcp/tools/index.ts`
+3. Consider caching for expensive I/O
+4. Update contract snapshot: `UPDATE_CONTRACT_SNAPSHOTS=true npm run test:contract`
 
 ### Adding a new API route
-1. Create a new route file in `src/routes/` (e.g., `src/routes/custom.ts`)
-2. Export a Router instance
-3. Wire it into `src/index.ts` with `app.use("/api/custom", customRouter)`
-4. For auth: use `authMiddleware` + `requireScopes([...])` in route handlers
 
-### Updating the dashboard theme
-- Edit `dashboard/app/globals.css` CSS variables at the top
-- All color, radius, shadow, and animation settings flow through variables
-- Fonts are imported at the top; add new Google Fonts imports there
+1. Create a route file under `src/transport/http/routes/`
+2. Mount in `src/transport/http/app.ts`
+3. Use existing auth middleware + scope checks
+4. Update contract tests if the route is part of the frozen HTTP surface
 
 ### Deploying the MCP server
-- The MCP server is hosted at `process.env.NEXT_PUBLIC_API_BASE_URL` + `/mcp`
-- Must be **publicly reachable over HTTPS** for Claude.ai connectors
-- Users copy the MCP URL from `/dashboard/setup` and paste it into Claude settings
+
+- Public URL: `TALLEI_HTTP__MCP_URL` or `NEXT_PUBLIC_API_BASE_URL` + `/mcp`
+- Must be HTTPS for Claude.ai connectors
+- Users copy the URL from `/dashboard/setup`
 
 ---
 
-## Key Constraints & Conventions
+## Key Constraints
 
-### Turn Protocol (Critical)
+### Turn Protocol
 
-**First turn:** Call `recall_memories` reflexively to load previous context, preferences, and memories. This is the ONLY reflexive recall.
+**First turn:** Call `recall_memories` reflexively. **Subsequent turns:** only when the user references prior context or the task requires it.
 
-**Subsequent turns:** Do NOT call `recall_memories` reflexively. Only call when the user references prior sessions or the task requires past context.
+### Save & Checkpoint
 
-### Save & Checkpoint Protocol
-
-- **Conversation checkpoints:** When user says "save"/"checkpoint", or you produced substantial output (>800 chars) or structured content, save a `document-note` titled "Conversation checkpoint" with the full transcript.
-- **Auto-save:** For new structured content (files, lists, tables), call `remember(kind="document-note")` without asking. Append footer: `📎 Auto-saved as @doc:<ref> · reply **undo** to delete`
-- **Undo:** If user replies "undo"/"del" after footer, call `undo_save` with the ref.
-
-### Collab Tasks Protocol (Critical)
-
-**Existing task:** If user says `continue/resume/proceed task <uuid>` or includes a task UUID, call `collab_check_turn` first. Do NOT call `recall_memories` for collab state.
-
-**New task:** Before creating:
-1. **Role Approval Gate:** Propose roles, get explicit "yes" before proceeding.
-2. **Iteration Roadmap:** After approval, show numbered turns + deliverables + done criteria. Include constraint: text/PDF/code only, no PPTX or images.
-3. Then create the task.
-
-**Visible Handoffs:** After every output, never say just "continue task". State: (a) who is next, (b) exactly what they will do, (c) continue command. After every `collab_take_turn`, show the FULL submitted output visibly in Claude's chat first, then brief summary, then handoff. Never replace the submitted output with a summary-only bullet list.
+- Checkpoints on "save"/"checkpoint" or substantial output (>800 chars)
+- Auto-save structured content as `document-note` with undo footer
 
 ### Don't Break Memory Performance
-- The fire-and-forget pattern in `saveMemory()` is intentional: never await the full pipeline in the MCP handler
-- If adding new summarization or preprocessing steps, keep them in the background worker, not the foreground response
-- Test MCP tool latency with `curl` to ensure responses are sub-100ms
 
-### Naming conventions
-- **MCP tool names**: snake_case (e.g., `save_memory`, `recall_memories`)
-- **API routes**: kebab-case paths (e.g., `/api/memories`, `/api/api-keys`)
-- **React components**: PascalCase
-- **CSS class names**: kebab-case (e.g., `.step-card`, `.memory-feed`)
+Never await the full save pipeline in the MCP handler. Test with `curl` — target sub-100ms foreground latency.
 
-### Git & commits
-- Use conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `perf:`
-- Large features go on feature branches; merge via PR
-- **Important**: After merging UI changes, run `npx tsc --noEmit` in `dashboard/` to catch TS errors
+### Naming
 
-### Linting & formatting
-- Dashboard uses Next.js defaults (no explicit ESLint config shown, but assume standard rules apply)
-- Backend has no linting configured yet — consider adding if style becomes inconsistent
+- MCP tools: `snake_case`
+- API routes: kebab-case
+- React components: PascalCase
 
 ---
 
 ## Environment Variables
 
-### Backend (`.env`)
-```
-DATABASE_URL=postgresql://...
-OPENAI_API_KEY=sk-...
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/google/callback
-JWT_SECRET=<random-secret>
-```
-
-### Frontend (`.env.local` or via build)
-```
-NEXT_PUBLIC_API_BASE_URL=http://localhost:3000  # or production URL
-```
+See [`.env.example`](.env.example) for canonical `TALLEI_*` keys. Legacy `DATABASE_URL`, `OPENAI_API_KEY`, etc. are mapped at boot via `src/config/env-aliases.ts`.
 
 ---
 
 ## Testing & Debugging
 
-### MCP tools
-Test directly via curl:
 ```bash
+# MCP tool (needs OAuth bearer token)
 curl -X POST http://localhost:3000/mcp \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <oauth_access_token>" \
+  -H "Authorization: Bearer <token>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"recall_memories","arguments":{"query":"user preferences","limit":5}}}'
-```
 
-### Dashboard
-```bash
-cd dashboard && npm run dev
-# http://localhost:3000
-```
+# Dashboard
+cd dashboard && npm run dev   # http://localhost:3001
 
-### Memory operations
-Look at `src/services/memory.ts` cache validity:
-- If recalls feel slow: check if cache is expiring too quickly (60s TTL) or if recalls are cache-missing frequently
-- If saves are slow: the background worker may be stalled; check `console.error` logs for OpenAI/pgvector failures
+# Full check
+npm run build && npm run test:unit && cd dashboard && npx tsc --noEmit
+```
 
 ---
 
-## Loop Engine (spec-driven + Temporal)
+## Documentation
 
-Loops are saved as `loop_spec_v1` runnable specs from **Conductor** (`/dashboard/loops/:id/conductor`). See [docs/conductor.md](docs/conductor.md). Headless execution and cron scheduling run through **self-hosted Temporal** (`src/temporal/`) when `TALLEI_TEMPORAL__ENABLED=true`:
-
-- `loopRunWorkflow` activity wraps `executeSpecRunHeadless`
-- `upsertLoopSchedule` registers Temporal Schedules on loop activation
-- Local dev: `docker compose --profile temporal up -d` + `npm run temporal:worker`
-- Developer dashboard: **DEVELOPER → Workflows** (`/dashboard/developer/workflows`)
-
-The legacy graph runtime (`loop_engine_v3`, `runtime.ts`) has been removed. Interactive run chat still streams directly via `streamSpecRunChat` (not Temporal).
+- [setup.md](setup.md) — local dev
+- [docs/architecture.md](docs/architecture.md) — canonical architecture
+- [docs/product-scope.md](docs/product-scope.md) — current product boundary
+- [docs/README.md](docs/README.md) — doc index
 
 ---
 
 ## Future Improvements
-- [ ] Add background job queue (Bull, Inngest) for more reliable memory persistence instead of fire-and-forget
-- [ ] Implement incremental recall: stream partial results while vector search completes
-- [ ] Add memory editing UI (delete only exists now)
-- [ ] Support for custom summarization prompts per user
-- [ ] Rate limiting on MCP tools to prevent abuse
+
+- [ ] Background job queue for more reliable memory persistence
+- [ ] Incremental recall streaming
+- [ ] Memory editing UI beyond delete
+- [ ] Rate limiting on MCP tools
 - [ ] Audit logging for memory access

@@ -164,16 +164,6 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       policy: "onboarding_events_tenant_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id)",
     },
-    {
-      table: "collab_tasks",
-      policy: "collab_tasks_tenant_user_policy",
-      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
-    },
-    {
-      table: "orchestration_sessions",
-      policy: "orchestration_sessions_tenant_user_policy",
-      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
-    },
   ];
 
   for (const entry of policyStatements) {
@@ -237,6 +227,20 @@ const REMOVED_AUTOMATION_TABLES = [
   "episodes",
   "patterns",
   "loop_miner_runs",
+  "loop_build_events",
+  "loop_trigger_subscriptions",
+  "workspace_trigger_channels",
+  "webhook_event_deliveries",
+  "loop_run_steps",
+  "loop_runs",
+  "approval_requests",
+  "compiled_plans",
+  "loops",
+  "connector_connections",
+  "workspace_memory_records",
+  "user_workspace_preferences",
+  "workspace_memberships",
+  "loop_workspaces",
   "learned_tool_use_cases",
   "learned_tool_specs",
   "connector_action_events",
@@ -261,11 +265,23 @@ async function dropRemovedAutomationTables(client: DbClient): Promise<void> {
   await client.query(`
     DROP INDEX IF EXISTS idx_documents_workspace;
     DROP INDEX IF EXISTS idx_document_lots_workspace;
-    DROP INDEX IF EXISTS idx_collab_tasks_workspace;
 
     ALTER TABLE documents DROP COLUMN IF EXISTS workspace_id;
     ALTER TABLE document_lots DROP COLUMN IF EXISTS workspace_id;
-    ALTER TABLE collab_tasks DROP COLUMN IF EXISTS workspace_id;
+  `);
+}
+
+async function dropCollabArtifacts(client: DbClient): Promise<void> {
+  await client.query(`DELETE FROM memory_records WHERE memory_type = 'collab'`);
+
+  await client.query(`
+    ALTER TABLE mcp_call_events DROP CONSTRAINT IF EXISTS mcp_call_events_collab_task_id_fkey;
+    DROP INDEX IF EXISTS idx_mcp_call_events_collab_task_id;
+    ALTER TABLE mcp_call_events DROP COLUMN IF EXISTS collab_task_id;
+
+    DROP TABLE IF EXISTS orchestration_sessions CASCADE;
+    DROP TABLE IF EXISTS user_task_preferences CASCADE;
+    DROP TABLE IF EXISTS collab_tasks CASCADE;
   `);
 }
 
@@ -282,6 +298,7 @@ export async function initDb() {
     await configureMigrationSession(client);
     migrationSessionConfigured = true;
     await dropRemovedAutomationTables(client);
+    await dropCollabArtifacts(client);
     await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 
     await client.query(`
@@ -317,17 +334,6 @@ export async function initDb() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name TEXT NOT NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS user_task_preferences (
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        grill_me_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (tenant_id, user_id)
       );
     `);
 
@@ -846,7 +852,6 @@ export async function initDb() {
         auth_mode TEXT,
         method TEXT NOT NULL,
         tool_name TEXT,
-        collab_task_id UUID,
         metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         ok BOOLEAN NOT NULL DEFAULT true,
         error TEXT,
@@ -856,7 +861,6 @@ export async function initDb() {
       ALTER TABLE mcp_call_events
       ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
       ADD COLUMN IF NOT EXISTS key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS collab_task_id UUID,
       ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
       CREATE INDEX IF NOT EXISTS idx_mcp_call_events_created_at
@@ -867,8 +871,6 @@ export async function initDb() {
         ON mcp_call_events(tenant_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mcp_call_events_user_id
         ON mcp_call_events(user_id, created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_mcp_call_events_collab_task_id
-        ON mcp_call_events(collab_task_id, created_at DESC);
     `);
 
     await client.query(`
@@ -1029,72 +1031,6 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_events_session_id ON claude_onboarding_events(session_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_claude_onboarding_events_tenant_id ON claude_onboarding_events(tenant_id, created_at DESC);
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS collab_tasks (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        title TEXT NOT NULL,
-        brief TEXT,
-        state TEXT NOT NULL CHECK (state IN ('CREATIVE','TECHNICAL','DONE','ERROR')),
-        last_actor TEXT CHECK (last_actor IN ('chatgpt','claude','user')),
-        iteration INT NOT NULL DEFAULT 0,
-        max_iterations INT NOT NULL DEFAULT 4,
-        context JSONB NOT NULL DEFAULT '{}'::jsonb,
-        transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
-        error_message TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_collab_tasks_owner
-        ON collab_tasks(tenant_id, user_id, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_collab_tasks_active
-        ON collab_tasks(tenant_id, user_id, state)
-        WHERE state IN ('CREATIVE','TECHNICAL');
-
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1
-          FROM pg_constraint
-          WHERE conname = 'mcp_call_events_collab_task_id_fkey'
-        ) THEN
-          ALTER TABLE mcp_call_events
-          ADD CONSTRAINT mcp_call_events_collab_task_id_fkey
-          FOREIGN KEY (collab_task_id) REFERENCES collab_tasks(id) ON DELETE SET NULL;
-        END IF;
-      END $$;
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS orchestration_sessions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        goal TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('DRAFT','INTERVIEWING','PLAN_READY','RUNNING','DONE','ABORTED')),
-        transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
-        plan JSONB,
-        collab_task_id UUID REFERENCES collab_tasks(id) ON DELETE SET NULL,
-        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-        error_message TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_owner
-        ON orchestration_sessions(tenant_id, user_id, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_active
-        ON orchestration_sessions(tenant_id, user_id, status)
-        WHERE status IN ('INTERVIEWING','PLAN_READY','RUNNING');
-    `);
-
-    await client.query(`
-      ALTER TABLE orchestration_sessions
-      ADD COLUMN IF NOT EXISTS collab_task_id UUID REFERENCES collab_tasks(id) ON DELETE SET NULL;
     `);
 
     await client.query(`
@@ -1462,9 +1398,6 @@ export async function initDb() {
       ALTER TABLE api_keys
         DROP COLUMN IF EXISTS pepper_version;
     `);
-
-    const { ensureLoopEngineSchema } = await import("./loop-engine-schema.js");
-    await ensureLoopEngineSchema(client);
 
     await applySupabaseRlsPolicies(client);
 
