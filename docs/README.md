@@ -6,7 +6,10 @@ Start here to understand Tallei after the memory-core refactor.
 
 - **[Product Scope](./product-scope.md)** — what ships today vs what was removed
 - **[Technical Architecture](./architecture.md)** — layered backend, MCP save/recall flows, model gateway, frozen contracts
+- **[Tallei Work Architecture](./tallei-work-architecture.md)** — Stage 0 contract for the Work agent feature (canonical)
+- **[ChatGPT-like Work research](./chatgpt-work-architecture.md)** — public-behavior research note (non-canonical)
 - **[Current Memory Retrieval](./memory-retrieval-current.md)** — `list_memories` vs `recall_memories`, bucket recall tuning
+- **[Archived: Conductor + Loops](./archived/conductor-loops-architecture.md)** — pre-July 2026 automation stack (Conductor UI, prompts, Temporal, Composio, Loop Miner)
 
 ## Runtime Flows
 
@@ -33,6 +36,7 @@ Start here to understand Tallei after the memory-core refactor.
 | [013](./adr/013-remove-collab-and-developer-workflows.md) | Remove collab and developer workflows |
 | [014](./adr/014-loops-teardown.md) | Conductor / Loops teardown |
 | [015](./adr/015-execution-engine-boundary.md) | Execution engine boundary |
+| [016](./adr/016-work-execution-engine.md) | Work execution engine (pg-boss) |
 
 ## Deployment & Operations
 

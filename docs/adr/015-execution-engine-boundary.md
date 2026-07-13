@@ -1,7 +1,8 @@
 # ADR-015: Execution Engine Boundary
 
-**Status:** Accepted  
-**Date:** 2026-07-10
+**Status:** Accepted (partially superseded)  
+**Date:** 2026-07-10  
+**Update:** The “execution engine TBD” portion is superseded by [ADR-016](016-work-execution-engine.md) for Tallei Work. Control-plane ownership in this ADR remains in force.
 
 ## Context
 
