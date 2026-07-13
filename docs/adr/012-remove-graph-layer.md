@@ -46,7 +46,7 @@ The graph layer was solving a problem the model itself handles, at significant c
 
 ### Specific problems with the graph layer
 
-**1. Cost per save.** Every memory triggered an LLM call (`gpt-4o-mini`) to extract entities and relationships. At scale this is a meaningful per-save cost multiplier with no latency benefit (fire-and-forget means users don't feel it, but the bill does).
+**1. Cost per save.** Every memory triggered an LLM call (`gpt-gpt-5-nano`) to extract entities and relationships. At scale this is a meaningful per-save cost multiplier with no latency benefit (fire-and-forget means users don't feel it, but the bill does).
 
 **2. Extraction quality is inconsistent.** LLM entity extraction produces different canonical labels for the same concept across saves ("Next.js", "NextJS", "Next JS"). Deduplication requires fuzzy matching which adds complexity without reliability guarantees.
 

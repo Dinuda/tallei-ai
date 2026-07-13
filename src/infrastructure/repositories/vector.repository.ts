@@ -116,6 +116,7 @@ async function ensureCollection(): Promise<void> {
     const payloadIndexes: Array<{ field_name: string; field_schema: "keyword" | "datetime" }> = [
       { field_name: "tenant_id", field_schema: "keyword" },
       { field_name: "user_id", field_schema: "keyword" },
+      { field_name: "workspace_id", field_schema: "keyword" },
       { field_name: "memory_id", field_schema: "keyword" },
       { field_name: "platform", field_schema: "keyword" },
       { field_name: "created_at", field_schema: "datetime" },
@@ -266,5 +267,75 @@ export class VectorRepository {
         ],
       },
     });
+  }
+
+  async upsertWorkspaceMemoryVector(input: {
+    auth: AuthContext;
+    workspaceId: string;
+    memoryId: string;
+    pointId?: string;
+    vector: number[];
+    source: string;
+    createdAt: string;
+  }): Promise<{ pointId: string }> {
+    await ensureCollection();
+    const client = getQdrantClient();
+    const pointId = input.pointId ?? input.memoryId ?? randomUUID();
+
+    await client.upsert(config.qdrantCollectionName, {
+      wait: false,
+      points: [
+        {
+          id: pointId,
+          vector: input.vector,
+          payload: {
+            tenant_id: input.auth.tenantId,
+            workspace_id: input.workspaceId,
+            memory_id: input.memoryId,
+            source: input.source,
+            created_at: input.createdAt,
+          },
+        },
+      ],
+    });
+
+    return { pointId };
+  }
+
+  async searchWorkspaceVectors(
+    auth: AuthContext,
+    workspaceId: string,
+    queryVector: number[],
+    limit: number,
+    source?: string,
+  ): Promise<VectorSearchResult[]> {
+    await ensureCollection();
+    const client = getQdrantClient();
+    const must: Array<Record<string, unknown>> = [
+      { key: "tenant_id", match: { value: auth.tenantId } },
+      { key: "workspace_id", match: { value: workspaceId } },
+    ];
+    if (source) must.push({ key: "source", match: { value: source } });
+
+    const points = await client.search(config.qdrantCollectionName, {
+      vector: queryVector,
+      limit,
+      filter: { must },
+      with_payload: ["memory_id"],
+      with_vector: false,
+    });
+
+    return points
+      .map((point) => {
+        const payload = (point.payload ?? {}) as Record<string, unknown>;
+        const memoryId = typeof payload.memory_id === "string" ? payload.memory_id : "";
+        const pointId = typeof point.id === "string" ? point.id : String(point.id);
+        return {
+          pointId,
+          memoryId,
+          score: typeof point.score === "number" ? point.score : 0,
+        };
+      })
+      .filter((point) => point.memoryId.length > 0);
   }
 }

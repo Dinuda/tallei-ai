@@ -21,7 +21,7 @@ import { MemoryRepository, type MemoryRecordRow } from "../repositories/memory.r
 import { VectorRepository } from "../repositories/vector.repository.js";
 import { config } from "../../config/index.js";
 import type { MemoryType } from "../../orchestration/memory/memory-types.js";
-import { activitySignal, confidenceTier } from "./scoring-utils.js";
+import { activitySignal, confidenceTier, freshnessSignal } from "./scoring-utils.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -483,7 +483,8 @@ export async function hybridRecall(
     const score = Number((
       rrfScore *
       memoryDecay(doc.row.memory_type, doc.row.created_at) *
-      activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null)
+      activitySignal(doc.row.reference_count ?? 1, doc.row.last_referenced_at ?? null) *
+      freshnessSignal(doc.row.created_at)
     ).toFixed(6));
 
     return [{
@@ -513,6 +514,12 @@ export async function hybridRecall(
         category: doc.row.category,
         is_pinned: doc.row.is_pinned,
         reference_count: doc.row.reference_count,
+        tier: doc.row.tier,
+        segment: doc.row.segment,
+        importance: Number(doc.row.importance),
+        decayRate: Number(doc.row.decay_rate),
+        accessCount: doc.row.access_count,
+        lifecycle: doc.row.lifecycle,
         ...(config.nodeEnv === "production" ? {} : { _debug: { why_included: "pinned" } }),
       },
     }))
@@ -536,6 +543,12 @@ export async function hybridRecall(
           category: candidate.row.category,
           is_pinned: candidate.row.is_pinned,
           reference_count: candidate.row.reference_count,
+          tier: candidate.row.tier,
+          segment: candidate.row.segment,
+          importance: Number(candidate.row.importance),
+          decayRate: Number(candidate.row.decay_rate),
+          accessCount: candidate.row.access_count,
+          lifecycle: candidate.row.lifecycle,
           similarity_signal: Number(candidate.similaritySignal.toFixed(4)),
           ...(config.nodeEnv === "production" ? {} : { _debug: { why_included: candidate.reason } }),
         },
@@ -563,6 +576,12 @@ export async function hybridRecall(
         category: doc.row.category,
         is_pinned: doc.row.is_pinned,
         reference_count: doc.row.reference_count,
+        tier: doc.row.tier,
+        segment: doc.row.segment,
+        importance: Number(doc.row.importance),
+        decayRate: Number(doc.row.decay_rate),
+        accessCount: doc.row.access_count,
+        lifecycle: doc.row.lifecycle,
       },
     }));
     timingsMs.total_ms = Date.now() - startedAt;

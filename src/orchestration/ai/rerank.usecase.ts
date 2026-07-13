@@ -12,7 +12,7 @@
  *   can tell that asking about food preferences is unrelated to coding preferences.
  */
 
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 
 export interface RerankCandidate {
   id: string;
@@ -74,8 +74,9 @@ export async function ragSearchMemories(
 
   let raw: string;
   try {
-    const response = await aiProviderRegistry.chat({
-      model: aiProviderRegistry.chatModelName(),
+    const response = await modelGateway.chat({
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       messages: [
         { role: "system", content: RAG_SYSTEM },
         { role: "user", content: userMessage },
@@ -83,7 +84,7 @@ export async function ragSearchMemories(
       temperature: 0,
       maxTokens: candidates.length * 4 + 16,
     });
-    raw = response.text.trim() || "[]";
+    raw = response.text?.trim() || "[]";
   } catch (error) {
     console.warn("[rag] LLM call failed", error);
     return [];
@@ -122,8 +123,9 @@ export async function rerankMemories(
 
   let raw: string;
   try {
-    const response = await aiProviderRegistry.chat({
-      model: aiProviderRegistry.chatModelName(),
+    const response = await modelGateway.chat({
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       messages: [
         { role: "system", content: RERANKER_SYSTEM },
         { role: "user", content: userMessage },
@@ -131,7 +133,7 @@ export async function rerankMemories(
       temperature: 0,
       maxTokens: 64,
     });
-    raw = response.text.trim() || "[]";
+    raw = response.text?.trim() || "[]";
   } catch (error) {
     // Reranker is best-effort — fall back to original ordering on failure.
     console.warn("[reranker] LLM call failed, skipping rerank", error);

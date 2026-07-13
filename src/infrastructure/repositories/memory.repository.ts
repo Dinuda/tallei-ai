@@ -14,6 +14,12 @@ export interface MemoryRecordRow {
   category: string | null;
   is_pinned: boolean;
   reference_count: number;
+  tier: string;
+  segment: string | null;
+  importance: string | number;
+  decay_rate: string | number;
+  access_count: number;
+  lifecycle: string;
   last_referenced_at: string | null;
   superseded_by: string | null;
   created_at: string;
@@ -31,6 +37,12 @@ interface CreateMemoryRecordInput {
   category?: string | null;
   isPinned?: boolean;
   referenceCount?: number;
+  tier?: string;
+  segment?: string | null;
+  importance?: number;
+  decayRate?: number;
+  accessCount?: number;
+  lifecycle?: string;
   lastReferencedAt?: string | null;
 }
 
@@ -82,8 +94,56 @@ export class MemoryRepository {
   async create(auth: AuthContext, input: CreateMemoryRecordInput): Promise<void> {
     await pool.query(
       `INSERT INTO memory_records
-       (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id, memory_type, category, is_pinned, reference_count, last_referenced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)`,
+       (id, tenant_id, user_id, content_ciphertext, content_hash, platform, summary_json, qdrant_point_id, memory_type, category, is_pinned, reference_count, tier, segment, importance, decay_rate, access_count, lifecycle, last_referenced_at)
+       VALUES (
+         $1::uuid,
+         $2::uuid,
+         $3::uuid,
+         $4::text,
+         $5::text,
+         $6::text,
+         $7::jsonb,
+         $8::text,
+         $9::text,
+         $10::text,
+         $11::boolean,
+         $12::integer,
+         COALESCE(
+           $13::text,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 'permanent'
+             WHEN $9::text IN ('event', 'note') THEN 'short_term'
+             ELSE 'long_term'
+           END
+         ),
+         COALESCE($14::text, $10::text, $9::text),
+         COALESCE(
+           $15::numeric,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 0.9500
+             WHEN $9::text IN ('decision', 'checkpoint') THEN 0.7500
+             WHEN $9::text IN ('event', 'note') THEN 0.3500
+             ELSE 0.6000
+           END
+         ),
+         COALESCE(
+           $16::numeric,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 0.000000
+             WHEN $9::text IN ('event', 'note') THEN 0.080000
+             ELSE 0.010000
+           END
+         ),
+         COALESCE($17::integer, $12::integer),
+         COALESCE(
+           $18::text,
+           CASE
+             WHEN $11::boolean = TRUE OR $9::text = 'preference' THEN 'protected'
+             ELSE 'active'
+           END
+         ),
+         $19::timestamptz
+       )`,
       [
         input.id,
         auth.tenantId,
@@ -97,6 +157,12 @@ export class MemoryRepository {
         input.category ?? null,
         input.isPinned ?? false,
         input.referenceCount ?? 1,
+        input.tier ?? null,
+        input.segment ?? null,
+        input.importance ?? null,
+        input.decayRate ?? null,
+        input.accessCount ?? input.referenceCount ?? 1,
+        input.lifecycle ?? null,
         input.lastReferencedAt ?? null,
       ]
     );
@@ -153,6 +219,7 @@ export class MemoryRepository {
     const result = await pool.query(
       `UPDATE memory_records
        SET reference_count = reference_count + GREATEST($1, 1),
+           access_count = access_count + GREATEST($1, 1),
            last_referenced_at = $2::timestamptz
        WHERE id = $3
          AND tenant_id = $4
@@ -192,7 +259,9 @@ export class MemoryRepository {
     let sql = `SELECT *
        FROM memory_records
        WHERE ${clauses.join("\n         AND ")}
-       ORDER BY is_pinned DESC, last_referenced_at DESC NULLS LAST, created_at DESC`;
+       ORDER BY is_pinned DESC,
+                GREATEST(COALESCE(last_referenced_at, created_at), created_at) DESC,
+                created_at DESC`;
 
     if (typeof limit === "number") {
       values.push(limit);
@@ -243,6 +312,26 @@ export class MemoryRepository {
       types: ["preference"],
       includeSuperseded: false,
     });
+  }
+
+  /** Candidate profile memories. Retention tier and pinning do not imply user-profile relevance. */
+  async listWorkflowProfileMemories(auth: AuthContext, limit = 32): Promise<MemoryRecordRow[]> {
+    const result = await pool.query<MemoryRecordRow>(
+      `SELECT *
+       FROM memory_records
+       WHERE tenant_id = $1
+         AND user_id = $2
+         AND deleted_at IS NULL
+         AND superseded_by IS NULL
+         AND memory_type = 'preference'
+       ORDER BY
+         reference_count DESC,
+         importance DESC,
+         created_at DESC
+       LIMIT $3`,
+      [auth.tenantId, auth.userId, limit],
+    );
+    return result.rows;
   }
 
   async markSupersededPreferences(auth: AuthContext, input: {

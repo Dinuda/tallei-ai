@@ -1,0 +1,18 @@
+flowchart TD
+  A["stashDocument(content, auth, opts)"] --> B["assert size and non-blank content"]
+  B --> C["generate documentId and refHandle"]
+  C --> D["insert documents row"]
+  D --> E["maybeAutoCreateLot()"]
+  E --> F["runBackgroundIndexing(...) fire-and-forget"]
+
+  F --> G["summarizeConversation() or fallbackSummary()"]
+  G --> H["embeddingInputFromSummary()"]
+  H --> I["embedText()"]
+  I --> J["vectorRepository.upsertMemoryVector()"]
+  J --> K["update documents row: summary_json + qdrant_point_id + status=ready"]
+  K --> L["documentSearchRepository.indexDocument()"]
+  L --> M["markVertexIndexState(ok=true)"]
+  L --> N["markVertexIndexState(ok=false) on error"]
+
+  F --> O["search-optimized content chunking"]
+  O --> P["Discovery Engine document POST/PATCH"]

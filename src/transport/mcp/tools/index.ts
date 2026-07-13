@@ -2,7 +2,6 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import type { AuthContext } from "../../../domain/auth/index.js";
-import { hasRequiredScopes } from "../../../infrastructure/auth/oauth-tokens.js";
 import {
   saveMemory,
   savePreference,
@@ -18,32 +17,8 @@ import {
   DocumentSizeExceededError,
 } from "../../../services/documents.js";
 import { PlanRequiredError } from "../../../shared/errors/index.js";
-import {
-  attachUploadedFilesToTaskContext,
-  buildFirstTurnContinueCommand,
-  buildTurnFallbackContext,
-  CollabAttachmentIngestError,
-  claimTurn,
-  compactCollabTransportPayload,
-  CollabConflictError,
-  createTask as createCollabTask,
-  describeNextActorWork,
-  getTask as getCollabTask,
-  hydrateTaskWithRecentPreparedUploads,
-  inlineDocumentsFromTaskContext,
-  listTasks as listCollabTasks,
-  submitTurn as submitCollabTurn,
-} from "../../../services/collab.js";
-import {
-  approvePlan as approveOrchestratorPlan,
-  buildSessionFallbackContext,
-  OrchestrationConflictError,
-  OrchestrationInvalidPlanError,
-  OrchestrationNotFoundError,
-  startSession as startOrchestratorSession,
-  submitAnswers as submitOrchestratorAnswers,
-} from "../../../services/orchestrator.js";
 import { PlatformSchema } from "../schemas.js";
+import { mcpToolDefs } from "@tallei/mcp-tools";
 import { conversationIdSchema, normalizeUploadedFileRequestBody, openAiFileRefSchema } from "../../http/schemas/uploaded-files.js";
 import {
   executePrepareResponseAction,
@@ -80,14 +55,6 @@ function onPlanError(err: unknown): ToolResult {
   throw err;
 }
 
-function collabPlanRequiredResult(err: PlanRequiredError): ToolResult {
-  return toJsonToolResult({
-    error: err.message,
-    code: "plan_required",
-    feature: "collab_sessions",
-  }, true);
-}
-
 function onKnownError(err: unknown): ToolResult {
   try {
     return onPlanError(err);
@@ -97,109 +64,19 @@ function onKnownError(err: unknown): ToolResult {
 }
 
 function toJsonToolResult(body: unknown, isError = false): ToolResult {
-  const safeBody = body && typeof body === "object" && !Array.isArray(body)
-    ? compactCollabTransportPayload(body as Record<string, unknown>)
-    : body;
   return {
-    content: [{ type: "text", text: JSON.stringify(safeBody, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
     ...(isError ? { isError: true as const } : {}),
   };
 }
 
-function appendContinueCommand(
-  userVisible: string,
-  command: ReturnType<typeof buildFirstTurnContinueCommand>
-): string {
-  if (!command) return userVisible;
-  return `${userVisible}\n\n${command.instruction}`;
-}
-
-function buildCollabTurnUserVisible(input: {
-  content: string;
-  taskId: string;
-  iteration: number;
-  nextWork: string;
-  continueCommand: ReturnType<typeof buildFirstTurnContinueCommand>;
-}): string {
-  return appendContinueCommand([
-    input.content,
-    "",
-    `Saved Claude turn for task ${input.taskId} at iteration ${input.iteration}. Next up: ${input.nextWork}`,
-  ].join("\n"), input.continueCommand);
-}
-
-function isLikelySummaryOnlyCollabTurn(content: string): boolean {
-  const trimmed = content.trim();
-  if (!trimmed) return true;
-  if (trimmed.length > 1_200) return false;
-
-  const lower = trimmed.toLowerCase();
-  const startsLikeSummary = /^(summary|brief summary|high[- ]level summary|overview|highlights?)\b[:\s-]*/i.test(trimmed);
-  const hasListMarkers = /(^|\n)\s*(?:[-*]\s+|\d+\.\s+)/.test(trimmed);
-  const lineCount = trimmed.split(/\n+/).filter((line) => line.trim().length > 0).length;
-  const hasPlaceholderLanguage = /\b(details above|see above|full output|full response)\b/.test(lower);
-
-  return startsLikeSummary && (hasListMarkers || lineCount <= 8 || hasPlaceholderLanguage);
-}
-
-function roleSelectionUserVisible(roleSelection: {
-  chatgpt_role: string;
-  claude_role: string;
-  first_actor_recommendation: string;
-  selected_first_actor: string;
-}): string {
-  return [
-    "Before grill-me starts, here is the provider role split. Show each provider prompt as a fenced code block so it is visually distinct:",
-    "ChatGPT system prompt:",
-    "```text",
-    roleSelection.chatgpt_role,
-    "```",
-    "Claude system prompt:",
-    "```text",
-    roleSelection.claude_role,
-    "```",
-    `Recommended first actor: ${roleSelection.first_actor_recommendation}`,
-    `Selected first actor: ${roleSelection.selected_first_actor}`,
-  ].join("\n");
-}
-
-function buildIterationRoadmap(plan: {
-  phases?: Array<{ id: string; name: string; outputs: string[] }>;
-  success_criteria?: Array<{ id: string; text: string; weight: number }>;
-} | null): string {
-  if (!plan || !plan.phases?.length) return "";
-  const lines = plan.phases.map((phase, i) => {
-    const outputs = phase.outputs?.length ? ` — ${phase.outputs.join(", ")}` : "";
-    return `${i + 1}. ${phase.name}${outputs}`;
-  });
-  const doneWhen = plan.success_criteria?.length
-    ? plan.success_criteria.map((s) => s.text).join("; ")
-    : "all success criteria pass";
-  return `Iteration Roadmap:\n${lines.join("\n")}\nDone when: ${doneWhen}`;
-}
-
-function hasCollabWriteScope(auth: AuthContext): boolean {
-  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
-  return hasRequiredScopes(auth.scopes ?? [], ["collab:write"]);
-}
-
-function hasOrchestrateScope(auth: AuthContext): boolean {
-  if (auth.authMode === "internal" || auth.authMode === "api_key") return true;
-  return hasRequiredScopes(auth.scopes ?? [], ["orchestrate:write"]);
-}
-
 export function registerTools(server: McpServer, auth: AuthContext): void {
   server.registerTool(
-    "save_memory",
+    mcpToolDefs.save_memory.name,
     {
-      title: "Save Memory",
-      description: "Prefer the `remember` tool — it handles facts, preferences, and document notes in one call. This tool exists for backward compatibility.",
-      inputSchema: {
-        content: z
-          .string()
-          .describe("The fact, preference, or information to remember. Be specific and concise."),
-        platform: PlatformSchema.optional().default("claude").describe("The AI platform this memory is from"),
-      },
+      title: mcpToolDefs.save_memory.title,
+      description: mcpToolDefs.save_memory.description,
+      inputSchema: mcpToolDefs.save_memory.inputSchema,
     },
     async ({ content, platform }) => {
       try {
@@ -212,21 +89,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "save_preference",
+    mcpToolDefs.save_preference.name,
     {
-      title: "Save Preference",
-      description: "Prefer the `remember` tool with kind=\"preference\". This exists for backward compatibility.",
-      inputSchema: {
-        content: z
-          .string()
-          .describe("The preference to store (e.g., favorite color, preferred stack, name/pronouns)."),
-        category: z.string().optional().describe("Optional preference category like identity, ui, stack."),
-        preference_key: z
-          .string()
-          .optional()
-          .describe("Optional stable conflict key (e.g., favorite_color, identity_name)."),
-        platform: PlatformSchema.optional().default("claude").describe("The AI platform this preference is from"),
-      },
+      title: mcpToolDefs.save_preference.title,
+      description: mcpToolDefs.save_preference.description,
+      inputSchema: mcpToolDefs.save_preference.inputSchema,
     },
     async ({ content, category, preference_key, platform }) => {
       try {
@@ -242,28 +109,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recall_memories",
+    mcpToolDefs.recall_memories.name,
     {
-      title: "Recall Memories",
-      description:
-        "Searches Tallei persistent memory and returns relevant past context. " +
-        "Call ONLY when the user explicitly references prior sessions, asks about their preferences, or the task requires personalized past context. " +
-        "Do NOT call this before answering — answer first, then recall if needed. " +
-        "Pinned preferences are already available as the 'Pinned Preferences' MCP resource; do not recall them here.",
-      inputSchema: {
-        query: z
-          .string()
-          .describe("What to search for. Use topic keywords like 'favorite food' or 'project stack'."),
-        limit: z.number().int().min(1).max(20).optional().default(5),
-        types: z.array(MemoryTypeSchema).optional().describe("Optional type filter for scoped recall."),
-        include_doc_refs: z
-          .array(z.string())
-          .max(20)
-          .optional()
-          .describe("Optional @doc/@lot refs to append brief document metadata."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.recall_memories.title,
+      description: mcpToolDefs.recall_memories.description,
+      inputSchema: mcpToolDefs.recall_memories.inputSchema,
     },
     async (args) => {
       try {
@@ -292,517 +142,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "collab_check_turn",
+    mcpToolDefs.list_preferences.name,
     {
-      title: "Check Claude Collab Turn",
-      description: "Checks if it's Claude's turn on a collab task and returns task context.",
-      inputSchema: {
-        task_id: z.string().uuid().describe("Collab task ID."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
-    },
-    async ({ task_id, openaiFileIdRefs, conversation_id }) => {
-      try {
-        if (!hasCollabWriteScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
-        }
-
-        const claimed = await claimTurn(task_id, "claude", auth);
-        let task = claimed ?? await getCollabTask(task_id, auth);
-        if (!task) {
-          return toJsonToolResult({ error: "Task not found" }, true);
-        }
-        let uploadSummary = openaiFileIdRefs?.length
-          ? await attachUploadedFilesToTaskContext(task.id, auth, {
-            openaiFileIdRefs,
-            conversationId: conversation_id ?? null,
-          })
-          : null;
-        const preparedUploadHydration = uploadSummary
-          ? null
-          : await hydrateTaskWithRecentPreparedUploads(task, auth, {
-            conversationId: conversation_id ?? null,
-          });
-        if (preparedUploadHydration) uploadSummary = preparedUploadHydration.attached;
-        if (uploadSummary) {
-          task = await getCollabTask(task.id, auth) ?? task;
-        }
-        const inlineDocuments = await inlineDocumentsFromTaskContext(task, auth);
-
-        const lastChatGptEntry = [...task.transcript].reverse().find((entry) => entry.actor === "chatgpt") ?? null;
-        const nextActor = task.state === "CREATIVE"
-          ? "chatgpt"
-          : task.state === "TECHNICAL"
-            ? "claude"
-            : null;
-        const continueCommand = buildFirstTurnContinueCommand(task);
-        const nextWork = describeNextActorWork(task.state, nextActor);
-        return toJsonToolResult({
-          is_my_turn: Boolean(claimed),
-          task_id: task.id,
-          title: task.title,
-          state: task.state,
-          iteration: task.iteration,
-          max_iterations: task.maxIterations,
-          next_actor: nextActor,
-          user_visible: appendContinueCommand(claimed
-            ? `It's your turn on task ${task.id} (iteration ${task.iteration + 1}). ${describeNextActorWork(task.state, "claude")} Draft the output, then call collab_take_turn.`
-            : nextActor
-              ? `Task ${task.id} is waiting on ${nextActor}. Next up: ${nextWork}`
-              : `Task ${task.id} has finished all planned iterations. ${nextWork}`, continueCommand),
-          continue_command: continueCommand,
-          brief: task.brief,
-          last_chatgpt_entry: lastChatGptEntry,
-          recent_transcript: task.transcript,
-          fallback_context: buildTurnFallbackContext(task, "claude"),
-          ...(inlineDocuments.length ? { inline_documents: inlineDocuments } : {}),
-          ...(uploadSummary ? { upload: uploadSummary } : {}),
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        if (err instanceof CollabAttachmentIngestError) {
-          return toJsonToolResult({
-            error: err.message,
-            count_saved: 0,
-            count_failed: err.errors.length,
-            errors: err.errors,
-          }, true);
-        }
-        const message = err instanceof Error ? err.message : "Failed to check turn";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "collab_take_turn",
-    {
-      title: "Submit Claude Collab Turn",
-      description: "Submits Claude's full user-facing content for a collab task turn. Summary-only submissions are rejected. After this tool returns, Claude must show the full submitted output visibly in the Claude chat before any summary/handoff.",
-      inputSchema: {
-        task_id: z.string().uuid().describe("Collab task ID."),
-        content: z.string().min(1).describe("Full user-facing turn output content. Do not submit summary-only text when the deliverable is longer."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
-    },
-    async ({ task_id, content, openaiFileIdRefs, conversation_id }) => {
-      try {
-        if (!hasCollabWriteScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
-        }
-        if (isLikelySummaryOnlyCollabTurn(content)) {
-          return toJsonToolResult({
-            ok: false,
-            error: "collab_take_turn requires the full user-facing deliverable content. Summary-only text is not accepted.",
-            user_visible: "Submit the complete response content first, then provide summary/handoff text separately in chat.",
-          }, true);
-        }
-        const uploadSummary = openaiFileIdRefs?.length
-          ? await attachUploadedFilesToTaskContext(task_id, auth, {
-            openaiFileIdRefs,
-            conversationId: conversation_id ?? null,
-          })
-          : null;
-        const task = await submitCollabTurn(task_id, "claude", content, auth);
-        const nextActor = task.state === "CREATIVE"
-          ? "chatgpt"
-          : task.state === "TECHNICAL"
-            ? "claude"
-            : null;
-        const savedTurn = task.transcript.length > 0 ? task.transcript[task.transcript.length - 1] : null;
-        const continueCommand = buildFirstTurnContinueCommand(task);
-        const nextWork = describeNextActorWork(task.state, nextActor);
-        return toJsonToolResult({
-          ok: true,
-          task_id: task.id,
-          state: task.state,
-          iteration: task.iteration,
-          max_iterations: task.maxIterations,
-          next_actor: nextActor,
-          user_visible: buildCollabTurnUserVisible({
-            content,
-            taskId: task.id,
-            iteration: task.iteration,
-            nextWork,
-            continueCommand,
-          }),
-          user_visible_full_output: content,
-          user_visible_handoff: appendContinueCommand(`Saved Claude turn for task ${task.id} at iteration ${task.iteration}. Next up: ${nextWork}`, continueCommand),
-          continue_command: continueCommand,
-          saved_turn: savedTurn
-            ? {
-                actor: savedTurn.actor,
-                iteration: savedTurn.iteration,
-                ts: savedTurn.ts,
-                content: savedTurn.content,
-                content_length: savedTurn.content.length,
-                content_preview: savedTurn.content.slice(0, 800),
-              }
-            : null,
-          ...(uploadSummary ? { upload: uploadSummary } : {}),
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        if (err instanceof CollabAttachmentIngestError) {
-          return toJsonToolResult({
-            error: err.message,
-            count_saved: 0,
-            count_failed: err.errors.length,
-            errors: err.errors,
-          }, true);
-        }
-        if (err instanceof CollabConflictError) {
-          const task = await getCollabTask(task_id, auth);
-          const nextActor = task
-            ? (
-              task.state === "CREATIVE"
-                ? "chatgpt"
-                : task.state === "TECHNICAL"
-                  ? "claude"
-                  : null
-            )
-            : null;
-          const nextWork = task ? describeNextActorWork(task.state, nextActor) : "";
-          return toJsonToolResult({
-            ok: false,
-            error: err.message,
-            task_id,
-            state: task?.state ?? null,
-            iteration: task?.iteration ?? null,
-            max_iterations: task?.maxIterations ?? null,
-            next_actor: nextActor,
-            user_visible: task
-              ? nextActor
-                ? `Turn rejected. Task ${task.id} is currently waiting on ${nextActor}. Next up: ${nextWork}`
-                : `Turn rejected. Task ${task.id} has finished all planned iterations. ${describeNextActorWork(task.state, null)}`
-              : "Turn rejected due to task state mismatch.",
-            fallback_context: task ? buildTurnFallbackContext(task, "claude") : null,
-          }, true);
-        }
-        const message = err instanceof Error ? err.message : "Failed to submit turn";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "collab_list_pending",
-    {
-      title: "List Pending Collab Tasks",
-      description: "Lists collab tasks currently waiting on Claude.",
-      inputSchema: {},
-    },
-    async () => {
-      try {
-        if (!hasCollabWriteScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
-        }
-        const tasks = await listCollabTasks({ filter: "waiting" }, auth);
-        return toJsonToolResult({ tasks: tasks.filter((task) => task.state === "TECHNICAL") });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        const message = err instanceof Error ? err.message : "Failed to list collab tasks";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "collab_create_task",
-    {
-      title: "Create Collab Task",
-      description: "Creates a new collab task for ChatGPT and Claude turn-taking. Performs recall preflight (supports include_doc_refs) before creation and returns preflight context.",
-      inputSchema: {
-        title: z.string().min(1).describe("Task title."),
-        brief: z.string().optional().describe("Optional task brief."),
-        first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt").describe("Which model takes the first turn."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        include_doc_refs: z.array(z.string()).max(20).optional(),
-        recall_query: z.string().min(1).max(500).optional(),
-        conversation_id: conversationIdSchema,
-      },
-    },
-    async (args) => {
-      try {
-        const parsed = z.object({
-          title: z.string().min(1),
-          brief: z.string().optional(),
-          first_actor: z.enum(["chatgpt", "claude"]).optional().default("chatgpt"),
-          openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-          include_doc_refs: z.array(z.string()).max(20).optional(),
-          recall_query: z.string().min(1).max(500).optional(),
-          conversation_id: conversationIdSchema,
-        }).parse(normalizeUploadedFileRequestBody(args));
-        if (!hasCollabWriteScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
-        }
-        const recallQuery = parsed.recall_query ?? parsed.brief ?? parsed.title;
-        const preflightRecall = await executeRecallAction(auth, {
-          query: recallQuery,
-          limit: 5,
-          include_doc_refs: parsed.include_doc_refs,
-          openaiFileIdRefs: parsed.openaiFileIdRefs,
-          conversation_id: parsed.conversation_id ?? null,
-        });
-        const createdTask = await createCollabTask(
-          {
-            title: parsed.title,
-            brief: parsed.brief ?? null,
-            firstActor: parsed.first_actor ?? "chatgpt",
-            context: {
-              preflight_recall: preflightRecall.status === 200
-                ? {
-                  query: recallQuery,
-                  context_block: preflightRecall.body.contextBlock,
-                  memories_count: preflightRecall.body.memories.length,
-                  matched_documents_count: preflightRecall.body.matchedDocuments.length,
-                  referenced_documents_count: preflightRecall.body.referencedDocuments.length,
-                  auto_save: preflightRecall.body.autoSave,
-                }
-                : {
-                  query: recallQuery,
-                  error: preflightRecall.body.error,
-                  auto_save: preflightRecall.body.autoSave,
-                },
-            },
-          },
-          auth
-        );
-        let uploadSummary:
-          | {
-            lot_ref: string | null;
-            count_saved: number;
-            count_attached_existing: number;
-            count_total_documents: number;
-            count_failed: number;
-            errors: Array<{ file_id: string; filename: string; error: string }>;
-          }
-          | null = null;
-        if (parsed.openaiFileIdRefs?.length) {
-          try {
-            uploadSummary = await attachUploadedFilesToTaskContext(createdTask.id, auth, {
-              openaiFileIdRefs: parsed.openaiFileIdRefs,
-              conversationId: parsed.conversation_id ?? null,
-              title: parsed.title,
-            });
-          } catch (error) {
-            if (error instanceof CollabAttachmentIngestError) {
-              uploadSummary = {
-                lot_ref: null,
-                count_saved: 0,
-                count_attached_existing: 0,
-                count_total_documents: 0,
-                count_failed: error.errors.length,
-                errors: error.errors,
-              };
-            } else {
-              throw error;
-            }
-          }
-        }
-        const task = (parsed.openaiFileIdRefs?.length ? await getCollabTask(createdTask.id, auth) : createdTask) ?? createdTask;
-        const continueCommand = buildFirstTurnContinueCommand(task);
-        const nextActor = task.state === "CREATIVE"
-          ? "chatgpt"
-          : task.state === "TECHNICAL"
-            ? "claude"
-            : null;
-        const nextWork = describeNextActorWork(task.state, nextActor);
-        return toJsonToolResult({
-          ok: true,
-          task_id: task.id,
-          title: task.title,
-          brief: task.brief,
-          state: task.state,
-          iteration: task.iteration,
-          max_iterations: task.maxIterations,
-          next_actor: nextActor,
-          fallback_context: buildTurnFallbackContext(task, "claude"),
-          preflight_recall: preflightRecall.body,
-          ...(uploadSummary ? { upload: uploadSummary } : {}),
-          user_visible: appendContinueCommand(`Created collab task ${task.id} (${task.title}). Next up: ${nextWork}`, continueCommand),
-          continue_command: continueCommand,
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        const message = err instanceof Error ? err.message : "Failed to create collab task";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "orchestrator_start",
-    {
-      title: "Start Orchestration Session",
-      description: "Starts grill-me planning for a goal and returns the first planner question.",
-      inputSchema: {
-        goal: z.string().min(1).describe("The goal to plan before collab execution."),
-        first_actor_preference: z.enum(["chatgpt", "claude"]).optional(),
-        initial_context: z.string().optional(),
-      },
-    },
-    async ({ goal, first_actor_preference, initial_context }) => {
-      try {
-        if (!hasOrchestrateScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
-        }
-        const result = await startOrchestratorSession(
-          {
-            goal,
-            sourcePlatform: "claude",
-            firstActorPreference: first_actor_preference,
-            initialContext: initial_context ?? null,
-          },
-          auth
-        );
-        return toJsonToolResult({
-          session_id: result.session.id,
-          status: result.session.status,
-          question: result.firstQuestion,
-          question_payload: result.firstQuestionData ?? { question: result.firstQuestion },
-          role_suggestion: result.roleSelection,
-          user_visible: result.firstQuestion
-            ? `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nFirst grill-me question: ${result.firstQuestion}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`
-            : `${roleSelectionUserVisible(result.roleSelection)}\n\nDo you approve these roles? Reply **yes** to proceed, or tell me what to change.\n\nThe grill-me plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`,
-          next_instruction: "Show the role split and ask for explicit role approval. STOP if the user does not say yes. Do not call orchestrator_answer until the user explicitly answers or approves using the displayed default/recommended answer.",
-          fallback_context: buildSessionFallbackContext(result.session),
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        const message = err instanceof Error ? err.message : "Failed to start orchestration session";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "orchestrator_answer",
-    {
-      title: "Continue Orchestration Session",
-      description: "Submits one or more user answers for orchestration and returns next question or plan.",
-      inputSchema: {
-        session_id: z.string().uuid().describe("Orchestration session ID."),
-        answer: z.string().min(1).optional().describe("Single user answer. Use 'continue' to accept the displayed default/recommended answer and finalize."),
-        answers: z.array(z.string().min(1)).min(1).max(5).optional().describe("Batch of explicit user answers to process in order."),
-        auto_continue: z.boolean().optional().default(false).describe("When true, keep accepting default/recommended answers until plan_ready or max_steps is reached."),
-        max_steps: z.number().int().min(1).max(5).optional().default(3).describe("Maximum planner steps to process in this request."),
-      },
-    },
-    async ({ session_id, answer, answers, auto_continue, max_steps }) => {
-      try {
-        if (!hasOrchestrateScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
-        }
-        const answerBatch = answers ?? (answer ? [answer] : []);
-        if (answerBatch.length === 0) {
-          return toJsonToolResult({ error: "answer or answers is required", session_id }, true);
-        }
-        const shouldAutoContinue = Boolean(auto_continue) || answerBatch.some((value) => /^continue$/i.test(value.trim()));
-        const result = await submitOrchestratorAnswers(session_id, answerBatch, auth, {
-          autoContinue: shouldAutoContinue,
-          maxSteps: max_steps,
-        });
-        return toJsonToolResult({
-          session_id,
-          status: result.session.status,
-          question: result.nextQuestion ?? null,
-          question_payload: result.nextQuestionData ?? (result.nextQuestion ? { question: result.nextQuestion } : null),
-          plan: result.plan ?? result.session.plan,
-          steps_processed: result.stepsProcessed,
-          user_visible: result.planReady
-            ? `I processed ${result.stepsProcessed} grill-me step${result.stepsProcessed === 1 ? "" : "s"}. The plan is ready for review. Stop here and wait for explicit user approval before calling orchestrator_approve.`
-            : `I processed ${result.stepsProcessed} grill-me step${result.stepsProcessed === 1 ? "" : "s"}. Next grill-me question: ${result.nextQuestion ?? "continue with the recommended/default answer."}\n\nStop here and wait for the user's answer or approval to use the default/recommended answer.`,
-          next_instruction: result.planReady
-            ? "Show the plan for review, then stop. Do not call orchestrator_approve until the user explicitly approves the plan."
-            : "Show the next grill-me question, then stop. Do not call orchestrator_answer again until the user explicitly answers or approves using the displayed default/recommended answer.",
-          fallback_context: buildSessionFallbackContext(result.session),
-        });
-      } catch (err) {
-        if (err instanceof OrchestrationConflictError || err instanceof OrchestrationNotFoundError) {
-          return toJsonToolResult({ error: err.message, session_id }, true);
-        }
-        const message = err instanceof Error ? err.message : "Failed to continue orchestration session";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "orchestrator_approve",
-    {
-      title: "Approve Orchestration Plan",
-      description: "Approves the prepared orchestration plan and creates the linked collab task.",
-      inputSchema: {
-        session_id: z.string().uuid().describe("Orchestration session ID."),
-        overrides: z.object({
-          first_actor: z.enum(["chatgpt", "claude"]).optional(),
-        }).optional(),
-      },
-    },
-    async ({ session_id, overrides }) => {
-      try {
-        if (!hasOrchestrateScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["orchestrate:write"] }, true);
-        }
-        if (!hasCollabWriteScope(auth)) {
-          return toJsonToolResult({ error: "Insufficient OAuth scopes", requiredScopes: ["collab:write"] }, true);
-        }
-        const result = await approveOrchestratorPlan(session_id, auth, overrides);
-        const roadmap = buildIterationRoadmap(result.session.plan ?? null);
-        const firstActor = result.session.plan?.first_actor ?? "chatgpt";
-        const nextWork = firstActor === "chatgpt"
-          ? "ChatGPT will produce content, strategy, or creative output for the first phase."
-          : "Claude will implement, build, or refine the technical/design deliverables for the first phase.";
-        return toJsonToolResult({
-          task_id: result.task.id,
-          plan_summary: result.session.plan?.summary ?? result.task.brief ?? "",
-          success_criteria: result.session.plan?.success_criteria ?? [],
-          first_actor: firstActor,
-          iteration_roadmap: roadmap || null,
-          user_visible: [
-            `Plan approved. Collab task ${result.task.id} is ready.`,
-            roadmap ? `\n${roadmap}` : "",
-            `\nNext up: ${nextWork}`,
-          ].join(""),
-          next_instruction: `Collab task ${result.task.id} is ready. ${roadmap ? "The iteration roadmap is shown above. " : ""}Continue with collab_check_turn/collab_take_turn for ${firstActor}.`,
-          fallback_context: result.session ? buildSessionFallbackContext(result.session) : null,
-        });
-      } catch (err) {
-        if (err instanceof PlanRequiredError) {
-          return collabPlanRequiredResult(err);
-        }
-        if (
-          err instanceof OrchestrationConflictError ||
-          err instanceof OrchestrationNotFoundError ||
-          err instanceof OrchestrationInvalidPlanError
-        ) {
-          return toJsonToolResult({ error: err.message, session_id }, true);
-        }
-        const message = err instanceof Error ? err.message : "Failed to approve orchestration plan";
-        return toJsonToolResult({ error: message }, true);
-      }
-    }
-  );
-
-  server.registerTool(
-    "list_preferences",
-    {
-      title: "List Preferences",
-      description: "Lists pinned and active user preferences.",
-      inputSchema: {},
+      title: mcpToolDefs.list_preferences.title,
+      description: mcpToolDefs.list_preferences.description,
+      inputSchema: mcpToolDefs.list_preferences.inputSchema,
     },
     async () => {
       const preferences = await listPreferences(auth);
@@ -817,13 +161,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "forget_preference",
+    mcpToolDefs.forget_preference.name,
     {
-      title: "Forget Preference",
-      description: "Deletes a preference memory by ID.",
-      inputSchema: {
-        preference_id: z.string().describe("Preference memory ID"),
-      },
+      title: mcpToolDefs.forget_preference.title,
+      description: mcpToolDefs.forget_preference.description,
+      inputSchema: mcpToolDefs.forget_preference.inputSchema,
     },
     async ({ preference_id }) => {
       try {
@@ -837,11 +179,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "list_memories",
+    mcpToolDefs.list_memories.name,
     {
-      title: "List Memories",
-      description: "Lists all recent memories stored in Tallei for this user.",
-      inputSchema: {},
+      title: mcpToolDefs.list_memories.title,
+      description: mcpToolDefs.list_memories.description,
+      inputSchema: mcpToolDefs.list_memories.inputSchema,
     },
     async () => {
       const memories = await listMemories(auth);
@@ -853,13 +195,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "delete_memory",
+    mcpToolDefs.delete_memory.name,
     {
-      title: "Delete Memory",
-      description: "Deletes a specific memory from Tallei by its ID.",
-      inputSchema: {
-        memory_id: z.string().describe("The unique ID of the memory to delete"),
-      },
+      title: mcpToolDefs.delete_memory.title,
+      description: mcpToolDefs.delete_memory.description,
+      inputSchema: mcpToolDefs.delete_memory.inputSchema,
     },
     async ({ memory_id }) => {
       const result = await deleteMemory(memory_id, auth);
@@ -868,19 +208,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "stash_document",
+    mcpToolDefs.stash_document.name,
     {
-      title: "Stash Document Full Blob",
-      description:
-        "HEAVY: Requires emitting the entire document as the `content` argument. " +
-        "Prefer remember(kind=\"document-note\") for most 'save this document' requests — it needs no content field. " +
-        "Only use this when the user explicitly says to archive or store the full file for future retrieval. " +
-        "Call AFTER finishing your user response. Indexing runs in the background.",
-      inputSchema: {
-        content: z.string().min(1).describe("Full document markdown/text to store verbatim."),
-        filename: z.string().optional().describe("Optional source filename."),
-        title: z.string().optional().describe("Optional display title."),
-      },
+      title: mcpToolDefs.stash_document.title,
+      description: mcpToolDefs.stash_document.description,
+      inputSchema: mcpToolDefs.stash_document.inputSchema,
     },
     async ({ content, filename, title }) => {
       try {
@@ -902,14 +234,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "create_lot",
+    mcpToolDefs.create_lot.name,
     {
-      title: "Create Lot",
-      description: "Groups existing stashed documents under one @lot handle for multi-file recall.",
-      inputSchema: {
-        refs: z.array(z.string()).min(1).describe("Array of @doc:... references to group."),
-        title: z.string().optional().describe("Optional lot title."),
-      },
+      title: mcpToolDefs.create_lot.title,
+      description: mcpToolDefs.create_lot.description,
+      inputSchema: mcpToolDefs.create_lot.inputSchema,
     },
     async ({ refs, title }) => {
       try {
@@ -927,15 +256,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recall_document",
+    mcpToolDefs.recall_document.name,
     {
-      title: "Recall Document",
-      description:
-        "Returns the complete stored document markdown for an @doc ref, or all full docs for an @lot ref. " +
-        "May be large: use only when the user clearly needs the full file.",
-      inputSchema: {
-        ref: z.string().min(1).describe("Document or lot reference, e.g. @doc:... or @lot:..."),
-      },
+      title: mcpToolDefs.recall_document.title,
+      description: mcpToolDefs.recall_document.description,
+      inputSchema: mcpToolDefs.recall_document.inputSchema,
     },
     async ({ ref }) => {
       try {
@@ -948,16 +273,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "search_documents",
+    mcpToolDefs.search_documents.name,
     {
-      title: "Search Documents",
-      description:
-        "Vector-searches stashed document summaries and returns matching refs for discovery. " +
-        "Does not return full content.",
-      inputSchema: {
-        query: z.string().min(1).describe("Search query to find relevant documents."),
-        limit: z.number().int().min(1).max(20).optional().default(5),
-      },
+      title: mcpToolDefs.search_documents.title,
+      description: mcpToolDefs.search_documents.description,
+      inputSchema: mcpToolDefs.search_documents.inputSchema,
     },
     async ({ query, limit }) => {
       try {
@@ -969,53 +289,12 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     }
   );
 
-  // Unified entry point — the preferred tool for all save operations.
   server.registerTool(
-    "remember",
+    mcpToolDefs.remember.name,
     {
-      title: "Save / Stash to Memory (remember)",
-      description:
-        "Save a memory, save a preference, or stash a document to Tallei persistent memory. " +
-        "Use this for explicit save requests AND required auto-save of newly processed structured content. " +
-        "For auto-save footers, call remember before finalizing the reply so you can include the saved @doc ref.\n\n" +
-        "• kind=\"fact\" — a single fact or observation. Pass text in `content`.\n" +
-        "• kind=\"preference\" — a stable user preference. Pass text in `content`.\n" +
-        "• kind=\"document-note\" — DEFAULT for document/file/PDF saves and auto-save notes. " +
-        "File ingest accepts only PDF and Word (.docx/.docm); other file types are rejected. " +
-        "Pass title + key_points (array of strings, one per product/item/section, up to 10) + summary. " +
-        "If generated or pasted content should be preserved, pass the full text in `content`; it will be saved as a real @doc document.\n" +
-        "• kind=\"document-blob\" — only for 'sf' / 'archive full file' / 'full stash'. " +
-        "Requires the complete document text in `content`. Warn the user it will take a moment. " +
-        "Use stash_document as a fallback if this times out.\n\n" +
-        "One remember call replaces chaining save_memory + stash_document.",
-      inputSchema: {
-        kind: z
-          .enum(["fact", "preference", "document-note", "document-blob", "checkpoint"])
-          .describe("What type of thing to remember."),
-        content: z
-          .string()
-          .optional()
-          .describe("The text to save. Required for fact/preference/document-blob. Omit for document-note."),
-        title: z.string().optional().describe("Display title. Used for document-note and document-blob."),
-        key_points: z
-          .array(z.string())
-          .max(10)
-          .optional()
-          .describe("3–8 bullet points for document-note. Each ~20 words. Omit for other kinds."),
-        summary: z
-          .string()
-          .optional()
-          .describe("Short paragraph summary for document-note. Omit for other kinds."),
-        source_hint: z
-          .string()
-          .optional()
-          .describe("Human-readable hint about the source, e.g. 'Product catalogue PDF attached this turn'. document-note only."),
-        category: z.string().optional().describe("Preference category (preference kind only)."),
-        preference_key: z.string().optional().describe("Stable conflict key for preferences, e.g. favorite_color."),
-        platform: PlatformSchema.optional().default("claude"),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional(),
-        conversation_id: conversationIdSchema,
-      },
+      title: mcpToolDefs.remember.title,
+      description: mcpToolDefs.remember.description,
+      inputSchema: mcpToolDefs.remember.inputSchema,
     },
     async (args) => {
       try {
@@ -1049,15 +328,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "upload_blob",
+    mcpToolDefs.upload_blob.name,
     {
-      title: "Upload Blob",
-      description: "Queue uploaded file refs for background ingest. Parity with ChatGPT upload_blob action. Only PDF and Word (.docx/.docm) are supported.",
-      inputSchema: {
-        openaiFileIdRefs: z.array(openAiFileRefSchema).min(1).max(10),
-        conversation_id: conversationIdSchema,
-        title: z.string().optional(),
-      },
+      title: mcpToolDefs.upload_blob.title,
+      description: mcpToolDefs.upload_blob.description,
+      inputSchema: mcpToolDefs.upload_blob.inputSchema,
     },
     async (args) => {
       try {
@@ -1075,13 +350,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "upload_status",
+    mcpToolDefs.upload_status.name,
     {
-      title: "Upload Status",
-      description: "Check status for a queued upload ingest job.",
-      inputSchema: {
-        ref: z.string().trim().min(1).describe("Upload ingest job ref"),
-      },
+      title: mcpToolDefs.upload_status.title,
+      description: mcpToolDefs.upload_status.description,
+      inputSchema: mcpToolDefs.upload_status.inputSchema,
     },
     async ({ ref }) => {
       try {
@@ -1094,13 +367,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "recent_documents",
+    mcpToolDefs.recent_documents.name,
     {
-      title: "Recent Documents",
-      description: "Return latest document briefs for this user.",
-      inputSchema: {
-        limit: z.number().int().min(1).max(20).optional().default(5),
-      },
+      title: mcpToolDefs.recent_documents.title,
+      description: mcpToolDefs.recent_documents.description,
+      inputSchema: mcpToolDefs.recent_documents.inputSchema,
     },
     async ({ limit }) => {
       try {
@@ -1113,27 +384,11 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
   );
 
   server.registerTool(
-    "prepare_turn",
+    mcpToolDefs.prepare_turn.name,
     {
-      title: "Prepare Turn",
-      description:
-        "PRIMARY ENTRY POINT. Call this FIRST on every turn. " +
-        "Equivalent to ChatGPT's prepare_response. It classifies intent, recalls memories, " +
-        "auto-saves files, queues checkpoint saves, and returns replyInstructions telling you what to do next. " +
-        "Always call this before any other tool on a new turn.",
-      inputSchema: {
-        message: z.string().trim().min(1).describe("Exact current user message."),
-        conversation_id: conversationIdSchema,
-        conversation_history: z.array(z.object({
-          role: z.enum(["user", "assistant", "system", "tool"]).optional(),
-          content: z.string().trim().min(1),
-        })).max(40).optional().describe("Visible conversation history for checkpoint auto-save."),
-        openaiFileIdRefs: z.array(openAiFileRefSchema).max(10).optional().describe("Attached files with temporary HTTPS download_link URLs."),
-        last_recall: z.object({
-          query: z.string().optional(),
-          context_hash: z.string().optional(),
-        }).optional().nullable().describe("Previous recall state for deduplication."),
-      },
+      title: mcpToolDefs.prepare_turn.title,
+      description: mcpToolDefs.prepare_turn.description,
+      inputSchema: mcpToolDefs.prepare_turn.inputSchema,
     },
     async (args) => {
       try {
@@ -1165,18 +420,12 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     }
   );
 
-  // One-word undo for auto-saves: user replies "undo" and Claude calls this.
   server.registerTool(
-    "undo_save",
+    mcpToolDefs.undo_save.name,
     {
-      title: "Undo Save",
-      description:
-        "Deletes a recently auto-saved document or memory by ref. " +
-        "Call when the user replies 'undo', 'del', or 'delete' after an auto-save footer. " +
-        "Pass the @doc ref from the footer.",
-      inputSchema: {
-        ref: z.string().min(1).describe("The @doc ref to delete, e.g. @doc:catalogue-a3f2"),
-      },
+      title: mcpToolDefs.undo_save.title,
+      description: mcpToolDefs.undo_save.description,
+      inputSchema: mcpToolDefs.undo_save.inputSchema,
     },
     async ({ ref }) => {
       try {
@@ -1188,7 +437,6 @@ export function registerTools(server: McpServer, auth: AuthContext): void {
     }
   );
 
-  // Expose pinned preferences as a passive MCP resource so Claude doesn't need to call recall_memories for stable facts.
   server.registerResource(
     "Pinned Preferences",
     "tallei://preferences/pinned",

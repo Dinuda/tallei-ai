@@ -1,8 +1,10 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
+/** npm workspaces hoist `next` to the repo root — Turbopack must root there to resolve it. */
+const workspaceRoot = join(projectRoot, "..");
 const defaultBackend =
   process.env.NODE_ENV === "production" ? "https://api.tallei.com" : "http://127.0.0.1:3000";
 const BACKEND = (
@@ -35,10 +37,17 @@ const allowedDevOrigins = Array.from(new Set([
 const nextConfig: NextConfig = {
   output: "standalone",
   allowedDevOrigins,
-  outputFileTracingRoot: projectRoot,
-  turbopack: {
-    root: projectRoot,
+  // Standalone tracing must include workspace packages under packages/.
+  outputFileTracingRoot: workspaceRoot,
+  experimental: {
+    externalDir: true,
   },
+  turbopack: {
+    root: workspaceRoot,
+  },
+  transpilePackages: [
+    "@react-email/editor",
+  ],
 
   async rewrites() {
     return {
@@ -67,10 +76,11 @@ const nextConfig: NextConfig = {
         // ── Backend API & MCP (proxied transparently) ────────────────────────
         {
           // Keep NextAuth's own /api/auth/* handlers in Next.js.
-          // Keep local dashboard API handlers (e.g. /api/documents, /api/collab, /api/tasks) in Next.js.
+          // Keep local dashboard API handlers in Next.js (e.g. /api/documents,
+          // /api/channels, /api/billing, /api/memories, /api/keys, /api/mcp-events).
           // Proxy all other API routes to the backend.
           source:
-            "/api/:path((?!(?:collab|tasks|documents|integrations|integration-updates|orchestrate|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
+            "/api/:path((?!(?:documents|integrations|integration-updates|channels|billing|memories|keys|mcp-events|auth/(?:signin|signout|session|csrf|providers|callback|error|verify-request|webauthn-options))(?:/|$)).*)",
           destination: `${BACKEND}/api/:path`,
         },
         {

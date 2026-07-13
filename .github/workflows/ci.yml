@@ -27,19 +27,16 @@ jobs:
   dashboard:
     name: Dashboard (lint + build)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: dashboard
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run build
+      - run: npm ci --legacy-peer-deps
+      - run: npm run build -w @tallei/mcp-tools
+      - run: npm run lint -w dashboard
+      - run: npm run build -w dashboard
         env:
           API_PROXY_TARGET: https://api.tallei.com
           BACKEND_URL: https://api.tallei.com

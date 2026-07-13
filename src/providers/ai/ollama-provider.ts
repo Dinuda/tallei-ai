@@ -67,6 +67,11 @@ export class OllamaProvider implements AiProvider {
         text,
         model: response.model,
         finishReason: response.choices[0]?.finish_reason ?? null,
+        usage: {
+          promptTokens: response.usage?.prompt_tokens,
+          completionTokens: response.usage?.completion_tokens,
+          totalTokens: response.usage?.total_tokens,
+        },
       };
     } catch (error) {
       throw mapProviderError(this.name, error);

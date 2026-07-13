@@ -1,8 +1,8 @@
 import { Router, Request, Response } from "express";
 import { createHmac, timingSafeEqual } from "crypto";
-import { pool } from "../../../infrastructure/db/index.js";
+import { pool, poolQuery } from "../../../infrastructure/db/index.js";
 import { config } from "../../../config/index.js";
-import { notifyPaymentSuccess } from "../../../services/payment-notifications.js";
+import { notifyPaymentSuccess } from "../../../services/notifications/payment-notifications.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.middleware.js";
 
@@ -333,28 +333,26 @@ router.get("/status", async (req: AuthRequest, res: Response): Promise<void> => 
 
   try {
     const periodStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-    const [subResult, usageResult] = await Promise.all([
-      pool.query<{
-        plan: string;
-        status: string;
-        cancel_at_period_end: boolean;
-        current_period_end: string | null;
-      }>(
-        `SELECT plan, status, cancel_at_period_end, current_period_end
-         FROM subscriptions WHERE tenant_id = $1`,
-        [auth.tenantId]
-      ),
-      pool.query<{ saves_used: number; recalls_used: number }>(
-        `SELECT
-           COUNT(*) FILTER (WHERE action = 'save')::int AS saves_used,
-           COUNT(*) FILTER (WHERE action = 'recall')::int AS recalls_used
-         FROM memory_events
-         WHERE tenant_id = $1
-           AND action IN ('save', 'recall')
-           AND created_at >= $2`,
-        [auth.tenantId, periodStart]
-      ),
-    ]);
+    const subResult = await poolQuery<{
+      plan: string;
+      status: string;
+      cancel_at_period_end: boolean;
+      current_period_end: string | null;
+    }>(
+      `SELECT plan, status, cancel_at_period_end, current_period_end
+       FROM subscriptions WHERE tenant_id = $1`,
+      [auth.tenantId]
+    );
+    const usageResult = await poolQuery<{ saves_used: number; recalls_used: number }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE action = 'save')::int AS saves_used,
+         COUNT(*) FILTER (WHERE action = 'recall')::int AS recalls_used
+       FROM memory_events
+       WHERE tenant_id = $1
+         AND action IN ('save', 'recall')
+         AND created_at >= $2`,
+      [auth.tenantId, periodStart]
+    );
 
     const sub = subResult.rows[0] ?? {
       plan: "free",

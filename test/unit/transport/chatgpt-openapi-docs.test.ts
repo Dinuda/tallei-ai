@@ -48,14 +48,12 @@ test("ChatGPT OpenAPI documents prepare_response as the primary selective action
   assert.match(spec.info.description ?? "", /openaiFileIdRefs/i);
 });
 
-test("ChatGPT OpenAPI routes new collab starts through orchestration preflight", () => {
+test("ChatGPT OpenAPI does not expose orchestration preflight actions", () => {
   const spec = buildOpenApiSpec("https://example.com");
-  const orchestrateStart = postOperation(spec, "/api/chatgpt/actions/orchestrate_start");
-
-  assert.match(orchestrateStart.description ?? "", /role selection/i);
-  assert.match(orchestrateStart.description ?? "", /grill-me/i);
-  assert.match(orchestrateStart.responses?.["200"]?.description ?? "", /role_suggestion/i);
-  assert.match(orchestrateStart.responses?.["200"]?.description ?? "", /question_payload/i);
+  assert.equal(spec.paths["/api/chatgpt/actions/orchestrate_start"], undefined);
+  assert.equal(spec.paths["/api/chatgpt/actions/orchestrate_answer"], undefined);
+  assert.equal(spec.paths["/api/chatgpt/actions/orchestrate_approve"], undefined);
+  assert.equal(spec.paths["/api/chatgpt/actions/orchestrate_abort"], undefined);
 });
 
 test("ChatGPT OpenAPI operation descriptions stay within provider limits", () => {

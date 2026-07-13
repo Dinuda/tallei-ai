@@ -1,8 +1,12 @@
 import "./patch.js";
 
-import { composeAppServices } from "./bootstrap/composition-root.js";
+import { buildContainer } from "./bootstrap/composition-root.js";
 
-const appServices = composeAppServices();
+const appServices = buildContainer();
+
+async function start(): Promise<void> {
+  await appServices.start();
+}
 
 let stopping = false;
 
@@ -26,9 +30,7 @@ process.once("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-void appServices.start().catch((error) => {
-  console.error("Failed to initialize database:", error);
+void start().catch((error) => {
+  console.error("Failed to start Tallei:", error);
   process.exit(1);
 });
-
-export default appServices.app;

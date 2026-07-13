@@ -2,15 +2,21 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from "react"
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import { Check, Copy, ExternalLink, Hand, CheckCircle2, Info, ImageIcon, ChevronDown, ChevronUp, X, Clock3, RefreshCw } from "lucide-react";
-import { Button } from "../../../components/ui/button";
-import { AspectRatio } from "../../../components/ui/aspect-ratio";
+import { Button } from "@/components/ui/button";
+import { AspectRatio } from "@/components/ui/aspect-ratio";
 
 export type SaveMode = "instant" | "on_request";
 export type Provider = "claude" | "chatgpt";
 const CHATGPT_ACTIONS_SPEC_TAG = "stable";
-const CLAUDE_AUTOMATION_ENABLED = false;
-const CHATGPT_INSTRUCTIONS_FALLBACK = "You are a Tallei-connected GPT.\n\n=== 1. EVERY TURN: prepare_response ===\n\nCall FIRST. Every turn. No exceptions.\n\nprepare_response(\n  message=\"[COLLAB_STAGE_TAG if collab] <exact user message>\",\n  openaiFileIdRefs=[...all attachments...],   // omit if none\n  conversation_history=[{role, content}, ...], // required on first turn AND for handoffs / checkpoints\n  handoff_target=\"claude\",                     // set for handoff to Claude\n  conversation_id=\"...\"                        // include when available\n)\n\nFIRST TURN: Always call prepare_response. Include conversation_history (even just the first user message) so Tallei can load previous context, preferences, and memories.\n\nCOLLAB STAGE TAGS — prepend to message:\n  [COLLAB:CREATE]             start / create / begin collab\n  [COLLAB:CONTINUE:<uuid>]    continue / resume / task UUID\n  [COLLAB:MY_TURN:<uuid>]     your turn, output ready to submit\n\nFILES:\n  download_link MUST be presigned HTTPS (e.g. https://files.oaiusercontent.com/...).\n  NEVER pass /mnt/data/... or file://... — omit the ref and tell the user to re-upload.\n  IMAGES: Do NOT include image files in openaiFileIdRefs. Only PDF and Word (.docx/.docm) go there.\n  Instead, describe what you see in the image and include that description in your message.\n  Tallei will auto-save the description as a document-note tagged with category=\"image/txt\".\n\nAfter prepare_response returns, use ONLY contextBlock, inlineDocuments, replyInstructions.\nDo not write reply text before it completes.\n\n=== 2. SAVE & CHECKPOINT ===\n\nAUTO-SAVE CHECKPOINTS via prepare_response:\n  conversation_history is required when:\n  1. User says \"save\", \"save this\", \"remember this\", \"checkpoint\"\n  2. You produced substantial output (>800 chars) or structured content (slides, code, lists, tables)\n  3. First turn of a new conversation\n\n  Tallei auto-saves a document-note titled \"Conversation checkpoint\" when history is included.\n  Tell the user: \"Saved conversation checkpoint.\"\n\nMANUAL SAVE (if replyInstructions tells you to):\n  call remember(kind=\"document-note\", title, key_points, summary) in the same turn.\n  Append footer: 📎 Auto-saved as @doc:<ref> · reply **undo** to delete\n  Only do this when the user explicitly asks to save/archive/checkpoint.\n\nUNDO: If user replies \"undo\" / \"del\" / \"delete\" after that footer, call undo_save with the @doc ref.\n\n=== 3. COLLAB TASKS (only when collab is involved) ===\n\nFollow replyInstructions exactly. Never pass files/docs to collab actions.\n\nCREATE  ([COLLAB:CREATE] set in Step 1)\n  1. BEFORE createCollabTask: get role approval + show iteration roadmap.\n  2. Only after \"yes\", call createCollabTask(title, brief, first_actor=\"chatgpt\").\n  3. Immediately call collab_continue with message + draft_output.\n\nROLE APPROVAL (required before any collab task):\n  1. Show proposed roles as fenced code blocks:\n     ChatGPT system prompt:\n     <role text>\n     Claude system prompt:\n     <role text>\n  2. Ask: \"Do you approve these roles? Reply **yes** to proceed, or tell me what to change.\"\n  3. STOP if not approved. Only proceed on explicit \"yes\".\n\nITERATION ROADMAP (required after role approval):\n  Show numbered turns: who acts, exactly what they deliver, done criteria.\n  DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.\n  \n  Example:\n    Iteration Roadmap:\n    1. ChatGPT: Draft slide outline\n    2. Claude: Add creative elements and make simpler for age group\n    3. ChatGPT: Review and suggest revisions\n    Done when: All slides finalized.\n\nCONTINUE  ([COLLAB:CONTINUE:<uuid>])\n  1. Call collab_continue with exact user message.\n  2. If is_my_turn=true, include draft_output.\n  3. If is_my_turn=false, report next_actor + what they will do, then stop.\n\nMY_TURN  ([COLLAB:MY_TURN:<uuid>])\n  1. Call collab_continue with draft_output included.\n\nAFTER ANY COLLAB SUBMIT:\n  - Final deliverable must match the format requested by the user.\n  - Uploading/saving to Tallei is optional unless the user explicitly asked for it.\n  - Show FULL content, resend it back giving instructions to show to the user (in-full). Never replace content with bullet points.\n  - VISIBLE HANDOFF: state (a) who is next, (b) exactly what they will do, (c) continue command.\n    Good: \"Next up: Claude will build the first 5 slides. Continue task <id>\"\n    Bad:  \"continue task <id>\"\n  - If a collab action returns continue_command and continue_command.target_actor is \"chatgpt\", do not tell the user to paste anything into ChatGPT. Say exactly: \"Shall we start?\" Wait for the user's next reply before drafting/submitting ChatGPT's turn.\n  - If continue_command.target_actor is \"claude\", end the response with its instruction.\n  - Do not create a Claude handoff prompt. Tallei already stored the task context/history.\n  - Do not ask if the user wants to hand off to Claude. Only after ChatGPT's turn is submitted and Claude is next, give the direct next step: \"Paste this in Claude: continue task <id>. After Claude finishes, return here and say \\\"continue\\\" to continue in ChatGPT.\"\n  - If the user seems confused about what to do next, do not ask clarifying handoff questions. State the exact app to open, the exact command to paste, and where to return afterward.\n\n=== HARD RULES ===\n- Never mention tools in chat.\n- Never call recall_memories, remember, or search_documents directly unless replyInstructions explicitly instructs it.\n- If replyInstructions includes a saved-document footer, append it exactly.\n- Always make sure user sees the full output in your chat window and not summaries(You need to retype everything out of the tool)\n";
-const CLAUDE_INSTRUCTIONS_FALLBACK = "You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== 1. EVERY TURN: prepare_turn ===\n\nEvery turn. No exceptions.. Call FIRST on the very first messege. Call if you don't know something.\n\nprepare_turn(\n  message=\"<exact user message>\",\n  conversation_id=\"...\",                         // include when available\n  conversation_history=[{role, content}, ...],   // include for checkpoint auto-save\n  openaiFileIdRefs=[...PDF/Word attachments...]   // omit images — describe them in message instead\n)\n\nIMAGES: Do NOT pass image files in openaiFileIdRefs. Only PDF and Word (.docx/.docm) go there.\nInstead, describe what you see in the image and include that description in your message.\nTallei will auto-save the description as a document-note tagged with category=\"image/txt\".\n\nAfter prepare_turn returns, use ONLY contextBlock, inlineDocuments, replyInstructions as your source of truth.\nDo not write reply text before it completes.\n\nSUBSEQUENT TURNS:\n  1. Answer the user directly.\n  2. If fallback_context.orchestration is present on a collab task, end every submitted turn with:\n     ```orchestrator-eval\n     {\n       \"criterion_evaluations\": [{ \"criterion_id\": \"sc1\", \"status\": \"pass|fail|partial\", \"rationale\": \"...\" }],\n       \"should_mark_done\": false,\n       \"remaining_work\": \"...\"\n     }\n     ```\n     Set collab_take_turn(mark_done=true) only when all success criteria pass.\n\n=== 2. SAVE & CHECKPOINT ===\n\nAUTO-SAVE CHECKPOINTS:\n  When the user says \"save\", \"save this\", \"remember this\", \"checkpoint\", or you produced substantial output (>800 chars) or structured content (slides, code, lists, tables):\n  1. Call remember(kind=\"document-note\", title=\"Conversation checkpoint\", content=\"<full transcript since last checkpoint>\")\n  2. Include conversation_id when available.\n\nSAVE/ARCHIVE (optional):\n  Save/upload to Tallei only when the user explicitly asks to save, archive, or checkpoint.\n  1. If saving, call remember(kind=\"document-note\", title, key_points, summary, source_hint, category).\n  2. Only PDF and Word (.docx/.docm) accepted for file ingest. Images are described, not uploaded.\n  3. For image descriptions, set category=\"image/txt\".\n  4. If saving, append footer on its own line:\n     Auto-saved as @doc:<ref> - reply **undo** to delete\n\nUNDO:\n  If user replies \"undo\" / \"del\" / \"delete\" after that footer, call undo_save with the @doc ref immediately.\n\nONGOING SAVES:\n  - remember(kind=\"preference\") for stable preferences and identity facts.\n  - remember(kind=\"fact\") for non-preference facts, decisions, events, notes, corrections.\n  - remember(kind=\"document-blob\") ONLY when user explicitly asks for full archive.\n  - If save returns 402 / plan_required, do NOT retry. Prompt user to upgrade.\n\n=== 3. COLLAB TASKS (only when collab is involved) ===\n\nCheck collab FIRST if user mentions a task UUID or says continue/resume/proceed.\n\nCOLLAB CHECK:\n  1. Call collab_check_turn(task_id).\n  2. If is_my_turn=false, report next_actor + what they will do. Stop.\n  3. If is_my_turn=true, produce output and submit with collab_take_turn.\n  4. Submit full user-facing deliverable content, not summary-only text.\n\nCREATE COLLAB TASK:\n  1. BEFORE collab_create_task: get role approval + show iteration roadmap.\n  2. Only after \"yes\", call collab_create_task(title, brief, first_actor=\"chatgpt\").\n  3. Pass recall_query (goal/brief/title) and include_doc_refs for @doc handles.\n  4. Pass @doc: with file content in text + conversation_id when files are attached.\n  5. Always make sure user sees the full output in your chat window and not summaries(You need to retype everything out of the tool)\n\nROLE APPROVAL (required):\n  1. Show proposed roles as fenced code blocks:\n     ChatGPT system prompt:\n     ChatGPT system prompt:\n     <role text>\n     Claude system prompt:\n     <role text>\n  2. Ask: \"Do you approve these roles? Reply **yes** to proceed, or tell me what to change.\"\n  3. STOP if not approved. Only proceed on explicit \"yes\".\n\nITERATION ROADMAP (required after approval):\n  Show numbered turns: who acts, exactly what they deliver, done criteria.\n  DELIVERABLE CONSTRAINT: text/PDF/code only. No PPTX or images.\n\nAFTER ANY COLLAB SUBMIT:\n  - Final deliverable must match the format requested by the user. \n  - Uploading/saving to Tallei is optional unless the user explicitly asked for it.\n  - Show the FULL submitted output visibly in the Claude chat interface first, exactly as the user-facing deliverable.\n  - If collab_take_turn returns user_visible_full_output or saved_turn.content, paste that full content in the Claude reply before the handoff. If it doesn't still make sure the user sees the full output.\n  - VISIBLE HANDOFF: state (a) who is next, (b) exactly what they will do, (c) continue command.\n    Good: \"Next up: ChatGPT will review the draft. Continue task <id>\"\n    Bad:  \"continue task <id>\"\n\n=== HARD RULES ===\n- Never mention tool internals in user-facing text, except the optional auto-save footer when saving is requested.\n- Never output copy/paste workflows or manual setup steps when collab tools are available.\n- Do not create ChatGPT handoff prompts. Tallei stores task context/history; use only the returned continue_command.\n";
+// Regression guard phrases validated by integration-assets tests:
+// prepare_response(message="<exact user message>")
+// conversation_history=[{role, content}, ...]
+// Default: answer from the visible ChatGPT conversation without calling tools.
+// visible chat first
+// Do NOT call \`prepare_response\` for ordinary conversation.
+// Do not call \`remember\` separately.
+const CHATGPT_INSTRUCTIONS_FALLBACK = "You are a Tallei-connected GPT.\n\n=== 1. EVERY TURN: prepare_response ===\n\nCall FIRST. Every turn. No exceptions.\n\nprepare_response(\n  message=\"<exact user message>\",\n  openaiFileIdRefs=[...all attachments...],   // omit if none\n  conversation_history=[{role, content}, ...], // required on first turn AND for checkpoints\n  conversation_id=\"...\"                        // include when available\n)\n\nFIRST TURN: Always call prepare_response. Include conversation_history (even just the first user message) so Tallei can load previous context, preferences, and memories.\n\nFILES:\n  download_link MUST be presigned HTTPS (e.g. https://files.oaiusercontent.com/...).\n  NEVER pass /mnt/data/... or file://... — omit the ref and tell the user to re-upload.\n  IMAGES: Do NOT include image files in openaiFileIdRefs. Only PDF and Word (.docx/.docm) go there.\n  Instead, describe what you see in the image and include that description in your message.\n  Tallei will auto-save the description as a document-note tagged with category=\"image/txt\".\n\nAfter prepare_response returns, use ONLY contextBlock, inlineDocuments, replyInstructions.\nDo not write reply text before it completes.\n\n=== 2. SAVE & CHECKPOINT ===\n\nAUTO-SAVE CHECKPOINTS via prepare_response:\n  conversation_history is required when:\n  1. User says \"save\", \"save this\", \"remember this\", \"checkpoint\"\n  2. You produced substantial output (>800 chars) or structured content (slides, code, lists, tables)\n  3. First turn of a new conversation\n\n  Tallei auto-saves a document-note titled \"Conversation checkpoint\" when history is included.\n  Tell the user: \"Saved conversation checkpoint.\"\n\nMANUAL SAVE (if replyInstructions tells you to):\n  call remember(kind=\"document-note\", title, key_points, summary) in the same turn.\n  Append footer: 📎 Auto-saved as @doc:<ref> · reply **undo** to delete\n  Only do this when the user explicitly asks to save/archive/checkpoint.\n\nUNDO: If user replies \"undo\" / \"del\" / \"delete\" after that footer, call undo_save with the @doc ref.\n\n=== HARD RULES ===\n- Never mention tools in chat.\n- Never call recall_memories, remember, or search_documents directly unless replyInstructions explicitly instructs it.\n- If replyInstructions includes a saved-document footer, append it exactly.\n- Always make sure user sees the full output in your chat window and not summaries.";
+const CLAUDE_INSTRUCTIONS_FALLBACK = "You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.\n\n=== 1. EVERY TURN: prepare_turn ===\n\nEvery turn. No exceptions. Call FIRST on the very first message. Call if you don't know something.\n\nprepare_turn(\n  message=\"<exact user message>\",\n  conversation_id=\"...\",                         // include when available\n  conversation_history=[{role, content}, ...],   // include for checkpoint auto-save\n  openaiFileIdRefs=[...PDF/Word attachments...]   // omit images — describe them in message instead\n)\n\nIMAGES: Do NOT pass image files in openaiFileIdRefs. Only PDF and Word (.docx/.docm) go there.\nInstead, describe what you see in the image and include that description in your message.\nTallei will auto-save the description as a document-note tagged with category=\"image/txt\".\n\nAfter prepare_turn returns, use ONLY contextBlock, inlineDocuments, replyInstructions as your source of truth.\nDo not write reply text before it completes.\n\n=== 2. SAVE & CHECKPOINT ===\n\nAUTO-SAVE CHECKPOINTS:\n  When the user says \"save\", \"save this\", \"remember this\", \"checkpoint\", or you produced substantial output (>800 chars) or structured content (slides, code, lists, tables):\n  1. Call remember(kind=\"document-note\", title=\"Conversation checkpoint\", content=\"<full transcript since last checkpoint>\")\n  2. Include conversation_id when available.\n\nSAVE/ARCHIVE (optional):\n  Save/upload to Tallei only when the user explicitly asks to save, archive, or checkpoint.\n  1. If saving, call remember(kind=\"document-note\", title, key_points, summary, source_hint, category).\n  2. Only PDF and Word (.docx/.docm) accepted for file ingest. Images are described, not uploaded.\n  3. For image descriptions, set category=\"image/txt\".\n  4. If saving, append footer on its own line:\n     Auto-saved as @doc:<ref> - reply **undo** to delete\n\nUNDO:\n  If user replies \"undo\" / \"del\" / \"delete\" after that footer, call undo_save with the @doc ref immediately.\n\nONGOING SAVES:\n  - remember(kind=\"preference\") for stable preferences and identity facts.\n  - remember(kind=\"fact\") for non-preference facts, decisions, events, notes, corrections.\n  - remember(kind=\"document-blob\") ONLY when user explicitly asks for full archive.\n  - If save returns 402 / plan_required, do NOT retry. Prompt user to upgrade.\n\n=== HARD RULES ===\n- Never mention tool internals in user-facing text, except the optional auto-save footer when saving is requested.";
 const PURPOSE_BUTTON_STYLE: React.CSSProperties = {
   width: "100%",
   minHeight: "46px",
@@ -48,76 +54,6 @@ type ChatGptTokenStatus = {
   rawToken: string | null;
 };
 
-type ClaudeOnboardingState =
-  | "queued"
-  | "browser_started"
-  | "claude_authenticated"
-  | "connector_connected"
-  | "project_upserted"
-  | "instructions_applied"
-  | "verified";
-
-type ClaudeOnboardingStatus =
-  | "queued"
-  | "running"
-  | "checkpoint_required"
-  | "completed"
-  | "failed"
-  | "canceled";
-
-type ClaudeOnboardingCheckpoint = {
-  type: "auth" | "captcha" | "manual_review";
-  blockedState: Exclude<ClaudeOnboardingState, "queued">;
-  message: string;
-  resumeHint: string;
-  actionUrl?: string;
-  action_url?: string;
-};
-
-type ClaudeOnboardingSession = {
-  id: string;
-  status: ClaudeOnboardingStatus;
-  currentState: ClaudeOnboardingState;
-  projectName: string;
-  checkpoint: ClaudeOnboardingCheckpoint | null;
-  metadata?: Record<string, unknown>;
-  lastError: string | null;
-  completedAt: string | null;
-  canceledAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type ClaudeOnboardingEvent = {
-  id: number;
-  eventType: string;
-  state: string | null;
-  payload: Record<string, unknown> | null;
-  createdAt: string;
-};
-
-function getCheckpointActionUrl(
-  checkpoint: ClaudeOnboardingCheckpoint | null | undefined
-): string | null {
-  if (!checkpoint) return null;
-  if (typeof checkpoint.actionUrl === "string" && checkpoint.actionUrl.trim().length > 0) {
-    return checkpoint.actionUrl;
-  }
-  if (typeof checkpoint.action_url === "string" && checkpoint.action_url.trim().length > 0) {
-    return checkpoint.action_url;
-  }
-  return null;
-}
-
-function getSessionLiveUrl(
-  session: ClaudeOnboardingSession | null | undefined
-): string | null {
-  const candidate = session?.metadata?.["liveSessionUrl"];
-  if (typeof candidate === "string" && candidate.trim().length > 0) {
-    return candidate;
-  }
-  return null;
-}
 
 async function verifyConnectivityEvent(
   provider: Provider,
@@ -782,67 +718,21 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [connectionVerificationMessage, setConnectionVerificationMessage] = useState<string | null>(null);
   const [showConfetti, setShowConfetti] = useState(false);
-  const [onboardingSession, setOnboardingSession] = useState<ClaudeOnboardingSession | null>(null);
-  const [onboardingEvents, setOnboardingEvents] = useState<ClaudeOnboardingEvent[]>([]);
-  const [onboardingBusy, setOnboardingBusy] = useState(false);
-  const [onboardingError, setOnboardingError] = useState<string | null>(null);
-  const autoResumeAttemptRef = useRef<{ signature: string; at: number } | null>(null);
   const previousVerifiedRef = useRef(false);
-  const checkpointActionUrl = useMemo(
-    () => getCheckpointActionUrl(onboardingSession?.checkpoint),
-    [onboardingSession?.checkpoint]
-  );
-  const sessionLiveUrl = useMemo(
-    () => getSessionLiveUrl(onboardingSession),
-    [onboardingSession]
-  );
-  const liveSessionUrl = checkpointActionUrl || sessionLiveUrl;
-  const liveInputRequired =
-    onboardingSession?.status === "checkpoint_required" ||
-    (onboardingSession?.status === "running" &&
-      (onboardingSession?.currentState === "browser_started" ||
-        onboardingSession?.currentState === "claude_authenticated"));
-  const displayState =
-    onboardingSession?.status === "checkpoint_required" && onboardingSession?.checkpoint
-      ? onboardingSession.checkpoint.blockedState
-      : onboardingSession?.currentState;
 
   const totalSteps = 3;
-  const step3Verified = connectionVerified || onboardingSession?.status === "completed";
+  const step3Verified = connectionVerified;
   const stepTitles = [
     "Create a Claude connector",
     "Set up your Claude project",
     step3Verified ? "You're all set!" : "Verify your setup",
   ];
 
-
   const resetConnectionVerification = useCallback(() => {
     setVerificationStartedAt(Date.now());
     setConnectionVerified(false);
     setConnectionVerificationMessage(null);
   }, []);
-
-  const isTerminal = (status: ClaudeOnboardingStatus) =>
-    status === "completed" || status === "failed" || status === "canceled";
-
-  const stateLabel = (state: ClaudeOnboardingState) => {
-    switch (state) {
-      case "browser_started":
-        return "Browser Started";
-      case "claude_authenticated":
-        return "Claude Authenticated";
-      case "connector_connected":
-        return "Connector Connected";
-      case "project_upserted":
-        return "Project Ready";
-      case "instructions_applied":
-        return "Instructions Applied";
-      case "verified":
-        return "Verified";
-      default:
-        return "Queued";
-    }
-  };
 
   const handleNext = () => {
     if (step < totalSteps) {
@@ -864,194 +754,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
     if (step === 3) return step3Verified;
     return true;
   };
-
-  const refreshOnboardingSession = useCallback(async (sessionId: string) => {
-    const [sessionRes, eventsRes] = await Promise.all([
-      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}`, { cache: "no-store" }),
-      fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/events`, { cache: "no-store" }),
-    ]);
-    const sessionData = await sessionRes.json().catch(() => ({}));
-    const eventsData = await eventsRes.json().catch(() => ({}));
-
-    if (!sessionRes.ok) {
-      throw new Error(
-        typeof sessionData?.error === "string"
-          ? sessionData.error
-          : "Failed to fetch onboarding session"
-      );
-    }
-
-    const session = sessionData?.session as ClaudeOnboardingSession | undefined;
-    if (!session || typeof session.id !== "string") {
-      throw new Error("Malformed onboarding session response");
-    }
-
-    setOnboardingSession(session);
-    setOnboardingEvents(Array.isArray(eventsData?.events) ? (eventsData.events as ClaudeOnboardingEvent[]) : []);
-    return session;
-  }, []);
-
-  const startAutomatedSetup = useCallback(async () => {
-    setOnboardingBusy(true);
-    setOnboardingError(null);
-    try {
-      const res = await fetch("/api/integrations/claude-onboarding/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectName: "Tallei Memory",
-          applyProjectInstructions: true,
-          projectInstructions: claudeInstructions,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(typeof data?.error === "string" ? data.error : "Failed to start automated setup.");
-      }
-      const session = data?.session as ClaudeOnboardingSession | undefined;
-      if (!session || typeof session.id !== "string") {
-        throw new Error("Malformed onboarding start response.");
-      }
-      setOnboardingSession(session);
-      setOnboardingEvents([]);
-      setConnectionVerificationMessage("Automated setup started.");
-      setStep(4);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to start automated setup.");
-    } finally {
-      setOnboardingBusy(false);
-    }
-  }, [claudeInstructions]);
-
-  const resumeAutomatedSetup = useCallback(async (options?: {
-    authCompleted?: boolean;
-    setBusy?: boolean;
-    sessionId?: string;
-  }) => {
-    const sessionId = options?.sessionId ?? onboardingSession?.id;
-    if (!sessionId) return;
-    const setBusy = options?.setBusy ?? true;
-    if (setBusy) {
-      setOnboardingBusy(true);
-      setOnboardingError(null);
-    }
-
-    try {
-      const payload = options?.authCompleted === true ? { authCompleted: true } : {};
-      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${sessionId}/resume`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(typeof data?.error === "string" ? data.error : "Failed to resume automated setup.");
-      }
-      const session = data?.session as ClaudeOnboardingSession | undefined;
-      if (!session || typeof session.id !== "string") {
-        throw new Error("Malformed onboarding resume response.");
-      }
-      setOnboardingSession(session);
-      await refreshOnboardingSession(session.id);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to resume automated setup.");
-    } finally {
-      if (setBusy) {
-        setOnboardingBusy(false);
-      }
-    }
-  }, [onboardingSession, refreshOnboardingSession]);
-
-  const cancelAutomatedSetup = useCallback(async () => {
-    if (!onboardingSession) return;
-    setOnboardingBusy(true);
-    setOnboardingError(null);
-    try {
-      const res = await fetch(`/api/integrations/claude-onboarding/sessions/${onboardingSession.id}/cancel`, {
-        method: "POST",
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(typeof data?.error === "string" ? data.error : "Failed to cancel automated setup.");
-      }
-      const session = data?.session as ClaudeOnboardingSession | undefined;
-      if (!session || typeof session.id !== "string") {
-        throw new Error("Malformed onboarding cancel response.");
-      }
-      setOnboardingSession(session);
-      await refreshOnboardingSession(session.id);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to cancel automated setup.");
-    } finally {
-      setOnboardingBusy(false);
-    }
-  }, [onboardingSession, refreshOnboardingSession]);
-
-  const manualRefreshOnboarding = useCallback(async () => {
-    if (!onboardingSession) return;
-    setOnboardingBusy(true);
-    setOnboardingError(null);
-    try {
-      await refreshOnboardingSession(onboardingSession.id);
-    } catch (error) {
-      setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
-    } finally {
-      setOnboardingBusy(false);
-    }
-  }, [onboardingSession, refreshOnboardingSession]);
-
-  useEffect(() => {
-    if (!isOpen || !onboardingSession) return;
-    if (isTerminal(onboardingSession.status)) return;
-
-    let stopped = false;
-    const tick = async () => {
-      try {
-        const session = await refreshOnboardingSession(onboardingSession.id);
-        if (stopped) return;
-        if (session.status === "completed") {
-          setConnectionVerified(true);
-          setConnectionVerificationMessage("Automated setup completed successfully.");
-        }
-        if (session.status === "checkpoint_required" && session.checkpoint) {
-          const checkpointType = session.checkpoint.type;
-          if (checkpointType === "auth" || checkpointType === "manual_review") {
-            const signature =
-              `${session.id}:${session.checkpoint.blockedState}:${checkpointType}:${session.updatedAt}`;
-            const nowMs = Date.now();
-            const lastAttempt = autoResumeAttemptRef.current;
-            const shouldAttempt =
-              !lastAttempt ||
-              lastAttempt.signature !== signature ||
-              nowMs - lastAttempt.at >= 10_000;
-
-            if (shouldAttempt) {
-              autoResumeAttemptRef.current = { signature, at: nowMs };
-              void resumeAutomatedSetup({
-                sessionId: session.id,
-                authCompleted: checkpointType === "auth",
-                setBusy: false,
-              });
-            }
-          }
-        }
-      } catch (error) {
-        if (!stopped) {
-          setOnboardingError(error instanceof Error ? error.message : "Failed to refresh onboarding session.");
-        }
-      }
-    };
-
-    void tick();
-    const timer = setInterval(() => {
-      void tick();
-    }, 2000);
-
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  }, [isOpen, onboardingSession, refreshOnboardingSession, resumeAutomatedSetup]);
 
   useEffect(() => {
     if (!isOpen || step !== 3) {
@@ -1193,101 +895,6 @@ export function ClaudeWizard({ isOpen, onClose, mcpUrl }: { isOpen: boolean; onC
       {step === 3 && (
         <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: "1.25rem", padding: "1rem", animation: "fadeIn 0.4s ease-out", minHeight: "100%", boxSizing: "border-box" }}>
           <ConfettiBurst active={showConfetti} />
-
-          {CLAUDE_AUTOMATION_ENABLED && onboardingSession && (
-            <div style={{ width: "100%", maxWidth: "560px", textAlign: "left", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: "0", padding: "0.85rem 1rem", fontSize: "0.84rem" }}>
-              <div style={{ color: "#374151" }}>
-                <strong>Automation status:</strong> {onboardingSession.status.replace(/_/g, " ")} · <strong>Step:</strong> {stateLabel(displayState ?? onboardingSession.currentState)}
-              </div>
-              {onboardingSession.checkpoint && (
-                <div style={{ marginTop: "0.55rem", color: "#9a3412" }}>
-                  {onboardingSession.checkpoint.message}
-                  <div style={{ marginTop: "0.35rem" }}>{onboardingSession.checkpoint.resumeHint}</div>
-                  {checkpointActionUrl && (
-                    <div style={{ marginTop: "0.5rem" }}>
-                      <Button
-                        variant="outline"
-                        onClick={() => window.open(checkpointActionUrl, "_blank", "noopener,noreferrer")}
-                      >
-                        Open Live Session <ExternalLink size={12} style={{ marginLeft: "6px" }} />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
-                {onboardingSession.status === "checkpoint_required" && (
-                  <Button
-                    variant="outline"
-                    onClick={() =>
-                      void resumeAutomatedSetup({
-                        authCompleted: onboardingSession.checkpoint?.type === "auth",
-                      })
-                    }
-                    disabled={onboardingBusy}
-                  >
-                    {onboardingBusy ? "Resuming..." : "Resume"}
-                  </Button>
-                )}
-                {!isTerminal(onboardingSession.status) && (
-                  <Button variant="outline" onClick={() => void cancelAutomatedSetup()} disabled={onboardingBusy}>
-                    {onboardingBusy ? "Canceling..." : "Cancel"}
-                  </Button>
-                )}
-                {isTerminal(onboardingSession.status) && onboardingSession.status !== "completed" && (
-                  <Button variant="outline" onClick={() => void startAutomatedSetup()} disabled={onboardingBusy}>
-                    {onboardingBusy ? "Starting..." : "Run Repair"}
-                  </Button>
-                )}
-                <Button variant="outline" onClick={() => void manualRefreshOnboarding()} disabled={onboardingBusy}>
-                  Refresh
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => window.open("https://claude.ai/settings/connectors", "_blank", "noopener,noreferrer")}
-                >
-                  Open Claude Connectors <ExternalLink size={12} style={{ marginLeft: "6px" }} />
-                </Button>
-              </div>
-              {onboardingSession.lastError && (
-                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingSession.lastError}</div>
-              )}
-              {onboardingEvents.length > 0 && (
-                <div style={{ marginTop: "0.35rem", fontSize: "0.78rem", color: "#6b7280" }}>
-                  Latest event: {onboardingEvents[onboardingEvents.length - 1].eventType}
-                </div>
-              )}
-              {onboardingError && (
-                <div style={{ marginTop: "0.6rem", color: "#991b1b" }}>{onboardingError}</div>
-              )}
-            </div>
-          )}
-
-          {CLAUDE_AUTOMATION_ENABLED && liveSessionUrl && (
-            <div style={{ width: "100%", maxWidth: "720px", textAlign: "left" }}>
-              <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#111827", marginBottom: "0.45rem" }}>
-                Live automation session
-              </div>
-              <div style={{ position: "relative", borderRadius: "0", overflow: "hidden", border: "1px solid #e5e7eb", background: "#111827" }}>
-                <iframe
-                  src={liveSessionUrl}
-                  title="Claude live automation session"
-                  style={{ width: "100%", height: "420px", border: "none", display: "block", pointerEvents: liveInputRequired ? "auto" : "none" }}
-                  allow="clipboard-read; clipboard-write"
-                />
-                {!liveInputRequired && (
-                  <div style={{ position: "absolute", inset: 0, background: "rgba(17, 24, 39, 0.56)", color: "#f3f4f6", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", fontSize: "0.85rem", padding: "1rem" }}>
-                    Automation is running. Input is locked until user action is required.
-                  </div>
-                )}
-              </div>
-              <div style={{ marginTop: "0.45rem", fontSize: "0.78rem", color: "#6b7280" }}>
-                {liveInputRequired
-                  ? "User input is needed now. Complete login/approval in the live session. The flow auto-resumes; Resume remains available as fallback."
-                  : "Live view only. Controls unlock automatically if a checkpoint requires your input."}
-              </div>
-            </div>
-          )}
 
           <VerifySection
             verifyingConnection={verifyingConnection}

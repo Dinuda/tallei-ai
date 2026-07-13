@@ -444,13 +444,19 @@ export async function buildRecentFallback(
       text,
       lexical,
       recency,
-      metadata: {
-        ...metadata,
-        platform: row.platform,
-        createdAt: row.created_at,
-        retrieval: "recent_fallback",
-        query: normalizeQuery(query),
-        lexical_relevance: Number(lexical.toFixed(4)),
+        metadata: {
+          ...metadata,
+          platform: row.platform,
+          createdAt: row.created_at,
+          tier: row.tier,
+          segment: row.segment,
+          importance: Number(row.importance),
+          decayRate: Number(row.decay_rate),
+          accessCount: row.access_count,
+          lifecycle: row.lifecycle,
+          retrieval: "recent_fallback",
+          query: normalizeQuery(query),
+          lexical_relevance: Number(lexical.toFixed(4)),
       },
     };
   });

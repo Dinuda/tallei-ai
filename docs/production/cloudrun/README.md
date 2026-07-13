@@ -7,6 +7,7 @@ This guide documents the production deployment for this repository using two Clo
 
 ## Read This First
 
+- Product scope: [product-scope.md](../../product-scope.md)
 - Full deployment sequence: [flow.md](./flow.md)
 - Domain and DNS details: [dns.md](./dns.md)
 - Failure playbook: [troubleshooting.md](./troubleshooting.md)

@@ -18,7 +18,7 @@ import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 import { embedText } from "../cache/embedding-cache.js";
 import { MemoryRepository, type MemoryRecordRow } from "../repositories/memory.repository.js";
 import { VectorRepository } from "../repositories/vector.repository.js";
-import { activitySignal, confidenceTier, detectConflicts, type ConflictHint } from "./scoring-utils.js";
+import { activitySignal, confidenceTier, detectConflicts, freshnessSignal, type ConflictHint } from "./scoring-utils.js";
 
 const memoryRepository = new MemoryRepository();
 const vectorRepository = new VectorRepository();
@@ -106,6 +106,13 @@ function decryptSafe(row: MemoryRecordRow): string | null {
   }
 }
 
+function isArchiveImportRow(row: MemoryRecordRow): boolean {
+  if (!row.summary_json || typeof row.summary_json !== "object") return false;
+  const summary = row.summary_json as Record<string, unknown>;
+  if (summary["source_import_archive_excluded_recall"] === true) return true;
+  return summary["source_import_processing_tier"] === "archive";
+}
+
 function toMeta(row: MemoryRecordRow): Record<string, unknown> {
   const summary =
     row.summary_json && typeof row.summary_json === "object"
@@ -119,6 +126,12 @@ function toMeta(row: MemoryRecordRow): Record<string, unknown> {
     category: row.category,
     is_pinned: row.is_pinned,
     reference_count: row.reference_count,
+    tier: row.tier,
+    segment: row.segment,
+    importance: Number(row.importance),
+    decayRate: Number(row.decay_rate),
+    accessCount: row.access_count,
+    lifecycle: row.lifecycle,
   };
 }
 
@@ -248,7 +261,7 @@ async function recallFirstHybrid(
       const vScore = vRank !== undefined ? 1 / (60 + vRank + 1) : 0;
       const bScore = maxBm25 > 0 ? (bm25.get(id) ?? 0) / maxBm25 : 0;
       const activity = activitySignal(item.row.reference_count ?? 1, item.row.last_referenced_at ?? null);
-      return { ...item, score: (vScore * 0.7 + bScore * 0.3) * activity };
+      return { ...item, score: (vScore * 0.7 + bScore * 0.3) * activity * freshnessSignal(item.row.created_at) };
     })
     .sort((a, b) => b.score - a.score);
 
@@ -270,6 +283,7 @@ export async function bucketRecall(
 
   // Decrypt once
   const decrypted = allRows.flatMap((row) => {
+    if (isArchiveImportRow(row)) return [];
     const text = decryptSafe(row);
     return text !== null ? [{ row, text }] : [];
   });
@@ -310,13 +324,17 @@ export async function bucketRecall(
   );
 
   if (longtermTotalTokens <= LONGTERM_BUDGET) {
-    // Fits entirely — dump everything, sorted by reference count
+    // Fits entirely — dump everything, with fresh memories slightly favored.
     longtermMemories = packUnderBudget(
       longtermRows
-        .sort((a, b) => (b.row.reference_count ?? 0) - (a.row.reference_count ?? 0))
+        .sort((a, b) => {
+          const bScore = activitySignal(b.row.reference_count ?? 1, b.row.last_referenced_at ?? null) * freshnessSignal(b.row.created_at);
+          const aScore = activitySignal(a.row.reference_count ?? 1, a.row.last_referenced_at ?? null) * freshnessSignal(a.row.created_at);
+          return bScore - aScore;
+        })
         .map((r) => ({
           ...r,
-          score: activitySignal(r.row.reference_count ?? 1, r.row.last_referenced_at ?? null),
+          score: activitySignal(r.row.reference_count ?? 1, r.row.last_referenced_at ?? null) * freshnessSignal(r.row.created_at),
         })),
       LONGTERM_BUDGET
     );

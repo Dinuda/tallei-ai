@@ -156,7 +156,7 @@ export function IntegrationsSection() {
   };
 
   return (
-    <section id="integrations" className="integrations-hero" aria-label="AI Integrations">
+    <section className="integrations-hero" aria-label="AI Integrations">
       {/* Left Column */}
       <div className="integrations-left">
         <span className="integrations-eyebrow">INTEGRATIONS</span>

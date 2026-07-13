@@ -2,12 +2,19 @@ import type { Metadata, Viewport } from "next";
 import { auth } from "../auth";
 import { Providers } from "./providers";
 import "./globals.css";
-import { Fustat, Geist, Space_Grotesk } from "next/font/google";
+import { Bytesized, Fustat, Geist, Space_Grotesk } from "next/font/google";
 import { cn } from "@/lib/utils";
 
 const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 const spaceGrotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-title", weight: ["500", "600", "700"] });
 const fustat = Fustat({ subsets: ["latin"], variable: "--font-fustat", weight: ["400", "500", "600", "700"] });
+const bytesized = Bytesized({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-bytesized",
+  adjustFontFallback: false,
+  fallback: ["ui-monospace", "monospace"],
+});
 
 const metadataDescription =
   "Tired of repeating yourself to every AI? Tallei syncs persistent memory across ChatGPT, Claude, and Gemini. Write your preferences once — every AI assistant already knows them.";
@@ -139,7 +146,7 @@ export default async function RootLayout({
   const session = await auth();
 
   return (
-    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable, spaceGrotesk.variable, fustat.variable)}>
+    <html lang="en" suppressHydrationWarning className={cn("font-sans", geist.variable, spaceGrotesk.variable, fustat.variable, bytesized.variable)}>
       <body suppressHydrationWarning>
         <Providers session={session}>
           {children}

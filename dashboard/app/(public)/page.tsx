@@ -3,10 +3,19 @@ import { HomeContent } from "./home-content";
 
 export const metadata: Metadata = {
   title: {
-    absolute: "Tallei — Sync Memory Between ChatGPT, Claude & Gemini",
+    absolute: "Tallei — Cross-AI Memory",
   },
+  description:
+    "Tallei remembers your work across ChatGPT, Claude, and Gemini so every AI already knows your context.",
   alternates: {
     canonical: "https://tallei.com",
+  },
+  openGraph: {
+    title: "Tallei — Cross-AI Memory",
+    description:
+      "Tallei remembers your work across ChatGPT, Claude, and Gemini so every AI already knows your context.",
+    url: "https://tallei.com",
+    siteName: "Tallei",
   },
 };
 

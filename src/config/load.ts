@@ -1,5 +1,8 @@
 import "dotenv/config";
 
+import { DEFAULT_CLAUDE_CONNECTOR_INSTRUCTIONS } from "./claude-connector-instructions.js";
+import { applyEnvAliases } from "./env-aliases.js";
+import { loadLlmConfig } from "./sections/llm.js";
 import {
   normalizeBaseUrl,
   readBooleanEnv,
@@ -10,164 +13,10 @@ import {
   requireEnv,
 } from "./schema.js";
 
-// ---------------------------------------------------------------------------
-// Dual-read alias map
-//
-// Maps new canonical TALLEI_* names to their legacy equivalents.
-// When a new name is absent but the old name is present, the old value is
-// copied under the new name so the rest of loadConfig only has to read
-// TALLEI_* names.  A single boot-time warning lists which old names are
-// still in use so operators can migrate at their own pace.
-//
-// Remove a pair from this table one release after the deprecation warning
-// has shipped (i.e. after announcing the new name in CHANGELOG / deploy docs).
-// ---------------------------------------------------------------------------
-const ALIAS_MAP: ReadonlyArray<{ newKey: string; oldKey: string }> = [
-  // HTTP / server
-  { newKey: "TALLEI_HTTP__PORT",               oldKey: "PORT" },
-  { newKey: "TALLEI_HTTP__HOST",               oldKey: "HOST" },
-  { newKey: "TALLEI_HTTP__PUBLIC_BASE_URL",     oldKey: "PUBLIC_BASE_URL" },
-  { newKey: "TALLEI_HTTP__DASHBOARD_BASE_URL",  oldKey: "DASHBOARD_BASE_URL" },
-  { newKey: "TALLEI_HTTP__FRONTEND_URL",        oldKey: "FRONTEND_URL" },
-  { newKey: "TALLEI_HTTP__INTERNAL_API_SECRET", oldKey: "INTERNAL_API_SECRET" },
-  { newKey: "TALLEI_HTTP__MCP_URL",             oldKey: "MCP_URL" },
-  // Database
-  { newKey: "TALLEI_DB__URL",                  oldKey: "DATABASE_URL" },
-  { newKey: "TALLEI_DB__URL_FALLBACK",          oldKey: "DATABASE_URL_FALLBACK" },
-  { newKey: "TALLEI_DB__AUTO_MIGRATE_ON_BOOT",  oldKey: "DB_AUTO_MIGRATE_ON_BOOT" },
-  // LLM / generation
-  { newKey: "TALLEI_LLM__OPENAI_API_KEY",       oldKey: "OPENAI_API_KEY" },
-  { newKey: "TALLEI_LLM__PROVIDER",             oldKey: "LLM_PROVIDER" },
-  { newKey: "TALLEI_LLM__CHAT_MODEL",           oldKey: "OPENAI_MODEL" },
-  { newKey: "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", oldKey: "INTENT_CLASSIFIER_MODEL" },
-  { newKey: "TALLEI_LLM__OLLAMA_BASE_URL",      oldKey: "OLLAMA_BASE_URL" },
-  { newKey: "TALLEI_LLM__OLLAMA_MODEL",         oldKey: "OLLAMA_MODEL" },
-  { newKey: "TALLEI_LLM__LOCAL_MODEL_MODE",     oldKey: "LOCAL_MODEL_MODE" },
-  { newKey: "TALLEI_LLM__GOOGLE_MODEL",         oldKey: "GOOGLE_MODEL" },
-  { newKey: "TALLEI_GOOGLE__API_KEY",           oldKey: "GOOGLE_API_KEY" },
-  { newKey: "TALLEI_GOOGLE__PROJECT_ID",        oldKey: "GOOGLE_CLOUD_PROJECT" },
-  { newKey: "TALLEI_GOOGLE__LOCATION",          oldKey: "GOOGLE_CLOUD_LOCATION" },
-  // Embedding
-  { newKey: "TALLEI_EMBED__PROVIDER",           oldKey: "EMBEDDING_PROVIDER" },
-  { newKey: "TALLEI_EMBED__MODEL",              oldKey: "EMBEDDING_MODEL" },
-  { newKey: "TALLEI_EMBED__DIMS",               oldKey: "EMBEDDING_DIMS" },
-  { newKey: "TALLEI_EMBED__GOOGLE_MODEL",       oldKey: "GOOGLE_EMBEDDING_MODEL" },
-  // Qdrant
-  { newKey: "TALLEI_QDRANT__URL",              oldKey: "QDRANT_URL" },
-  { newKey: "TALLEI_QDRANT__API_KEY",           oldKey: "QDRANT_API_KEY" },
-  { newKey: "TALLEI_QDRANT__COLLECTION",        oldKey: "QDRANT_COLLECTION_NAME" },
-  { newKey: "TALLEI_QDRANT__TIMEOUT_MS",        oldKey: "QDRANT_TIMEOUT_MS" },
-  // Redis
-  { newKey: "TALLEI_REDIS__URL",               oldKey: "REDIS_URL" },
-  { newKey: "TALLEI_REDIS__CONNECT_TIMEOUT_MS", oldKey: "REDIS_CONNECT_TIMEOUT_MS" },
-  { newKey: "TALLEI_REDIS__COMMAND_TIMEOUT_MS", oldKey: "REDIS_COMMAND_TIMEOUT_MS" },
-  { newKey: "TALLEI_REDIS__FAILURE_COOLDOWN_MS",oldKey: "REDIS_FAILURE_COOLDOWN_MS" },
-  // Auth / crypto
-  { newKey: "TALLEI_AUTH__JWT_SECRET",          oldKey: "JWT_SECRET" },
-  { newKey: "TALLEI_AUTH__API_KEY_PEPPER",      oldKey: "API_KEY_PEPPER" },
-  { newKey: "TALLEI_AUTH__CONTINUATION_PRIVATE_KEY", oldKey: "AUTH_CONTINUATION_PRIVATE_KEY" },
-  { newKey: "TALLEI_AUTH__CONTINUATION_PUBLIC_KEY", oldKey: "AUTH_CONTINUATION_PUBLIC_KEY" },
-  { newKey: "TALLEI_AUTH__CONTINUATION_TTL_SECONDS", oldKey: "AUTH_CONTINUATION_TTL_SECONDS" },
-  { newKey: "TALLEI_AUTH__SUPABASE_URL",        oldKey: "SUPABASE_URL" },
-  { newKey: "TALLEI_AUTH__SUPABASE_SERVICE_ROLE_KEY", oldKey: "SUPABASE_SERVICE_ROLE_KEY" },
-  { newKey: "TALLEI_AUTH__MEMORY_MASTER_KEY",   oldKey: "MEMORY_MASTER_KEY" },
-  { newKey: "TALLEI_AUTH__KMS_KEY_ID",          oldKey: "KMS_KEY_ID" },
-  // Storage
-  { newKey: "TALLEI_STORAGE__UPLOADTHING_TOKEN", oldKey: "UPLOADTHING_TOKEN" },
-  // Billing
-  { newKey: "TALLEI_BILLING__LEMONSQUEEZY_API_KEY",        oldKey: "LEMONSQUEEZY_API_KEY" },
-  { newKey: "TALLEI_BILLING__LEMONSQUEEZY_WEBHOOK_SECRET", oldKey: "LEMONSQUEEZY_WEBHOOK_SECRET" },
-  { newKey: "TALLEI_BILLING__LEMONSQUEEZY_PRO_VARIANT_ID", oldKey: "LEMONSQUEEZY_PRO_VARIANT_ID" },
-  { newKey: "TALLEI_BILLING__LEMONSQUEEZY_POWER_VARIANT_ID", oldKey: "LEMONSQUEEZY_POWER_VARIANT_ID" },
-  { newKey: "TALLEI_BILLING__TRIAL_DAYS",                  oldKey: "LEMONSQUEEZY_TRIAL_DAYS" },
-  // Signup notifications
-  { newKey: "TALLEI_SIGNUP__RESEND_API_KEY",               oldKey: "SIGNUP_RESEND_API_KEY" },
-  { newKey: "TALLEI_SIGNUP__SLACK_WEBHOOK_URL",            oldKey: "SIGNUP_SLACK_WEBHOOK_URL" },
-  { newKey: "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_URL",     oldKey: "SIGNUP_FAILURE_PING_WEBHOOK_URL" },
-  { newKey: "TALLEI_SIGNUP__FAILURE_PING_WEBHOOK_TOKEN",   oldKey: "SIGNUP_FAILURE_PING_WEBHOOK_TOKEN" },
-  { newKey: "TALLEI_SIGNUP__EMAIL_FROM_NAME",              oldKey: "SIGNUP_EMAIL_FROM_NAME" },
-  { newKey: "TALLEI_SIGNUP__EMAIL_FROM_EMAIL",             oldKey: "SIGNUP_EMAIL_FROM_EMAIL" },
-  { newKey: "TALLEI_SIGNUP__EMAIL_REPLY_TO",               oldKey: "SIGNUP_EMAIL_REPLY_TO" },
-  // Browser automation
-  { newKey: "TALLEI_BROWSER__WORKER_BASE_URL",  oldKey: "BROWSER_WORKER_BASE_URL" },
-  { newKey: "TALLEI_BROWSER__WORKER_API_KEY",   oldKey: "BROWSER_WORKER_API_KEY" },
-  { newKey: "TALLEI_BROWSER__WORKER_WS_ENDPOINT",oldKey: "BROWSER_WORKER_WS_ENDPOINT" },
-  { newKey: "TALLEI_BROWSER__HYPERBROWSER_API_KEY", oldKey: "HYPERBROWSER_API_KEY" },
-  { newKey: "TALLEI_BROWSER__SESSION_TTL_MS",   oldKey: "BROWSER_SESSION_TTL_MS" },
-  { newKey: "TALLEI_BROWSER__HEADLESS",         oldKey: "BROWSER_HEADLESS" },
-  { newKey: "TALLEI_BROWSER__TEACHER_THRESHOLD",    oldKey: "BROWSER_TEACHER_THRESHOLD" },
-  { newKey: "TALLEI_BROWSER__MAX_RETRIES",      oldKey: "BROWSER_MAX_STUDENT_RETRIES" },
-  { newKey: "TALLEI_BROWSER__LLM_FALLBACK",     oldKey: "BROWSER_LLM_FALLBACK_ENABLED" },
-  { newKey: "TALLEI_BROWSER__REQUEST_TIMEOUT_MS", oldKey: "BROWSER_WORKER_REQUEST_TIMEOUT_MS" },
-  // Worker runtime
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_ENABLED", oldKey: "UPLOAD_INGEST_WORKER_ENABLED" },
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", oldKey: "UPLOAD_INGEST_WORKER_POLL_MS" },
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", oldKey: "UPLOAD_INGEST_WORKER_BATCH_SIZE" },
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_CONCURRENCY", oldKey: "UPLOAD_INGEST_WORKER_CONCURRENCY" },
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_MAX_ATTEMPTS", oldKey: "UPLOAD_INGEST_WORKER_MAX_ATTEMPTS" },
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_BASE_MS", oldKey: "UPLOAD_INGEST_WORKER_RETRY_BASE_MS" },
-  { newKey: "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_MAX_MS", oldKey: "UPLOAD_INGEST_WORKER_RETRY_MAX_MS" },
-  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_ENABLED", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_ENABLED" },
-  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_POLL_MS", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_POLL_MS" },
-  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_BATCH_SIZE", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_BATCH_SIZE" },
-  { newKey: "TALLEI_WORKERS__VERTEX_BACKFILL_MAX_ATTEMPTS", oldKey: "VERTEX_DOCUMENT_BACKFILL_WORKER_MAX_ATTEMPTS" },
-  // Feature flags
-  { newKey: "TALLEI_FEATURE__RERANK",           oldKey: "RERANK_ENABLED" },
-  { newKey: "TALLEI_FEATURE__USE_NEW_SAVE",     oldKey: "USE_NEW_SAVE_USECASE" },
-  { newKey: "TALLEI_FEATURE__USE_NEW_RECALL",   oldKey: "USE_NEW_RECALL_USECASE" },
-  { newKey: "TALLEI_FEATURE__USE_NEW_LIST",     oldKey: "USE_NEW_LIST_USECASE" },
-  { newKey: "TALLEI_FEATURE__USE_NEW_DELETE",   oldKey: "USE_NEW_DELETE_USECASE" },
-  { newKey: "TALLEI_FEATURE__AUTH_API_KEY_VIEW", oldKey: "AUTH_API_KEY_VIEW_ENABLED" },
-  { newKey: "TALLEI_FEATURE__AUTH_API_KEY_VIEW_SHADOW", oldKey: "AUTH_API_KEY_VIEW_SHADOW_ENABLED" },
-  // Resilience tunables
-  { newKey: "TALLEI_RESILIENCE__VECTOR_UPSERT_TIMEOUT_MS", oldKey: "MEMORY_VECTOR_UPSERT_TIMEOUT_MS" },
-  { newKey: "TALLEI_RESILIENCE__SAVE_SUMMARY_TIMEOUT_MS",  oldKey: "MEMORY_SAVE_SUMMARY_TIMEOUT_MS" },
-  { newKey: "TALLEI_RESILIENCE__RECALL_EMBED_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_EMBED_TIMEOUT_MS" },
-  { newKey: "TALLEI_RESILIENCE__RECALL_VECTOR_TIMEOUT_MS", oldKey: "MEMORY_RECALL_VECTOR_TIMEOUT_MS" },
-  { newKey: "TALLEI_RESILIENCE__RECALL_TOTAL_TIMEOUT_MS",  oldKey: "MEMORY_RECALL_TOTAL_TIMEOUT_MS" },
-  { newKey: "TALLEI_RESILIENCE__RECALL_REDIS_HEDGE_ENABLED", oldKey: "RECALL_REDIS_HEDGE_ENABLED" },
-  { newKey: "TALLEI_RESILIENCE__RECALL_REDIS_HEDGE_DELAY_MS", oldKey: "RECALL_REDIS_HEDGE_DELAY_MS" },
-  // Rate limits
-  { newKey: "TALLEI_RATE__MEMORY_API_PER_MINUTE", oldKey: "MEMORY_API_RATE_LIMIT_PER_MINUTE" },
-  { newKey: "TALLEI_RATE__MCP_PER_MINUTE",         oldKey: "MCP_RATE_LIMIT_PER_MINUTE" },
-  // Misc
-  { newKey: "TALLEI_MISC__RECALL_MIN_VECTOR_SCORE",  oldKey: "RECALL_MIN_VECTOR_SCORE" },
-  { newKey: "TALLEI_MISC__RECALL_MIN_FALLBACK_SCORE",oldKey: "RECALL_MIN_FALLBACK_SCORE" },
-  { newKey: "TALLEI_MISC__RECALL_HYBRID_SIMILARITY_FLOOR", oldKey: "RECALL_HYBRID_SIMILARITY_FLOOR" },
-  { newKey: "TALLEI_MISC__RERANK_MIN_SCORE",         oldKey: "RERANK_MIN_SCORE" },
-  { newKey: "TALLEI_MISC__MEMORY_FALLBACK_MIN_RELEVANCE", oldKey: "MEMORY_FALLBACK_MIN_RELEVANCE" },
-  { newKey: "TALLEI_MISC__AUTH_USAGE_UPDATE_DEBOUNCE_MS",   oldKey: "AUTH_USAGE_UPDATE_DEBOUNCE_MS" },
-  { newKey: "TALLEI_MISC__AUTH_USAGE_UPDATE_RETRY_MS",      oldKey: "AUTH_USAGE_UPDATE_RETRY_MS" },
-  { newKey: "TALLEI_MISC__AUTH_USAGE_UPDATE_MAX_CONCURRENCY", oldKey: "AUTH_USAGE_UPDATE_MAX_CONCURRENCY" },
-];
+export type { ImportExtractMode, ReasoningEffort } from "./types.js";
 
-/**
- * Copies legacy env var values under their new TALLEI_* canonical names when
- * the new name is absent. Emits a single deprecation warning listing every
- * old name still in use (suppressed in test mode to keep output clean).
- */
 function resolveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const resolved: NodeJS.ProcessEnv = { ...env };
-  const deprecated: string[] = [];
-
-  for (const { newKey, oldKey } of ALIAS_MAP) {
-    if (!resolved[newKey] && resolved[oldKey]) {
-      resolved[newKey] = resolved[oldKey];
-      deprecated.push(oldKey);
-    }
-  }
-
-  if (deprecated.length > 0 && env.NODE_ENV !== "test") {
-    // Use console.warn here deliberately — this fires before the logger is
-    // initialised, so we cannot use the structured logger.
-    console.warn(
-      `[tallei/config] DEPRECATED env vars in use (rename before next major version): ` +
-        deprecated.join(", ") +
-        `. See docs/adr/005-config-schema-zod.md for canonical TALLEI_* names.`
-    );
-  }
-
-  return resolved;
+  return applyEnvAliases(env);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -177,16 +26,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const nodeEnv = e.NODE_ENV || "development";
   const localModelModeDefault = nodeEnv !== "production";
   const localModelMode = readBooleanEnv(e, "TALLEI_LLM__LOCAL_MODEL_MODE", localModelModeDefault);
-  const defaultLlmProvider = localModelMode ? "ollama" : "openai";
-  const defaultEmbeddingProvider = localModelMode ? "ollama" : "openai";
-  const defaultEmbeddingModel = localModelMode ? "nomic-embed-text" : "text-embedding-3-small";
-  const defaultEmbeddingDims = localModelMode ? 768 : 1536;
   const defaultQdrantCollectionName = localModelMode ? "memories_local_v1" : "memories_v1";
   const localBaseUrl = `http://localhost:${port}`;
   const configuredPublicBaseUrl = e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl;
   const publicBaseUrl = normalizeBaseUrl(configuredPublicBaseUrl);
   const qdrantTimeoutMsOverride = readOptionalIntEnv(e, "TALLEI_QDRANT__TIMEOUT_MS");
-  const qdrantTimeoutSecondsLegacy = readOptionalIntEnv(e, "QDRANT_TIMEOUT_SECONDS"); // legacy only; no TALLEI_ form
+  const llm = loadLlmConfig(e, { nodeEnv, localModelMode });
 
   return {
     port,
@@ -199,10 +44,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
     publicBaseUrl,
     dashboardBaseUrl: normalizeBaseUrl(
-      e.TALLEI_HTTP__DASHBOARD_BASE_URL || e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl
+      e.TALLEI_HTTP__DASHBOARD_BASE_URL ||
+        e.TALLEI_HTTP__FRONTEND_URL ||
+        "http://localhost:3001"
     ),
     frontendUrl: normalizeBaseUrl(
-      e.TALLEI_HTTP__FRONTEND_URL || e.TALLEI_HTTP__PUBLIC_BASE_URL || "http://localhost:3001"
+      e.TALLEI_HTTP__FRONTEND_URL || "http://localhost:3001"
     ),
     internalApiSecret: requireEnv(e, "TALLEI_HTTP__INTERNAL_API_SECRET"),
     mcpPublicUrl: e.TALLEI_HTTP__MCP_URL || "",
@@ -213,7 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       "TALLEI_DB__AUTO_MIGRATE_ON_BOOT",
       nodeEnv !== "production"
     ),
-    openaiApiKey: readStringEnv(e, "TALLEI_LLM__OPENAI_API_KEY"),
     jwtSecret: requireEnv(e, "TALLEI_AUTH__JWT_SECRET"),
     apiKeyPepper: readStringEnv(e, "TALLEI_AUTH__API_KEY_PEPPER"),
     authContinuationPrivateKey: readStringEnv(e, "TALLEI_AUTH__CONTINUATION_PRIVATE_KEY"),
@@ -284,18 +130,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     // Qdrant JS client expects timeout in milliseconds.
     qdrantTimeoutMs:
       qdrantTimeoutMsOverride ??
-      (qdrantTimeoutSecondsLegacy !== null
-        ? qdrantTimeoutSecondsLegacy * 1000
-        : nodeEnv === "production"
-          ? 30_000
-          : 10_000),
-    embeddingProvider: readStringEnv(e, "TALLEI_EMBED__PROVIDER", defaultEmbeddingProvider) as "openai" | "ollama" | "google",
-    embeddingModel: readStringEnv(e, "TALLEI_EMBED__MODEL", defaultEmbeddingModel),
-    googleEmbeddingModel: readStringEnv(e, "TALLEI_EMBED__GOOGLE_MODEL", "gemini-embedding-001"),
-    embeddingDims: readIntEnv(e, "TALLEI_EMBED__DIMS", defaultEmbeddingDims),
-    llmProvider: readStringEnv(e, "TALLEI_LLM__PROVIDER", defaultLlmProvider) as "openai" | "ollama" | "google",
-    openaiModel: readStringEnv(e, "TALLEI_LLM__CHAT_MODEL", "gpt-4o-mini"),
-    googleModel: readStringEnv(e, "TALLEI_LLM__GOOGLE_MODEL", "gemini-2.0-flash"),
+      (nodeEnv === "production" ? 30_000 : 10_000),
+    ...llm,
     googleApiKey: readStringEnv(e, "TALLEI_GOOGLE__API_KEY"),
     googleProjectId: readStringEnv(e, "TALLEI_GOOGLE__PROJECT_ID"),
     googleLocation: readStringEnv(e, "TALLEI_GOOGLE__LOCATION", "us-central1"),
@@ -312,27 +148,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       .filter(Boolean),
     vertexSearchDataStore: readStringEnv(e, "TALLEI_VERTEX_SEARCH__DATA_STORE"),
     vertexSearchServingConfig: readStringEnv(e, "TALLEI_VERTEX_SEARCH__SERVING_CONFIG"),
-    agentEngineIssuer: readStringEnv(e, "TALLEI_AGENT_ENGINE__ISSUER", "tallei-agent-engine"),
-    intentClassifierModel: readStringEnv(e, "TALLEI_LLM__INTENT_CLASSIFIER_MODEL", "gpt-5-nano"),
-    plannerModel: readStringEnv(e, "TALLEI_PLANNER__MODEL", "gpt-4o-mini"),
-    plannerMaxQuestions: readIntEnv(e, "TALLEI_PLANNER__MAX_QUESTIONS", 12),
-    plannerWebSearchBudget: readIntEnv(e, "TALLEI_PLANNER__WEB_SEARCH_BUDGET", 8),
-    plannerRequestTimeoutMs: readIntEnv(e, "TALLEI_PLANNER__REQUEST_TIMEOUT_MS", 20_000),
-    openaiPayloadLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_ENABLED", false),
-    openaiPayloadLoggingMaxChars: Math.max(
-      64,
-      Math.min(readIntEnv(e, "TALLEI_OBS__OPENAI_PAYLOAD_LOGGING_MAX_CHARS", 2000), 20_000)
-    ),
+    logLevel: readStringEnv(e, "TALLEI_OBS__LOG_LEVEL", "info") as "debug" | "info" | "warn" | "error",
+    prettyLogsEnabled: readBooleanEnv(e, "TALLEI_OBS__PRETTY_LOGS", nodeEnv === "development"),
     vertexSearchVerboseLoggingEnabled: readBooleanEnv(e, "TALLEI_OBS__VERTEX_SEARCH_VERBOSE", false),
-    ollamaBaseUrl: readStringEnv(e, "TALLEI_LLM__OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-    ollamaModel: readStringEnv(e, "TALLEI_LLM__OLLAMA_MODEL", "qwen2.5:7b"),
     memoryMasterKey: readStringEnv(e, "TALLEI_AUTH__MEMORY_MASTER_KEY"),
     kmsKeyId: readStringEnv(e, "TALLEI_AUTH__KMS_KEY_ID", "local-dev"),
     uploadthingToken: readStringEnv(e, "TALLEI_STORAGE__UPLOADTHING_TOKEN"),
     enableSupabaseRlsPolicies: readBooleanEnv(e, "ENABLE_SUPABASE_RLS_POLICIES", true),
     // Phase 3 feature flags — shadow cutover for memory.ts extraction (ADR-007)
-    memoryDualWriteEnabled: readBooleanEnv(e, "MEMORY_DUAL_WRITE_ENABLED", false),
-    memoryShadowReadEnabled: readBooleanEnv(e, "MEMORY_SHADOW_READ_ENABLED", false),
+    memoryDualWriteEnabled: readBooleanEnv(e, "TALLEI_FEATURE__MEMORY_DUAL_WRITE", false),
+    memoryShadowReadEnabled: readBooleanEnv(e, "TALLEI_FEATURE__MEMORY_SHADOW_READ", false),
     useNewSaveUseCase: readBooleanEnv(e, "TALLEI_FEATURE__USE_NEW_SAVE", false),
     useNewRecallUseCase: readBooleanEnv(e, "TALLEI_FEATURE__USE_NEW_RECALL", false),
     useNewListUseCase: readBooleanEnv(e, "TALLEI_FEATURE__USE_NEW_LIST", false),
@@ -344,16 +169,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     recallHybridSimilarityFloor: readFloatEnv(e, "TALLEI_MISC__RECALL_HYBRID_SIMILARITY_FLOOR", 0.35),
     rerankEnabled: readBooleanEnv(e, "TALLEI_FEATURE__RERANK", true),
     rerankMinScore: readFloatEnv(e, "TALLEI_MISC__RERANK_MIN_SCORE", 0.4),
-    browserWorkerBaseUrl: e.TALLEI_BROWSER__WORKER_BASE_URL || "",
-    browserWorkerApiKey: e.TALLEI_BROWSER__WORKER_API_KEY || "",
-    browserWorkerRequestTimeoutMs: readIntEnv(e, "TALLEI_BROWSER__REQUEST_TIMEOUT_MS", 45_000),
-    browserMaxStudentRetries: readIntEnv(e, "TALLEI_BROWSER__MAX_RETRIES", 2),
-    browserLlmFallbackEnabled: readBooleanEnv(e, "TALLEI_BROWSER__LLM_FALLBACK", true),
-    browserWorkerWsEndpoint: e.TALLEI_BROWSER__WORKER_WS_ENDPOINT || "",
-    browserSessionTtlMs: readIntEnv(e, "TALLEI_BROWSER__SESSION_TTL_MS", 900000),
-    browserHeadless: readBooleanEnv(e, "TALLEI_BROWSER__HEADLESS", true),
-    hyperbrowserApiKey: readStringEnv(e, "TALLEI_BROWSER__HYPERBROWSER_API_KEY", ""),
-    browserTeacherThreshold: readIntEnv(e, "TALLEI_BROWSER__TEACHER_THRESHOLD", 3),
     uploadIngestWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_ENABLED", true),
     uploadIngestWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_POLL_MS", 150),
     uploadIngestWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_BATCH_SIZE", 4),
@@ -361,10 +176,37 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     uploadIngestWorkerMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_MAX_ATTEMPTS", 4),
     uploadIngestWorkerRetryBaseMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_BASE_MS", 5_000),
     uploadIngestWorkerRetryMaxMs: readIntEnv(e, "TALLEI_WORKERS__UPLOAD_INGEST_RETRY_MAX_MS", 300_000),
+    chatGptImportWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_ENABLED", true),
+    chatGptImportWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_POLL_MS", 200),
+    chatGptImportWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_BATCH_SIZE", 2),
+    chatGptImportWorkerConcurrency: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_CONCURRENCY", 1),
+    chatGptImportWorkerMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_MAX_ATTEMPTS", 4),
+    chatGptImportWorkerRetryBaseMs: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_RETRY_BASE_MS", 3_000),
+    chatGptImportWorkerRetryMaxMs: readIntEnv(e, "TALLEI_WORKERS__CHATGPT_IMPORT_RETRY_MAX_MS", 120_000),
     vertexDocumentBackfillWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_ENABLED", false),
     vertexDocumentBackfillWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_POLL_MS", 60_000),
     vertexDocumentBackfillWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_BATCH_SIZE", 10),
     vertexDocumentBackfillMaxAttempts: readIntEnv(e, "TALLEI_WORKERS__VERTEX_BACKFILL_MAX_ATTEMPTS", 8),
+    dailyIntelligenceWorkerEnabled: readBooleanEnv(e, "TALLEI_WORKERS__DAILY_INTELLIGENCE_ENABLED", false),
+    dailyIntelligenceWorkerPollMs: readIntEnv(e, "TALLEI_WORKERS__DAILY_INTELLIGENCE_POLL_MS", 24 * 60 * 60 * 1000),
+    dailyIntelligenceWorkerBatchSize: readIntEnv(e, "TALLEI_WORKERS__DAILY_INTELLIGENCE_BATCH_SIZE", 100),
+    notificationsEmailAdapter: readStringEnv(e, "TALLEI_NOTIFICATIONS__EMAIL_ADAPTER", "resend"),
+    notificationsOutboundEmailEnabled: readBooleanEnv(e, "TALLEI_NOTIFICATIONS__OUTBOUND_EMAIL_ENABLED", nodeEnv === "production"),
+    notificationsWhatsAppAdapter: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_ADAPTER", "disabled"),
+    notificationsWhatsAppWebhookUrl: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_WEBHOOK_URL"),
+    notificationsWhatsAppWebhookToken: readStringEnv(e, "TALLEI_NOTIFICATIONS__WHATSAPP_WEBHOOK_TOKEN"),
+    notificationsDeliveryMaxAttempts: readIntEnv(e, "TALLEI_NOTIFICATIONS__DELIVERY_MAX_ATTEMPTS", 3),
+    notificationsDeliveryRetryBaseMs: readIntEnv(e, "TALLEI_NOTIFICATIONS__DELIVERY_RETRY_BASE_MS", 2_000),
+    channelsTelegramBotToken: readStringEnv(e, "TALLEI_CHANNELS__TELEGRAM_BOT_TOKEN"),
+    channelsTelegramBotUsername: readStringEnv(e, "TALLEI_CHANNELS__TELEGRAM_BOT_USERNAME"),
+    channelsTelegramWebhookSecret: readStringEnv(e, "TALLEI_CHANNELS__TELEGRAM_WEBHOOK_SECRET"),
+    channelsWhatsAppOpenWaUrl: normalizeBaseUrl(readStringEnv(e, "TALLEI_CHANNELS__WHATSAPP_OPENWA_URL")),
+    channelsWhatsAppOpenWaToken: readStringEnv(e, "TALLEI_CHANNELS__WHATSAPP_OPENWA_TOKEN"),
+    channelsWhatsAppSharedNumber: readStringEnv(e, "TALLEI_CHANNELS__WHATSAPP_SHARED_NUMBER"),
+    channelsWhatsAppWebhookToken: readStringEnv(e, "TALLEI_CHANNELS__WHATSAPP_WEBHOOK_TOKEN"),
+    channelsResendInboundDomain: readStringEnv(e, "TALLEI_CHANNELS__RESEND_INBOUND_DOMAIN"),
+    adminEmail: readStringEnv(e, "TALLEI_ADMIN__EMAIL"),
+    adminSlackWebhookUrl: readStringEnv(e, "TALLEI_ADMIN__SLACK_WEBHOOK_URL"),
     claudeConnectorMcpUrl:
       e.CLAUDE_CONNECTOR_MCP_URL || `${e.TALLEI_HTTP__PUBLIC_BASE_URL || localBaseUrl}/mcp`,
     lemonSqueezyApiKey: readStringEnv(e, "TALLEI_BILLING__LEMONSQUEEZY_API_KEY"),
@@ -379,73 +221,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     signupEmailFromName: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_NAME", "Dinuda Yaggahavita"),
     signupEmailFromEmail: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_FROM_EMAIL"),
     signupEmailReplyTo: readStringEnv(e, "TALLEI_SIGNUP__EMAIL_REPLY_TO"),
-    // Keep connector instructions versioned in code to avoid stale env copies causing behavior drift.
-    claudeProjectInstructionsTemplate:
-      `You are a Tallei-connected Claude. You have Tallei memory + document tools. Use them silently.
-
-=== TURN PROTOCOL ===
-
-STEP 0 — COLLAB TASKS FIRST:
-- If the user asks to continue/resume/proceed a collab task, or includes a task UUID, call collab_check_turn first.
-- Do NOT call recall_memories to resolve collab task state.
-- Build your turn from collab_check_turn.fallback_context and recent_transcript.
-- If is_my_turn=false, tell the user which actor is currently expected and stop.
-- If is_my_turn=true, produce the task output and submit it with collab_take_turn.
-- If the user asks to start/create/begin collab and no task exists yet, call collab_create_task immediately in the same turn. Do not ask planning questions first.
-- If the user provides explicit collab task arguments (title/brief/first_actor), call collab_create_task with those exact values before any explanatory text. Do not set max_iterations.
-- Do NOT output copy/paste workflows, manual setup steps, or "you can do this" alternatives when collab tools are available.
-- Use first_actor="chatgpt" by default unless the user explicitly asks for Claude first.
-- For collab_create_task, pass recall_query (use user goal/brief/title) and include_doc_refs when user references specific @doc handles to preload.
-- If files are attached this turn, pass them to collab_create_task via openaiFileIdRefs (and conversation_id when available) so recall preflight runs first and docs are ingested/bundled at creation time.
-- If collab_create_task returns upload failures, show concise file errors and continue with task execution unless creation itself failed.
-- If the user says "@tallei decide" and no task exists yet, call collab_create_task first, then continue with collab_check_turn/collab_take_turn.
-- If the user says "@tallei ship", return structured execution output (PRD/tickets/checklist/owner/due date) and submit that exact output to collab_take_turn.
-- For every collab_take_turn call, submit the full user-facing deliverable content. Do not submit summary-only text.
-- After collab_take_turn succeeds, show the actual submitted output content in your reply (not just "task completed").
-
-STEP 0A - GRILL-ME ROLE DISPLAY:
-- When orchestration/grill-me returns ChatGPT and Claude roles, show them as system prompts in fenced code blocks:
-
-  ChatGPT system prompt:
-  \`\`\`text
-  <ChatGPT role text>
-  \`\`\`
-
-  Claude system prompt:
-  \`\`\`text
-  <Claude role text>
-  \`\`\`
-
-- Then show what needs to happen next: the current grill-me question, plan review, approval step, or handoff/continue instruction.
-
-STEP A — RECALL WHEN NEEDED:
-- Do NOT call recall_memories reflexively.
-- Call recall_memories only when prior-session context is required.
-- recall_memories defaults to facts + preferences and returns docs-lite context only.
-- include_doc_refs returns brief metadata only (no full document text).
-- recall_memories also includes a brief list of the latest 5 uploaded docs.
-- If the user references an older doc by name, call search_documents first and then include matching refs.
-- Use recall_document only when full document text is explicitly needed.
-
-STEP B — ANSWER:
-- Answer the user directly.
-
-STEP C — SAVE/ARCHIVE (optional):
-- Save/upload to Tallei only when the user explicitly asks to save, archive, or checkpoint.
-- If saving, append exactly this footer on its own line:
-  📎 Auto-saved as @doc:<ref> · reply **undo** to delete
-
-STEP D — UNDO:
-- If the user replies "undo", "del", or "delete" after that footer, call undo_save with that @doc ref immediately.
-
-=== ONGOING ===
-- Use remember(kind="preference") for stable preferences and identity facts.
-- Use remember(kind="fact") for non-preference facts, decisions, events, notes, and corrections.
-- Use remember(kind="document-blob") only when the user explicitly asks for full archive/full stash of complete text.
-- Final deliverables must match the user's requested format. If no format is requested, default to plain text.
-
-=== HARD RULE ===
-- Never mention tool internals in user-facing text, except the optional auto-save footer when saving is requested.`,
+    claudeProjectInstructionsTemplate: DEFAULT_CLAUDE_CONNECTOR_INSTRUCTIONS,
   } as const;
 }
 

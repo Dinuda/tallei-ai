@@ -4,6 +4,18 @@ All notable changes are documented here. Each entry covers what changed, why it 
 
 ---
 
+## [Unreleased] — 2026-07-10
+
+### refactor: Conductor / Loops / Temporal / Composio teardown
+
+Removed loop authoring, Temporal scheduling, Composio connectors, workspace KB, and related packages. Memory/MCP core, model gateway, and dashboard `ai-elements` kit retained. See [ADR-014](docs/adr/014-loops-teardown.md).
+
+### docs: post-teardown documentation refresh
+
+Updated architecture pointers, setup guide, product scope, flow docs, and contributor guides. Deleted stale graph-layer and Temporal migration docs.
+
+---
+
 ## [Unreleased] — 2026-04-16
 
 ### The Recall Latency Arc
@@ -64,7 +76,7 @@ The snapshot is stored in Redis with the user's recall stamp. When a new save in
 
 Two accuracy layers added after vector search:
 
-1. **LLM Reranker** (`gpt-4o-mini`): filters vector search results that don't actually answer the query. Eliminates bi-encoder false positives — e.g. "favorite language" and "favorite ice cream" sharing a semantic cluster.
+1. **LLM Reranker** (`gpt-gpt-5-nano`): filters vector search results that don't actually answer the query. Eliminates bi-encoder false positives — e.g. "favorite language" and "favorite ice cream" sharing a semantic cluster.
 
 2. **RAG Fallback**: when vector search and reranker both return nothing (stale index, missing embeddings), a full table scan loads every DB memory and asks the LLM which are relevant. Returns real results to the user immediately, then triggers a background reindex so vector search works next time.
 
@@ -108,7 +120,7 @@ New behavior: `summarize (async) → DB write → return (~15ms)` — everything
 
 ### feat: graph extraction pipeline
 
-- Background worker extracts entities and relations from every saved memory using `gpt-4o-mini`.
+- Background worker extracts entities and relations from every saved memory using `gpt-gpt-5-nano`.
 - Entities and relations stored in Postgres (`memory_entities`, `memory_relations`, `memory_mentions` tables).
 - `recall_memories_v2` added: graph-traversal recall that surfaces connected entities alongside direct matches.
 - Insight engine: contradiction detection, stale decision flagging, high-frequency entity tracking.
@@ -130,6 +142,6 @@ While migrating from `mem0ai` SDK to native Postgres, all saves and recalls ran 
 - MCP server: `save_memory`, `recall_memories`, `list_memories`, `delete_memory` tools
 - Google OAuth for dashboard + MCP connector auth
 - Postgres + pgvector storage via `mem0ai` SDK
-- OpenAI embeddings (`text-embedding-3-small`) + `gpt-4o-mini` summaries
+- OpenAI embeddings (`text-embedding-3-small`) + `gpt-gpt-5-nano` summaries
 - Next.js dashboard: memory feed, setup wizard, API key management
 - Platform color badges: Claude (purple), ChatGPT (green), Gemini (blue)

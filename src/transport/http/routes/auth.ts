@@ -6,7 +6,7 @@ import {
   verifySessionToken,
 } from "../../../infrastructure/auth/auth.js";
 import { getPlanForTenant } from "../../../infrastructure/auth/tenancy.js";
-import { notifyUserSignup } from "../../../services/signup-notifications.js";
+import { notifyUserSignup } from "../../../services/notifications/signup-notifications.js";
 import { runAsyncSafe } from "../../../shared/async-safe.js";
 import { internalSecretMiddleware } from "../middleware/auth.middleware.js";
 

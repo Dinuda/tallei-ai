@@ -1,8 +1,11 @@
+# Build context must be the repo root so workspace packages resolve.
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+COPY packages ./packages
+COPY dashboard/package.json ./dashboard/package.json
+RUN npm ci --legacy-peer-deps
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
@@ -14,8 +17,11 @@ ENV API_PROXY_TARGET=${API_PROXY_TARGET}
 ENV BACKEND_URL=${BACKEND_URL}
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
+COPY package.json package-lock.json ./
+COPY packages ./packages
+COPY dashboard ./dashboard
+RUN npm run build -w @tallei/mcp-tools \
+  && npm run build -w dashboard
 
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app
@@ -24,9 +30,10 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV HOSTNAME=0.0.0.0
 
-COPY --from=build /app/.next/standalone ./
-COPY --from=build /app/.next/static ./.next/static
-COPY --from=build /app/public ./public
+# With outputFileTracingRoot = repo root, standalone nests under dashboard/.
+COPY --from=build /app/dashboard/.next/standalone ./
+COPY --from=build /app/dashboard/.next/static ./dashboard/.next/static
+COPY --from=build /app/dashboard/public ./dashboard/public
 
 EXPOSE 8080
-CMD ["node", "server.js"]
+CMD ["node", "dashboard/server.js"]

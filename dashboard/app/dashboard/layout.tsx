@@ -10,8 +10,25 @@ import "./logged-in-light.css";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 import { DashboardUpdateBanner } from "./components/dashboard-update-banner";
+
+/* Suppress known React DevTools false-positive in React 19 / Next.js 16 */
+if (typeof window !== "undefined" && window.console && window.console.error) {
+  const orig = window.console.error;
+  window.console.error = (...args: unknown[]) => {
+    const msg = args[0];
+    if (
+      typeof msg === "string" &&
+      (msg.includes("cleaning up async info that was not on the parent Suspense boundary") ||
+        msg.includes("React instrumentation encountered an error"))
+    ) {
+      return;
+    }
+    orig.apply(window.console, args);
+  };
+}
 
 type NavItem = {
   id: string;
@@ -39,28 +56,47 @@ const ICONS = {
       <path d="M5 5.5h5M5 7.5h5M5 9.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   ),
-  collab: (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="10.8" cy="10.8" r="1.7" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M5.8 5.3 9.2 8.7M9.2 5.3 5.8 8.7" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  ),
   documents: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M4 2h5l3 3v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
       <path d="M9 2v3h3M5 8h5M5 10h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
-  connectors: (
+  aiAssistants: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-      <path d="M5.2 2V5.2M9.8 2V5.2M4.1 5.2H10.9V7.3C10.9 9.2 9.4 10.7 7.5 10.7C5.6 10.7 4.1 9.2 4.1 7.3V5.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M7.5 10.7V13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M7.5 2v3.5M7.5 9.5V13M2 7.5h3.5M9.5 7.5H13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="7.5" cy="7.5" r="1.8" fill="currentColor" />
+    </svg>
+  ),
+  connectedApps: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M5 3a2.5 2.5 0 0 0-2.5 2.5v1M10 12a2.5 2.5 0 0 0 2.5-2.5v-1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5 12a2.5 2.5 0 0 1-2.5-2.5V8.5M10 3a2.5 2.5 0 0 1 2.5 2.5v1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5.5 7.5h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
+  channels: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M2.25 4.5A2.25 2.25 0 0 1 4.5 2.25h6A2.25 2.25 0 0 1 12.75 4.5v3A2.25 2.25 0 0 1 10.5 9.75H7.2L4.5 12v-2.25A2.25 2.25 0 0 1 2.25 7.5v-3Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
     </svg>
   ),
   activity: (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
       <path d="M1.8 7.7H4.7L6.1 4.2L8.2 10.3L10 7.1H13.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  integrations: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M3 4.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0Z" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M9 10.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0Z" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M6 4.5h1.5a1 1 0 0 1 1 1v4a1 1 0 0 0 1 1H9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M4.5 6v3A1.5 1.5 0 0 0 6 10.5h.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
+  cleanup: (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+      <path d="M7.5 1.8 12 3.6v3.2c0 2.8-1.8 5.2-4.5 6.4C4.8 12 3 9.6 3 6.8V3.6l4.5-1.8Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M5.2 7.4 6.7 8.9 9.9 5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
 };
@@ -69,15 +105,17 @@ const NAV: NavSection[] = [
   {
     items: [
       { id: "memories", label: "Memories", href: "/dashboard", icon: ICONS.memories },
-      { id: "collab", label: "Collab", href: "/dashboard/tasks", icon: ICONS.collab },
       { id: "documents", label: "Documents", href: "/dashboard/documents", icon: ICONS.documents },
-      { id: "connectors", label: "AI Assitants", href: "/dashboard/setup", icon: ICONS.connectors },
+      { id: "connectors", label: "AI Assistants", href: "/dashboard/setup", icon: ICONS.aiAssistants },
       { id: "billing", label: "Billing", href: "/dashboard/billing", icon: ICONS.billing },
     ],
   },
   {
     label: "DEVELOPER",
-    items: [{ id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity }],
+    items: [
+      { id: "cleanup", label: "Memory Cleanup", href: "/dashboard/memory-cleanup", icon: ICONS.cleanup },
+      { id: "activity", label: "Activity", href: "/dashboard/mcp-events", icon: ICONS.activity },
+    ],
   },
 ];
 
@@ -193,8 +231,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         Skip to main content
       </a>
       <header className="fixed inset-x-0 top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="flex h-14 w-full items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-2">
+        <div className="flex h-14 w-full items-center">
+          <div className="flex h-14 shrink-0 items-center gap-2 border-slate-200 px-4 md:w-[248px] md:border-r md:px-3">
             <Button
               type="button"
               variant="ghost"
@@ -205,12 +243,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             >
               {mobileOpen ? <X size={16} /> : <Menu size={16} />}
             </Button>
-            <Link href="/dashboard" className="flex items-center">
+            <Link href="/dashboard" className="flex shrink-0 items-center">
               <Image src="/tallei.svg" alt="Tallei" width={79} height={32} className="h-8 w-auto" />
             </Link>
           </div>
 
-          <div className="flex items-center gap-2 pl-3 sm:pl-4">
+          <div className="flex-1" aria-hidden />
+
+          <div className="flex shrink-0 items-center gap-2 px-4 sm:px-6">
             {isFreePlan ? (
               <>
                 <div
@@ -295,11 +335,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </aside>
 
       <main id="main-content" className="min-h-screen min-w-0 bg-[#f4f4f4] pt-14 md:ml-[248px]">
-        <div className="mx-auto w-full max-w-7xl">
+        <div className="mx-auto w-full">
           <DashboardUpdateBanner />
           {children}
         </div>
       </main>
+      <Toaster position="top-right" />
     </div>
   );
 }

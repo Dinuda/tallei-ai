@@ -1,5 +1,5 @@
 import { config } from "../../config/index.js";
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 
 export const EMBEDDING_DIMS = config.embeddingDims;
 const EMBEDDING_CACHE_TTL_MS = config.nodeEnv === "production" ? 5 * 60_000 : 60_000;
@@ -48,8 +48,9 @@ export async function embedText(text: string): Promise<number[]> {
     return inFlight;
   }
 
-  const request = aiProviderRegistry
+  const request = modelGateway
     .embed({
+      purpose: "embed",
       model: config.embeddingModel,
       input: normalized,
       dimensions: config.embeddingDims,

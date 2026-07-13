@@ -1,19 +1,44 @@
 import pg from "pg";
 import { config } from "../../config/index.js";
-import { decryptMemoryContent } from "../crypto/memory-crypto.js";
 
 const { Pool } = pg;
+
+const POOL_STATEMENT_TIMEOUT_MS = 5000;
+const POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS = 5000;
+
+const TRANSIENT_POOL_ERROR =
+  /connection terminated|connection timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|Cannot use a pool after calling end/i;
+
+export function isTransientPoolError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (TRANSIENT_POOL_ERROR.test(error.message)) return true;
+  const cause = error.cause;
+  if (cause instanceof Error && TRANSIENT_POOL_ERROR.test(cause.message)) return true;
+  return false;
+}
+
+export async function poolQuery<T extends pg.QueryResultRow = pg.QueryResultRow>(
+  queryText: string,
+  values?: unknown[],
+): Promise<pg.QueryResult<T>> {
+  try {
+    return await pool.query<T>(queryText, values);
+  } catch (error) {
+    if (!isTransientPoolError(error)) throw error;
+    return pool.query<T>(queryText, values);
+  }
+}
 
 function createPool(connectionString: string): pg.Pool {
   const dbPool = new Pool({
     connectionString,
-    connectionTimeoutMillis: 2000,
+    connectionTimeoutMillis: 8000,
     query_timeout: 30000,
     max: 30,
     idleTimeoutMillis: 30000,
     keepAlive: true,
-    statement_timeout: 5000,
-    idle_in_transaction_session_timeout: 5000,
+    statement_timeout: POOL_STATEMENT_TIMEOUT_MS,
+    idle_in_transaction_session_timeout: POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS,
   });
 
   dbPool.on("error", (error: Error & { code?: string }) => {
@@ -26,234 +51,54 @@ function createPool(connectionString: string): pg.Pool {
   return dbPool;
 }
 
-function shouldFallback(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const anyError = error as Error & { code?: string };
-  const code = anyError.code || "";
-  return (
-    code === "ENOTFOUND" ||
-    code === "ECONNREFUSED" ||
-    code === "ETIMEDOUT" ||
-    /getaddrinfo|ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(anyError.message)
-  );
-}
-
 export let pool = createPool(config.databaseUrl);
-let fallbackAttempted = false;
 
 type DbClient = pg.PoolClient;
 
-type MemoryType = "preference" | "fact" | "event" | "decision" | "note" | "checkpoint";
+function isAuthFailure(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  const message = error instanceof Error ? error.message : "";
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeMessage = cause instanceof Error ? cause.message : "";
 
-const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note', 'checkpoint'";
-
-function classifyLegacyMemoryText(content: string): { memoryType: MemoryType; category: string | null; isPinned: boolean } {
-  const text = content.trim();
-  const isPreference =
-    /\b(i\s+prefer|i\s+like|i\s+love|i\s+hate|my\s+favou?rite|preferred)\b/i.test(text) ||
-    /\b(my\s+name\s+is|my\s+email\s+is|my\s+phone|my\s+pronouns|i\s+live\s+in|i\s+am\s+from)\b/i.test(text);
-  if (isPreference) {
-    if (/\b(my\s+name\s+is|my\s+email\s+is|my\s+phone|my\s+pronouns)\b/i.test(text)) {
-      return { memoryType: "preference", category: "identity", isPinned: true };
-    }
-    if (/\b(ui|ux|design|theme|color|style)\b/i.test(text)) {
-      return { memoryType: "preference", category: "ui", isPinned: true };
-    }
-    if (/\b(next\.js|typescript|react|node|postgres|qdrant|stack)\b/i.test(text)) {
-      return { memoryType: "preference", category: "stack", isPinned: true };
-    }
-    return { memoryType: "preference", category: null, isPinned: true };
-  }
-  if (/\b(decide|decided|decision|agreed|chose|chosen)\b/i.test(text)) {
-    return { memoryType: "decision", category: null, isPinned: false };
-  }
-  if (/\b(yesterday|today|tomorrow|last\s+week|last\s+month|meeting|event|happened)\b/i.test(text)) {
-    return { memoryType: "event", category: null, isPinned: false };
-  }
-  if (/\b(note|reminder|todo|to\s*do)\b/i.test(text)) {
-    return { memoryType: "note", category: null, isPinned: false };
-  }
-  return { memoryType: "fact", category: null, isPinned: false };
+  return code === "28P01"
+    || /password authentication failed|invalid password/i.test(message)
+    || /password authentication failed|invalid password/i.test(causeMessage);
 }
 
-async function hasColumn(client: DbClient, table: string, column: string): Promise<boolean> {
-  const result = await client.query<{ exists: boolean }>(
-    `SELECT EXISTS (
-      SELECT 1
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = $1
-        AND column_name = $2
-    ) AS exists`,
-    [table, column]
-  );
-  return Boolean(result.rows[0]?.exists);
+function shouldAttemptDatabaseFallback(error: unknown): boolean {
+  if (!config.databaseUrlFallback) return false;
+  if (config.databaseUrlFallback === config.databaseUrl) return false;
+  return isAuthFailure(error);
 }
 
-async function backfillMemoryTypes(client: DbClient): Promise<void> {
-  const rows = await client.query<{
-    id: string;
-    content_ciphertext: string;
-    memory_type: string;
-    category: string | null;
-    is_pinned: boolean | null;
-  }>(
-    `SELECT id, content_ciphertext, memory_type, category, is_pinned
-     FROM memory_records
-     WHERE deleted_at IS NULL
-       AND superseded_by IS NULL`
-  );
-
-  for (const row of rows.rows) {
-    if (
-      row.memory_type !== "fact" ||
-      row.category !== null ||
-      row.is_pinned === true
-    ) {
-      continue;
-    }
-
-    let plaintext = "";
-    try {
-      plaintext = decryptMemoryContent(row.content_ciphertext);
-    } catch {
-      continue;
-    }
-
-    const classified = classifyLegacyMemoryText(plaintext);
-    if (
-      classified.memoryType === "fact" &&
-      classified.category === null &&
-      classified.isPinned === false
-    ) {
-      continue;
-    }
-
-    await client.query(
-      `UPDATE memory_records
-       SET memory_type = $1,
-           category = COALESCE($2, category),
-           is_pinned = CASE WHEN $3 THEN TRUE ELSE is_pinned END
-       WHERE id = $4`,
-      [classified.memoryType, classified.category, classified.isPinned, row.id]
-    );
-  }
-}
-
-async function connectWithFallback(): Promise<DbClient> {
+async function connectDbClient(): Promise<DbClient> {
   try {
     return await pool.connect();
   } catch (error) {
-    const fallbackUrl = config.databaseUrlFallback;
-    const canFallback =
-      !fallbackAttempted &&
-      config.nodeEnv !== "production" &&
-      Boolean(fallbackUrl) &&
-      fallbackUrl !== config.databaseUrl &&
-      shouldFallback(error);
+    if (!shouldAttemptDatabaseFallback(error)) throw error;
 
-    if (!canFallback) {
-      throw error;
+    const primaryPool = pool;
+    const fallbackPool = createPool(config.databaseUrlFallback);
+    pool = fallbackPool;
+
+    try {
+      const client = await fallbackPool.connect();
+      await primaryPool.end().catch((endError: unknown) => {
+        const message = endError instanceof Error ? endError.message : String(endError);
+        console.warn(`[db] failed to close primary pool after fallback swap: ${message}`);
+      });
+      console.warn("[db] primary database auth failed; switched to fallback connection URL");
+      return client;
+    } catch (fallbackError) {
+      pool = primaryPool;
+      await fallbackPool.end().catch(() => undefined);
+      throw fallbackError;
     }
-
-    fallbackAttempted = true;
-    console.warn(
-      `[db] primary DATABASE_URL unreachable; retrying with DATABASE_URL_FALLBACK (${fallbackUrl})`
-    );
-    pool = createPool(fallbackUrl);
-    return await pool.connect();
   }
 }
 
-async function ensurePrimaryTenantMembership(client: DbClient, userId: string, email: string | null): Promise<void> {
-  const existing = await client.query<{ tenant_id: string }>(
-    "SELECT tenant_id FROM tenant_memberships WHERE user_id = $1 LIMIT 1",
-    [userId]
-  );
-  if (existing.rows[0]?.tenant_id) return;
-
-  const tenantName = email && email.includes("@")
-    ? `tenant-${email.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 36)}`
-    : `tenant-${userId.slice(0, 8)}`;
-
-  const tenant = await client.query<{ id: string }>(
-    "INSERT INTO tenants (name) VALUES ($1) RETURNING id",
-    [tenantName]
-  );
-
-  await client.query(
-    `INSERT INTO tenant_memberships (tenant_id, user_id, role, is_primary)
-     VALUES ($1, $2, 'owner', true)
-     ON CONFLICT (user_id) DO NOTHING`,
-    [tenant.rows[0].id, userId]
-  );
-}
-
-async function backfillTenants(client: DbClient): Promise<void> {
-  const users = await client.query<{ id: string; email: string | null }>(
-    "SELECT id, email FROM users"
-  );
-
-  for (const user of users.rows) {
-    await ensurePrimaryTenantMembership(client, user.id, user.email);
-  }
-
-  await client.query(`
-    UPDATE api_keys ak
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE ak.user_id = tm.user_id
-      AND ak.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE oauth_authorization_codes oac
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE oac.user_id = tm.user_id
-      AND oac.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE oauth_tokens ot
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE ot.user_id = tm.user_id
-      AND ot.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE oauth_device_codes odc
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE odc.user_id = tm.user_id
-      AND odc.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE mcp_call_events mce
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE mce.user_id = tm.user_id
-      AND mce.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE claude_onboarding_sessions cos
-    SET tenant_id = tm.tenant_id
-    FROM tenant_memberships tm
-    WHERE cos.user_id = tm.user_id
-      AND cos.tenant_id IS NULL
-  `);
-
-  await client.query(`
-    UPDATE claude_onboarding_events coe
-    SET tenant_id = cos.tenant_id
-    FROM claude_onboarding_sessions cos
-    WHERE coe.session_id = cos.id
-      AND coe.tenant_id IS NULL
-  `);
-}
+const MEMORY_TYPE_CHECK = "'preference', 'fact', 'event', 'decision', 'note', 'checkpoint'";
 
 async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
   if (!config.enableSupabaseRlsPolicies) return;
@@ -319,16 +164,6 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
       policy: "onboarding_events_tenant_policy",
       condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id)",
     },
-    {
-      table: "collab_tasks",
-      policy: "collab_tasks_tenant_user_policy",
-      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
-    },
-    {
-      table: "orchestration_sessions",
-      policy: "orchestration_sessions_tenant_user_policy",
-      condition: "((auth.jwt()->>'tenant_id')::uuid = tenant_id AND (auth.jwt()->>'sub')::uuid = user_id)",
-    },
   ];
 
   for (const entry of policyStatements) {
@@ -344,8 +179,115 @@ async function applySupabaseRlsPolicies(client: DbClient): Promise<void> {
   }
 }
 
+async function configureMigrationSession(client: DbClient): Promise<void> {
+  // Boot-time DDL can exceed the pool's
+  // 5s statement timeout on non-trivial databases.
+  await client.query("SET statement_timeout = 0");
+  await client.query("SET idle_in_transaction_session_timeout = 0");
+}
+
+async function restorePoolSessionTimeouts(client: DbClient): Promise<void> {
+  await client.query(`SET statement_timeout = ${POOL_STATEMENT_TIMEOUT_MS}`);
+  await client.query(`SET idle_in_transaction_session_timeout = ${POOL_IDLE_IN_TRANSACTION_TIMEOUT_MS}`);
+}
+
+
+const REMOVED_AUTOMATION_TABLES = [
+  "workspace_knowledge_base_entries",
+  "workspace_knowledge_bases",
+  "loop_engine_events",
+  "loop_engine_artifacts",
+  "loop_engine_interactions",
+  "loop_engine_commands",
+  "loop_engine_boundaries",
+  "loop_engine_step_attempts",
+  "loop_run_messages",
+  "loop_engine_gates",
+  "loop_engine_runs",
+  "loop_agent_avatars",
+  "loop_run_gates",
+  "loop_run_events",
+  "loop_run_comments",
+  "loop_run_tasks",
+  "loop_heartbeat_jobs",
+  "workflow_run_steps",
+  "workflow_runs",
+  "workflow_connector_trigger_events",
+  "workflow_connector_triggers",
+  "workflow_verification_runs",
+  "workflow_builder_actions",
+  "workflow_builder_turns",
+  "workflow_builder_commands",
+  "workflow_builder_messages",
+  "workflow_builder_sessions",
+  "workflow_approval_tokens",
+  "workflows",
+  "workflow_suggestions",
+  "episode_turns",
+  "episodes",
+  "patterns",
+  "loop_miner_runs",
+  "loop_build_events",
+  "loop_trigger_subscriptions",
+  "workspace_trigger_channels",
+  "webhook_event_deliveries",
+  "loop_run_steps",
+  "loop_runs",
+  "approval_requests",
+  "compiled_plans",
+  "loops",
+  "connector_connections",
+  "workspace_memory_records",
+  "user_workspace_preferences",
+  "workspace_memberships",
+  "loop_workspaces",
+  "learned_tool_use_cases",
+  "learned_tool_specs",
+  "connector_action_events",
+  "connector_auth_sessions",
+  "connector_accounts",
+  "connector_adapters",
+  "ai_activity_events",
+  "daily_intelligence_runs",
+  "approvals",
+  "channel_messages",
+  "channel_setup_sessions",
+  "notification_deliveries",
+  "notification_channels",
+  "resend_broadcast_events",
+] as const;
+
+async function dropRemovedAutomationTables(client: DbClient): Promise<void> {
+  for (const table of REMOVED_AUTOMATION_TABLES) {
+    await client.query(`DROP TABLE IF EXISTS ${table} CASCADE`);
+  }
+
+  await client.query(`
+    DROP INDEX IF EXISTS idx_documents_workspace;
+    DROP INDEX IF EXISTS idx_document_lots_workspace;
+
+    ALTER TABLE documents DROP COLUMN IF EXISTS workspace_id;
+    ALTER TABLE document_lots DROP COLUMN IF EXISTS workspace_id;
+  `);
+}
+
+async function dropCollabArtifacts(client: DbClient): Promise<void> {
+  await client.query(`DELETE FROM memory_records WHERE memory_type = 'collab'`);
+
+  await client.query(`
+    ALTER TABLE mcp_call_events DROP CONSTRAINT IF EXISTS mcp_call_events_collab_task_id_fkey;
+    DROP INDEX IF EXISTS idx_mcp_call_events_collab_task_id;
+    ALTER TABLE mcp_call_events DROP COLUMN IF EXISTS collab_task_id;
+
+    DROP TABLE IF EXISTS orchestration_sessions CASCADE;
+    DROP TABLE IF EXISTS user_task_preferences CASCADE;
+    DROP TABLE IF EXISTS collab_tasks CASCADE;
+  `);
+}
+
 export async function initDb() {
-  const client = await connectWithFallback();
+  const client = await connectDbClient();
+  let migrationSessionConfigured = false;
   try {
     if (!config.dbAutoMigrateOnBoot) {
       await client.query("SELECT 1");
@@ -353,6 +295,10 @@ export async function initDb() {
       return;
     }
 
+    await configureMigrationSession(client);
+    migrationSessionConfigured = true;
+    await dropRemovedAutomationTables(client);
+    await dropCollabArtifacts(client);
     await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 
     await client.query(`
@@ -392,17 +338,6 @@ export async function initDb() {
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS user_task_preferences (
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        grill_me_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (tenant_id, user_id)
-      );
-    `);
-
-    await client.query(`
       CREATE TABLE IF NOT EXISTS tenant_memberships (
         tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -414,8 +349,7 @@ export async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user_id
         ON tenant_memberships(user_id);
-      CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_id
-        ON tenant_memberships(tenant_id);
+      DROP INDEX IF EXISTS idx_tenant_memberships_tenant_id;
     `);
 
     await client.query(`
@@ -434,8 +368,8 @@ export async function initDb() {
       
       CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
       CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON api_keys(tenant_id);
-      CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
       CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(user_id, revoked_at) WHERE revoked_at IS NULL;
+      DROP INDEX IF EXISTS idx_api_keys_hash;
     `);
 
     await client.query(`
@@ -473,6 +407,12 @@ export async function initDb() {
         category TEXT,
         is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
         reference_count INTEGER NOT NULL DEFAULT 1,
+        tier TEXT NOT NULL DEFAULT 'long_term',
+        segment TEXT,
+        importance NUMERIC(5,4) NOT NULL DEFAULT 0.5000,
+        decay_rate NUMERIC(8,6) NOT NULL DEFAULT 0.010000,
+        access_count INTEGER NOT NULL DEFAULT 1,
+        lifecycle TEXT NOT NULL DEFAULT 'active',
         last_referenced_at TIMESTAMP WITH TIME ZONE,
         superseded_by UUID NULL REFERENCES memory_records(id) ON DELETE SET NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -558,19 +498,18 @@ export async function initDb() {
         WHERE deleted_at IS NULL AND conversation_id IS NOT NULL;
     `);
 
-    const hadMemoryTypeColumn = await hasColumn(client, "memory_records", "memory_type");
-    const hadCategoryColumn = await hasColumn(client, "memory_records", "category");
-    const hadPinnedColumn = await hasColumn(client, "memory_records", "is_pinned");
-    const hadReferenceCountColumn = await hasColumn(client, "memory_records", "reference_count");
-    const hadLastReferencedAtColumn = await hasColumn(client, "memory_records", "last_referenced_at");
-    const hadSupersededByColumn = await hasColumn(client, "memory_records", "superseded_by");
-
     await client.query(`
       ALTER TABLE memory_records
       ADD COLUMN IF NOT EXISTS memory_type TEXT,
       ADD COLUMN IF NOT EXISTS category TEXT,
       ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS reference_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'long_term',
+      ADD COLUMN IF NOT EXISTS segment TEXT,
+      ADD COLUMN IF NOT EXISTS importance NUMERIC(5,4) DEFAULT 0.5000,
+      ADD COLUMN IF NOT EXISTS decay_rate NUMERIC(8,6) DEFAULT 0.010000,
+      ADD COLUMN IF NOT EXISTS access_count INTEGER DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS lifecycle TEXT DEFAULT 'active',
       ADD COLUMN IF NOT EXISTS last_referenced_at TIMESTAMP WITH TIME ZONE,
       ADD COLUMN IF NOT EXISTS superseded_by UUID NULL REFERENCES memory_records(id) ON DELETE SET NULL;
     `);
@@ -585,6 +524,43 @@ export async function initDb() {
       UPDATE memory_records
       SET reference_count = 1
       WHERE reference_count IS NULL;
+      UPDATE memory_records
+      SET tier = CASE
+            WHEN is_pinned = TRUE OR memory_type = 'preference'
+              OR lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account')
+              THEN 'permanent'
+            WHEN memory_type IN ('event', 'note') THEN 'short_term'
+            ELSE 'long_term'
+          END
+      WHERE tier IS NULL OR tier NOT IN ('short_term', 'long_term', 'permanent');
+      UPDATE memory_records
+      SET segment = COALESCE(segment, category, memory_type)
+      WHERE segment IS NULL;
+      UPDATE memory_records
+      SET importance = CASE
+            WHEN is_pinned = TRUE OR memory_type = 'preference' THEN 0.9500
+            WHEN lower(COALESCE(category, '')) IN ('identity', 'auth', 'billing', 'security', 'legal', 'payment', 'credentials', 'account') THEN 0.9500
+            WHEN memory_type IN ('decision', 'checkpoint') THEN 0.7500
+            WHEN memory_type IN ('event', 'note') THEN 0.3500
+            ELSE 0.6000
+          END
+      WHERE importance IS NULL;
+      UPDATE memory_records
+      SET decay_rate = CASE
+            WHEN tier = 'permanent' THEN 0.000000
+            WHEN tier = 'short_term' THEN 0.080000
+            ELSE 0.010000
+          END
+      WHERE decay_rate IS NULL;
+      UPDATE memory_records
+      SET access_count = reference_count
+      WHERE access_count IS NULL;
+      UPDATE memory_records
+      SET lifecycle = CASE
+            WHEN tier = 'permanent' THEN 'protected'
+            ELSE 'active'
+          END
+      WHERE lifecycle IS NULL OR lifecycle NOT IN ('active', 'cooling', 'stale', 'archived', 'protected');
     `);
 
     await client.query(`
@@ -594,7 +570,17 @@ export async function initDb() {
       ALTER COLUMN is_pinned SET DEFAULT FALSE,
       ALTER COLUMN is_pinned SET NOT NULL,
       ALTER COLUMN reference_count SET DEFAULT 1,
-      ALTER COLUMN reference_count SET NOT NULL;
+      ALTER COLUMN reference_count SET NOT NULL,
+      ALTER COLUMN tier SET DEFAULT 'long_term',
+      ALTER COLUMN tier SET NOT NULL,
+      ALTER COLUMN importance SET DEFAULT 0.5000,
+      ALTER COLUMN importance SET NOT NULL,
+      ALTER COLUMN decay_rate SET DEFAULT 0.010000,
+      ALTER COLUMN decay_rate SET NOT NULL,
+      ALTER COLUMN access_count SET DEFAULT 1,
+      ALTER COLUMN access_count SET NOT NULL,
+      ALTER COLUMN lifecycle SET DEFAULT 'active',
+      ALTER COLUMN lifecycle SET NOT NULL;
     `);
 
     await client.query(`
@@ -603,6 +589,31 @@ export async function initDb() {
       ALTER TABLE memory_records
       ADD CONSTRAINT memory_records_memory_type_check
       CHECK (memory_type IN (${MEMORY_TYPE_CHECK}));
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_tier_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_tier_check
+      CHECK (tier IN ('short_term', 'long_term', 'permanent'));
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_lifecycle_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_lifecycle_check
+      CHECK (lifecycle IN ('active', 'cooling', 'stale', 'archived', 'protected'));
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_importance_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_importance_check
+      CHECK (importance >= 0 AND importance <= 1);
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_decay_rate_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_decay_rate_check
+      CHECK (decay_rate >= 0);
+      ALTER TABLE memory_records
+      DROP CONSTRAINT IF EXISTS memory_records_access_count_check;
+      ALTER TABLE memory_records
+      ADD CONSTRAINT memory_records_access_count_check
+      CHECK (access_count >= 0);
     `);
 
     await client.query(`
@@ -612,6 +623,9 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_memory_records_reference_count
         ON memory_records(tenant_id, user_id, reference_count DESC, last_referenced_at DESC)
         WHERE deleted_at IS NULL AND superseded_by IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_memory_records_retention
+        ON memory_records(tenant_id, user_id, tier, lifecycle, importance DESC, access_count DESC)
+        WHERE deleted_at IS NULL AND superseded_by IS NULL;
       CREATE INDEX IF NOT EXISTS idx_memory_records_superseded_by
         ON memory_records(tenant_id, user_id, superseded_by)
         WHERE superseded_by IS NOT NULL;
@@ -619,17 +633,6 @@ export async function initDb() {
         ON memory_records(tenant_id, user_id, content_hash)
         WHERE deleted_at IS NULL AND superseded_by IS NULL;
     `);
-
-    if (
-      !hadMemoryTypeColumn ||
-      !hadCategoryColumn ||
-      !hadPinnedColumn ||
-      !hadReferenceCountColumn ||
-      !hadLastReferencedAtColumn ||
-      !hadSupersededByColumn
-    ) {
-      await backfillMemoryTypes(client);
-    }
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS memory_events (
@@ -651,6 +654,105 @@ export async function initDb() {
         ON memory_events(tenant_id, action, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id
         ON memory_events(memory_id, created_at DESC);
+    `);
+
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_cleanup_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('running', 'completed', 'failed')),
+        run_reason TEXT NOT NULL
+          CHECK (run_reason IN ('daily_intelligence', 'manual')),
+        dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_runs_scope_created
+        ON memory_cleanup_runs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_runs_scope_status
+        ON memory_cleanup_runs(tenant_id, user_id, status, updated_at DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_cleanup_proposals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id UUID NOT NULL REFERENCES memory_cleanup_runs(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        proposal_type TEXT NOT NULL
+          CHECK (proposal_type IN ('bucket', 'keep', 'promote', 'merge', 'rewrite', 'prune')),
+        status TEXT NOT NULL
+          CHECK (status IN ('proposed', 'contested', 'approved', 'rejected', 'applied', 'failed')),
+        source_memory_ids UUID[] NOT NULL,
+        target_memory_id UUID,
+        proposed_content TEXT,
+        rationale TEXT NOT NULL,
+        risk_level TEXT NOT NULL
+          CHECK (risk_level IN ('low', 'medium', 'high')),
+        confidence NUMERIC(5,4) NOT NULL DEFAULT 0,
+        cleanup_bucket TEXT
+          CHECK (cleanup_bucket IS NULL OR cleanup_bucket IN ('short_term', 'long_term', 'permanent')),
+        cleanup_bucket_reason TEXT,
+        cleanup_bucket_confidence NUMERIC(5,4),
+        consolidator_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        adversary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        debate_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        judge_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        apply_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_proposals_run
+        ON memory_cleanup_proposals(run_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_proposals_scope_status
+        ON memory_cleanup_proposals(tenant_id, user_id, status, updated_at DESC);
+    `);
+
+    await client.query(`
+      ALTER TABLE memory_cleanup_proposals
+      DROP CONSTRAINT IF EXISTS memory_cleanup_proposals_proposal_type_check;
+      ALTER TABLE memory_cleanup_proposals
+      ADD CONSTRAINT memory_cleanup_proposals_proposal_type_check
+      CHECK (proposal_type IN ('bucket', 'keep', 'promote', 'merge', 'rewrite', 'prune'));
+      ALTER TABLE memory_cleanup_proposals
+      ADD COLUMN IF NOT EXISTS cleanup_bucket TEXT,
+      ADD COLUMN IF NOT EXISTS cleanup_bucket_reason TEXT,
+      ADD COLUMN IF NOT EXISTS cleanup_bucket_confidence NUMERIC(5,4);
+      ALTER TABLE memory_cleanup_proposals
+      DROP CONSTRAINT IF EXISTS memory_cleanup_proposals_cleanup_bucket_check;
+      ALTER TABLE memory_cleanup_proposals
+      ADD CONSTRAINT memory_cleanup_proposals_cleanup_bucket_check
+      CHECK (cleanup_bucket IS NULL OR cleanup_bucket IN ('short_term', 'long_term', 'permanent'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS memory_cleanup_memory_reviews (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        memory_id UUID NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        last_run_id UUID NOT NULL REFERENCES memory_cleanup_runs(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('reviewed', 'applied', 'skipped')),
+        reviewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE (tenant_id, user_id, memory_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_memory_reviews_scope_reviewed
+        ON memory_cleanup_memory_reviews(tenant_id, user_id, reviewed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_cleanup_memory_reviews_run
+        ON memory_cleanup_memory_reviews(last_run_id);
     `);
 
     await client.query(`
@@ -710,6 +812,7 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access_expiry ON oauth_tokens(access_expires_at);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh_expiry ON oauth_tokens(refresh_expires_at);
+      DROP INDEX IF EXISTS idx_oauth_tokens_refresh;
     `);
 
     await client.query(`
@@ -749,7 +852,6 @@ export async function initDb() {
         auth_mode TEXT,
         method TEXT NOT NULL,
         tool_name TEXT,
-        collab_task_id UUID,
         metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
         ok BOOLEAN NOT NULL DEFAULT true,
         error TEXT,
@@ -759,7 +861,6 @@ export async function initDb() {
       ALTER TABLE mcp_call_events
       ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
       ADD COLUMN IF NOT EXISTS key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS collab_task_id UUID,
       ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
       CREATE INDEX IF NOT EXISTS idx_mcp_call_events_created_at
@@ -770,8 +871,6 @@ export async function initDb() {
         ON mcp_call_events(tenant_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mcp_call_events_user_id
         ON mcp_call_events(user_id, created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_mcp_call_events_collab_task_id
-        ON mcp_call_events(collab_task_id, created_at DESC);
     `);
 
     await client.query(`
@@ -838,6 +937,44 @@ export async function initDb() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS chatgpt_import_jobs (
+        ref TEXT PRIMARY KEY,
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT NOT NULL
+          CHECK (status IN ('pending', 'processing', 'done', 'failed')),
+        request_json JSONB NOT NULL,
+        progress_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        result_json JSONB,
+        error_json JSONB,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 4,
+        next_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_attempt_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP WITH TIME ZONE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_tenant_user_created
+        ON chatgpt_import_jobs(tenant_id, user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_tenant_user_status
+        ON chatgpt_import_jobs(tenant_id, user_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_pending
+        ON chatgpt_import_jobs(status, next_attempt_at ASC, created_at ASC)
+        WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_chatgpt_import_jobs_status_attempts
+        ON chatgpt_import_jobs(status, attempt_count, max_attempts, next_attempt_at ASC)
+        WHERE status IN ('pending', 'failed');
+    `);
+
+    await client.query(`
+      ALTER TABLE chatgpt_import_jobs
+      ADD COLUMN IF NOT EXISTS storage_ref TEXT,
+      ADD COLUMN IF NOT EXISTS original_filename TEXT;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS integration_asset_acknowledgements (
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         asset_key TEXT NOT NULL,
@@ -897,72 +1034,6 @@ export async function initDb() {
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS collab_tasks (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        title TEXT NOT NULL,
-        brief TEXT,
-        state TEXT NOT NULL CHECK (state IN ('CREATIVE','TECHNICAL','DONE','ERROR')),
-        last_actor TEXT CHECK (last_actor IN ('chatgpt','claude','user')),
-        iteration INT NOT NULL DEFAULT 0,
-        max_iterations INT NOT NULL DEFAULT 4,
-        context JSONB NOT NULL DEFAULT '{}'::jsonb,
-        transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
-        error_message TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_collab_tasks_owner
-        ON collab_tasks(tenant_id, user_id, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_collab_tasks_active
-        ON collab_tasks(tenant_id, user_id, state)
-        WHERE state IN ('CREATIVE','TECHNICAL');
-
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1
-          FROM pg_constraint
-          WHERE conname = 'mcp_call_events_collab_task_id_fkey'
-        ) THEN
-          ALTER TABLE mcp_call_events
-          ADD CONSTRAINT mcp_call_events_collab_task_id_fkey
-          FOREIGN KEY (collab_task_id) REFERENCES collab_tasks(id) ON DELETE SET NULL;
-        END IF;
-      END $$;
-    `);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS orchestration_sessions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        goal TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('DRAFT','INTERVIEWING','PLAN_READY','RUNNING','DONE','ABORTED')),
-        transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
-        plan JSONB,
-        collab_task_id UUID REFERENCES collab_tasks(id) ON DELETE SET NULL,
-        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-        error_message TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_owner
-        ON orchestration_sessions(tenant_id, user_id, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_orchestration_sessions_active
-        ON orchestration_sessions(tenant_id, user_id, status)
-        WHERE status IN ('INTERVIEWING','PLAN_READY','RUNNING');
-    `);
-
-    await client.query(`
-      ALTER TABLE orchestration_sessions
-      ADD COLUMN IF NOT EXISTS collab_task_id UUID REFERENCES collab_tasks(id) ON DELETE SET NULL;
-    `);
-
-    await client.query(`
       CREATE TABLE IF NOT EXISTS browser_onboarding_fallback_cache (
         state TEXT NOT NULL,
         error_signature TEXT NOT NULL,
@@ -988,8 +1059,7 @@ export async function initDb() {
         created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
-      CREATE INDEX IF NOT EXISTS idx_browser_flow_templates_learned
-        ON browser_flow_templates(state, is_learned) WHERE is_learned = TRUE;
+      DROP INDEX IF EXISTS idx_browser_flow_templates_learned;
     `);
 
     await client.query(`
@@ -1326,16 +1396,9 @@ export async function initDb() {
     // Intentionally preserve existing api_keys.
     await client.query(`
       ALTER TABLE api_keys
-        ADD COLUMN IF NOT EXISTS pepper_version TEXT NOT NULL DEFAULT 'v1';
+        DROP COLUMN IF EXISTS pepper_version;
     `);
 
-    await backfillTenants(client);
-    await client.query(`
-      UPDATE api_keys
-      SET revoked_at = NOW()
-      WHERE revoked_at IS NULL
-        AND connector_type IS NULL
-    `);
     await applySupabaseRlsPolicies(client);
 
     console.log("Database schema initialized successfully.");
@@ -1343,6 +1406,15 @@ export async function initDb() {
     console.error("Error initializing database schema:", error);
     throw error;
   } finally {
+    if (migrationSessionConfigured) {
+      try {
+        await restorePoolSessionTimeouts(client);
+      } catch {
+        // Discard broken connections instead of returning them to the pool.
+        client.release(true);
+        return;
+      }
+    }
     client.release();
   }
 }

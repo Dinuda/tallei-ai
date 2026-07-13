@@ -1,4 +1,4 @@
-import { aiProviderRegistry } from "../../providers/ai/index.js";
+import { modelGateway } from "../../model/index.js";
 
 export interface ExtractedFact {
   text: string;
@@ -21,8 +21,9 @@ Rules:
 
 export async function extractFacts(content: string): Promise<ExtractedFact[]> {
   try {
-    const response = await aiProviderRegistry.chat({
-      model: aiProviderRegistry.chatModelName(),
+    const response = await modelGateway.chat({
+      purpose: "chat",
+      model: modelGateway.chatModelName(),
       temperature: 0,
       maxTokens: 600,
       messages: [
@@ -32,7 +33,7 @@ export async function extractFacts(content: string): Promise<ExtractedFact[]> {
           content: `Extract facts from this conversation:\n\n${content.slice(0, 4000)}`,
         },
       ],
-      responseFormat: "json_object",
+      responseFormat: "json",
     });
 
     const raw = response.text ?? "{}";

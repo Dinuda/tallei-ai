@@ -2,6 +2,12 @@ import OpenAI from "openai";
 
 import { config } from "../../config/index.js";
 import {
+  createPooledLlmFetch,
+  getNvidiaApiKeyPool,
+  getOpenAiApiKeyPool,
+  getOpenCodeApiKeyPool,
+} from "../../services/llm/api-key-pool.js";
+import {
   CircuitBreakerRegistry,
   composePolicy,
   resolveResiliencePolicies,
@@ -11,11 +17,16 @@ import {
 import { createLogger } from "../../observability/index.js";
 import { CircuitOpenError } from "../../shared/errors/provider-errors.js";
 
+import { modelRegistry } from "../../model/registry.js";
 import type { AiProvider } from "./ai-provider.js";
 import { isRetriableProviderError } from "./errors.js";
 import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
+import { AnthropicProvider } from "./anthropic-provider.js";
 import { GoogleProvider } from "./google-provider.js";
 import { OllamaProvider } from "./ollama-provider.js";
+import { NvidiaProvider } from "./nvidia-provider.js";
+import { OpenCodeProvider } from "./opencode-provider.js";
 import { OpenAiProvider } from "./openai-provider.js";
 import type {
   AiProviderName,
@@ -66,14 +77,28 @@ function buildRetryPolicy(base: RetryPolicy | undefined): RetryPolicy | undefine
   };
 }
 
-function requireOpenAiKeyIfNeeded(providerNames: readonly AiProviderName[]): string {
-  if (!providerNames.includes("openai")) {
-    return config.openaiApiKey;
+function requireOpenAiKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("openai") && getOpenAiApiKeyPool().size === 0) {
+    throw new Error("TALLEI_LLM__OPENAI_API_KEY is required when provider is openai");
   }
-  if (!config.openaiApiKey) {
-    throw new Error("OPENAI_API_KEY is required when provider is openai");
+}
+
+function requireOpenCodeKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("opencode") && getOpenCodeApiKeyPool().size === 0) {
+    throw new Error("TALLEI_LLM__OPENCODE_API_KEY (or TALLEI_LLM__OPENCODE_API_KEYS) is required when TALLEI_LLM__PROVIDER=opencode");
   }
-  return config.openaiApiKey;
+}
+
+function requireNvidiaKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("nvidia") && getNvidiaApiKeyPool().size === 0) {
+    throw new Error("TALLEI_LLM__NVIDIA_API_KEY (or NIM_API_KEY) is required when TALLEI_LLM__PROVIDER=nvidia");
+  }
+}
+
+function requireAnthropicKeyIfNeeded(providerNames: readonly AiProviderName[]): void {
+  if (providerNames.includes("anthropic") && !config.anthropicApiKey.trim()) {
+    throw new Error("TALLEI_LLM__ANTHROPIC_API_KEY is required when TALLEI_LLM__PROVIDER=anthropic");
+  }
 }
 
 export class ProviderRegistry {
@@ -95,14 +120,11 @@ export class ProviderRegistry {
   }
 
   chatModelName(): string {
-    if (this.chatProviderName === "ollama") return config.ollamaModel;
-    if (this.chatProviderName === "google") return config.googleModel;
-    return config.openaiModel;
+    return modelRegistry.resolveModelRoute({ purpose: "chat" }).modelId;
   }
 
   embeddingModelName(): string {
-    if (this.embeddingProviderName === "google") return config.googleEmbeddingModel;
-    return config.embeddingModel;
+    return modelRegistry.resolveModelRoute({ purpose: "embed" }).modelId;
   }
 
   async chat(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
@@ -116,6 +138,11 @@ export class ProviderRegistry {
       ...req,
       signal: combineSignals(req.signal, policySignal),
     }));
+  }
+
+  async chatDirect(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+    const provider = this.getProvider(this.chatProviderName);
+    return provider.chat(req);
   }
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
@@ -141,11 +168,18 @@ export class ProviderRegistry {
 
   private initializeProviders(options: RegistryOptions): void {
     const requiredNames: AiProviderName[] = [options.chatProviderName, options.embeddingProviderName];
-    const openAiKey = requireOpenAiKeyIfNeeded(requiredNames);
+    requireOpenAiKeyIfNeeded(requiredNames);
+    requireOpenCodeKeyIfNeeded(requiredNames);
+    requireNvidiaKeyIfNeeded(requiredNames);
+    requireAnthropicKeyIfNeeded(requiredNames);
 
     if (requiredNames.includes("openai")) {
+      const openAiPool = getOpenAiApiKeyPool();
       const openAiProvider = new OpenAiProvider({
-        client: new OpenAI({ apiKey: openAiKey }),
+        client: new OpenAI({
+          apiKey: openAiPool.pickKey(),
+          fetch: createPooledLlmFetch(openAiPool, "openai"),
+        }),
         defaultChatModel: config.openaiModel,
         defaultEmbeddingModel: config.embeddingModel,
         defaultEmbeddingDimensions: config.embeddingDims,
@@ -154,6 +188,32 @@ export class ProviderRegistry {
         logger: createLogger({ baseFields: { component: "openai_provider" } }),
       });
       this.providers.set(openAiProvider.name, openAiProvider);
+    }
+
+    if (requiredNames.includes("opencode")) {
+      const openCodePool = getOpenCodeApiKeyPool();
+      const openCodeProvider = new OpenCodeProvider({
+        client: new OpenAI({
+          baseURL: config.opencodeBaseUrl,
+          apiKey: openCodePool.pickKey(),
+          fetch: createPooledLlmFetch(openCodePool, "opencode"),
+        }),
+        defaultChatModel: config.opencodeModel,
+      });
+      this.providers.set(openCodeProvider.name, openCodeProvider);
+    }
+
+    if (requiredNames.includes("nvidia")) {
+      const nvidiaPool = getNvidiaApiKeyPool();
+      const nvidiaProvider = new NvidiaProvider({
+        client: new OpenAI({
+          baseURL: config.nvidiaBaseUrl,
+          apiKey: nvidiaPool.pickKey(),
+          fetch: createPooledLlmFetch(nvidiaPool, "nvidia"),
+        }),
+        defaultChatModel: config.nvidiaModel,
+      });
+      this.providers.set(nvidiaProvider.name, nvidiaProvider);
     }
 
     if (requiredNames.includes("ollama")) {
@@ -175,6 +235,14 @@ export class ProviderRegistry {
         defaultEmbeddingDimensions: config.embeddingDims,
       });
       this.providers.set(googleProvider.name, googleProvider);
+    }
+
+    if (requiredNames.includes("anthropic")) {
+      const anthropicProvider = new AnthropicProvider({
+        client: new Anthropic({ apiKey: config.anthropicApiKey }),
+        defaultChatModel: config.anthropicModel,
+      });
+      this.providers.set(anthropicProvider.name, anthropicProvider);
     }
   }
 
@@ -212,4 +280,4 @@ export class ProviderRegistry {
   }
 }
 
-export const aiProviderRegistry = new ProviderRegistry();
+export const providerRegistry = new ProviderRegistry();

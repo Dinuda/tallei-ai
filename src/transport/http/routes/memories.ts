@@ -1,5 +1,10 @@
 import { Router, Response } from "express";
+import multer from "multer";
+import { basename } from "node:path";
 import { z } from "zod";
+import { config } from "../../../config/index.js";
+import type { BulkIngestDocument } from "../../../orchestration/memory/chatgpt-bulk-ingest.js";
+import type { ChatGptImportRequest } from "../../../orchestration/memory/chatgpt-import.usecase.js";
 import {
   saveMemory,
   savePreference,
@@ -9,9 +14,39 @@ import {
   forgetPreference,
   deleteMemory,
 } from "../../../services/memory.js";
+import {
+  enqueueChatGptImportJob,
+  getChatGptImportJobStatus,
+  persistChatGptImportJob,
+} from "../../../services/chatgpt-import/jobs.service.js";
+import {
+  buildStorageRef,
+  ensureUserImportDir,
+  resolveStoragePath,
+  sanitizeImportFilename,
+} from "../../../services/chatgpt-import/storage.js";
+import {
+  getMemoryCleanupRun,
+  listMemoryCleanupRuns,
+  resetMemoryCleanupReviewFlags,
+  runMemoryCleanupForUser,
+  sendMemoryCleanupAdminEmail,
+} from "../../../services/memory-cleanup.js";
+import { createLogger } from "../../../observability/index.js";
 import { authMiddleware, AuthRequest, requireScopes } from "../middleware/auth.middleware.js";
 
 const router = Router();
+const logger = createLogger({ baseFields: { component: "memories_http_routes" } });
+
+interface ChatGptImportUploadMeta {
+  storageRef: string;
+  originalFilename: string;
+  absolutePath: string;
+}
+
+interface ChatGptImportAuthRequest extends AuthRequest {
+  chatGptImportUploads?: ChatGptImportUploadMeta[];
+}
 
 router.use(authMiddleware);
 
@@ -42,6 +77,332 @@ const listSchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+const cleanupRunSchema = z.object({
+  dryRun: z.boolean().optional(),
+  maxMemories: z.number().int().min(1).max(5000).optional(),
+  processAll: z.boolean().optional(),
+  includeReviewed: z.boolean().optional(),
+  logImplicitKeeps: z.boolean().optional(),
+  emailAdmin: z.boolean().optional(),
+  selectionStrategy: z.enum(["newest_hybrid", "current_priority"]).optional(),
+  newestLimit: z.number().int().min(1).max(5000).optional(),
+  interestingLimit: z.number().int().min(0).max(5000).optional(),
+});
+
+const bulkJsonRoleSchema = z.enum([
+  "conversations",
+  "shared_conversations",
+  "profile",
+  "other_json",
+  "dat_text",
+  "dat_metadata",
+  "library_catalog",
+]);
+
+const chatGptImportSchema = z.object({
+  input: z.string().optional(),
+  apply: z.boolean().optional(),
+  importSource: z.enum(["chatgpt", "claude"]).optional(),
+  modeHint: z.enum(["json_export", "paste", "bulk_export"]).optional(),
+  importProfile: z.enum(["curated", "inclusive"]).optional(),
+  bulkDocuments: z.array(z.object({
+    path: z.string(),
+    role: bulkJsonRoleSchema,
+    data: z.unknown(),
+  })).optional(),
+  ingestSummary: z.object({
+    sourcesParsed: z.array(z.string()),
+    skipped: z.object({
+      binaryDat: z.number(),
+      binaryDatSamples: z.array(z.string()),
+      libraryCatalog: z.number(),
+      other: z.number(),
+      otherSamples: z.array(z.string()),
+    }),
+    dat: z.object({
+      inspected: z.number(),
+      extracted: z.number(),
+      extractedSamples: z.array(z.string()),
+      metadataOnly: z.number(),
+      metadataSamples: z.array(z.string()),
+      skipped: z.number(),
+    }).optional(),
+    hasConversationsJson: z.boolean(),
+  }).optional(),
+  ingestWarnings: z.array(z.string()).optional(),
+});
+
+const uploadChatGptImport = multer({
+  storage: multer.diskStorage({
+    destination(req, _file, cb) {
+      const auth = (req as ChatGptImportAuthRequest).authContext;
+      if (!auth?.userId) {
+        cb(new Error("Unauthorized"), "");
+        return;
+      }
+      ensureUserImportDir(auth.userId)
+        .then((dir) => cb(null, dir))
+        .catch((error) => cb(error as Error, ""));
+    },
+    filename(req, file, cb) {
+      const authReq = req as ChatGptImportAuthRequest;
+      const auth = authReq.authContext;
+      if (!auth?.userId) {
+        cb(new Error("Unauthorized"), "");
+        return;
+      }
+      const storageRef = buildStorageRef(auth.userId, file.originalname);
+      const absolutePath = resolveStoragePath(storageRef);
+      authReq.chatGptImportUploads ??= [];
+      authReq.chatGptImportUploads.push({
+        storageRef,
+        originalFilename: sanitizeImportFilename(file.originalname),
+        absolutePath,
+      });
+      cb(null, basename(absolutePath));
+    },
+  }),
+  limits: {
+    fileSize: config.importMaxUploadBytes,
+    files: 50,
+  },
+});
+
+const chatGptImportFormSchema = z.object({
+  input: z.string().optional(),
+  apply: z.union([z.boolean(), z.string()]).optional(),
+});
+
+class ChatGptImportUploadError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+function parseApplyFromMultipart(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function findFirstString(record: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
+function parseApplyLoose(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
+const CONVERSATION_JSON_FILENAME = /^conversations(?:-\d+)?\.json$/i;
+const OPTIONAL_PROFILE_JSON_FILENAME = /^(shared_conversations|user|user_settings)\.json$/i;
+
+function isConversationJsonImportFilename(filename: string): boolean {
+  const base = basename(filename.trim());
+  return CONVERSATION_JSON_FILENAME.test(base) || OPTIONAL_PROFILE_JSON_FILENAME.test(base);
+}
+
+function isAllowedChatGptImportFilename(filename: string): boolean {
+  const normalized = filename.trim().toLowerCase();
+  if (normalized.endsWith(".zip")) return false;
+  return isConversationJsonImportFilename(filename)
+    || normalized.endsWith(".json")
+    || normalized.endsWith(".jsonl")
+    || normalized.endsWith(".txt");
+}
+
+function isMultipartRequest(req: AuthRequest): boolean {
+  const contentType = req.headers["content-type"] ?? "";
+  return contentType.includes("multipart/form-data");
+}
+
+function maybeHandleMultipartChatGptImport(req: AuthRequest, res: Response, next: (error?: unknown) => void): void {
+  if (!isMultipartRequest(req)) {
+    next();
+    return;
+  }
+  uploadChatGptImport.array("files", 50)(req, res, (error: unknown) => {
+    if (error instanceof multer.MulterError) {
+      if (error.code === "LIMIT_FILE_SIZE") {
+        const maxGb = (config.importMaxUploadBytes / (1024 * 1024 * 1024)).toFixed(1);
+        res.status(413).json({ error: `Each import file must be ${maxGb}GB or smaller.` });
+        return;
+      }
+      res.status(400).json({ error: `Upload failed: ${error.message}` });
+      return;
+    }
+    next(error);
+  });
+}
+
+async function parseChatGptImportRequest(req: AuthRequest): Promise<ChatGptImportRequest> {
+  if (isMultipartRequest(req)) {
+    const authReq = req as ChatGptImportAuthRequest;
+    const body = chatGptImportFormSchema.parse(req.body ?? {});
+    const files = Array.isArray(req.files) ? (req.files as Express.Multer.File[]) : [];
+    const pastedInput = typeof body.input === "string" ? body.input.trim() : "";
+    const apply = parseApplyFromMultipart(body.apply);
+
+    const zipFiles = files.filter((file) => file.originalname.trim().toLowerCase().endsWith(".zip"));
+    if (zipFiles.length > 0) {
+      throw new ChatGptImportUploadError(
+        422,
+        "Extract the export locally and upload conversation JSON files (conversations.json or conversations-NNN.json)."
+      );
+    }
+
+    const ingestableFiles = files.filter((file) => isAllowedChatGptImportFilename(file.originalname));
+    const unsupported = files.filter((file) => !isAllowedChatGptImportFilename(file.originalname));
+
+    if (unsupported.length > 0) {
+      const names = unsupported.map((file) => file.originalname).join(", ");
+      throw new ChatGptImportUploadError(
+        422,
+        `Unsupported file(s): ${names}. Upload conversations*.json (and optionally user.json) — not .dat media or ZIP archives.`
+      );
+    }
+
+    if (ingestableFiles.length > 0) {
+      const uploads = authReq.chatGptImportUploads ?? [];
+      const jsonUploads = uploads.filter((entry) => isConversationJsonImportFilename(entry.originalFilename));
+      if (jsonUploads.length === 0) {
+        throw new ChatGptImportUploadError(
+          422,
+          "Upload conversation JSON files (conversations.json or conversations-NNN.json)."
+        );
+      }
+      if (jsonUploads.length > 50) {
+        throw new ChatGptImportUploadError(422, "Upload at most 50 conversation JSON files at once.");
+      }
+      return {
+        mode: "conversation_json_files",
+        storageRefs: jsonUploads.map((entry) => entry.storageRef),
+        originalFilenames: jsonUploads.map((entry) => entry.originalFilename),
+        importProfile: "inclusive",
+        input: pastedInput,
+        apply: false,
+      };
+    }
+
+    if (!pastedInput) {
+      throw new ChatGptImportUploadError(
+        400,
+        files.length === 0
+          ? "Upload conversation JSON files from your extracted ChatGPT export."
+          : "No importable JSON files received."
+      );
+    }
+    return {
+      input: pastedInput,
+      apply,
+    };
+  }
+
+  const root = (() => {
+    if (typeof req.body === "string") {
+      try {
+        return JSON.parse(req.body) as unknown;
+      } catch {
+        return { input: req.body };
+      }
+    }
+    return req.body ?? {};
+  })();
+
+  const rootRecord = asRecord(root) ?? {};
+  const wrappers = [
+    rootRecord,
+    asRecord(rootRecord["data"]),
+    asRecord(rootRecord["payload"]),
+    asRecord(rootRecord["args"]),
+    asRecord(rootRecord["input"]),
+  ].filter((value): value is Record<string, unknown> => Boolean(value));
+
+  let normalizedInput: string | null = null;
+  let normalizedApply: boolean | undefined;
+  let normalizedModeHint: "json_export" | "paste" | "bulk_export" | undefined;
+  let normalizedImportSource: "chatgpt" | "claude" | undefined;
+  for (const candidate of wrappers) {
+    if (!normalizedInput) {
+      normalizedInput = findFirstString(candidate, ["input", "text", "content", "memory_dump", "memoryDump"]);
+    }
+    if (normalizedApply === undefined && candidate["apply"] !== undefined) {
+      normalizedApply = parseApplyLoose(candidate["apply"]);
+    }
+    if (!normalizedModeHint && typeof candidate["modeHint"] === "string") {
+      const hint = candidate["modeHint"];
+      if (hint === "json_export" || hint === "paste" || hint === "bulk_export" || hint === "dat_export") {
+        normalizedModeHint = hint === "dat_export" ? "bulk_export" : hint;
+      }
+    }
+    if (!normalizedImportSource) {
+      const importSource = findFirstString(candidate, ["importSource", "import_source"]);
+      if (importSource === "chatgpt" || importSource === "claude") {
+        normalizedImportSource = importSource;
+      }
+    }
+  }
+
+  const body = chatGptImportSchema.parse({
+    input: normalizedInput ?? rootRecord["input"],
+    apply: normalizedApply ?? rootRecord["apply"],
+    modeHint: normalizedModeHint ?? rootRecord["modeHint"],
+    importSource: normalizedImportSource ?? rootRecord["importSource"],
+    importProfile: rootRecord["importProfile"],
+    bulkDocuments: rootRecord["bulkDocuments"],
+    ingestSummary: rootRecord["ingestSummary"],
+    ingestWarnings: rootRecord["ingestWarnings"],
+  });
+  const input = typeof body.input === "string" ? body.input : "";
+  const hasBulkDocuments = Array.isArray(body.bulkDocuments) && body.bulkDocuments.length > 0;
+  if (!input.trim() && !hasBulkDocuments && body.modeHint !== "bulk_export") {
+    throw new ChatGptImportUploadError(400, "input is required");
+  }
+  if (!input.trim() && !hasBulkDocuments && body.modeHint === "bulk_export") {
+    throw new ChatGptImportUploadError(
+      400,
+      "No importable JSON found. Upload your ChatGPT data export ZIP or conversations.json."
+    );
+  }
+  const normalizedIngestSummary = body.ingestSummary
+    ? {
+      ...body.ingestSummary,
+      dat: body.ingestSummary.dat ?? {
+        inspected: 0,
+        extracted: 0,
+        extractedSamples: [],
+        metadataOnly: 0,
+        metadataSamples: [],
+        skipped: 0,
+      },
+    }
+    : undefined;
+  return {
+    input,
+    apply: body.apply ?? false,
+    ...(body.modeHint ? { modeHint: body.modeHint } : {}),
+    ...(body.importProfile ? { importProfile: body.importProfile } : {}),
+    ...(body.importSource ? { importSource: body.importSource } : {}),
+    ...(body.bulkDocuments
+      ? { bulkDocuments: body.bulkDocuments as BulkIngestDocument[] }
+      : {}),
+    ...(normalizedIngestSummary ? { ingestSummary: normalizedIngestSummary } : {}),
+    ...(body.ingestWarnings ? { ingestWarnings: body.ingestWarnings } : {}),
+  };
+}
 
 router.post("/", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
   try {
@@ -78,6 +439,74 @@ router.post("/preferences", requireScopes(["memory:write"]), async (req: AuthReq
     }
     console.error("Error saving preference:", error);
     res.status(500).json({ error: "Failed to save preference" });
+  }
+});
+
+router.post("/import/chatgpt", requireScopes(["memory:write"]), maybeHandleMultipartChatGptImport, async (req: AuthRequest, res: Response) => {
+  try {
+    const payload = await parseChatGptImportRequest(req);
+    const queued = await enqueueChatGptImportJob(req.authContext!, payload);
+    res.status(202).json(queued);
+  } catch (error) {
+    if (error instanceof ChatGptImportUploadError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error importing ChatGPT memories:", error);
+    const detail = error instanceof Error ? error.message : undefined;
+    res.status(500).json({
+      error: "Failed to import ChatGPT memories",
+      ...(detail ? { detail } : {}),
+    });
+  }
+});
+
+router.get("/import/chatgpt/:ref", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const ref = String(req.params.ref ?? "").trim();
+    if (!ref) {
+      res.status(400).json({ error: "ref is required" });
+      return;
+    }
+
+    const state = await getChatGptImportJobStatus(req.authContext!, ref);
+    if (!state) {
+      res.status(404).json({ error: "Import job not found" });
+      return;
+    }
+    res.json(state);
+  } catch (error) {
+    console.error("Error fetching ChatGPT import status:", error);
+    res.status(500).json({ error: "Failed to fetch ChatGPT import status" });
+  }
+});
+
+router.post("/import/chatgpt/:ref/persist", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const ref = String(req.params.ref ?? "").trim();
+    if (!ref) {
+      res.status(400).json({ error: "ref is required" });
+      return;
+    }
+
+    const result = await persistChatGptImportJob(req.authContext!, ref);
+    res.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    if (/preview|status|accepted/i.test(message)) {
+      res.status(422).json({ error: message });
+      return;
+    }
+    console.error("Error persisting ChatGPT import preview:", error);
+    res.status(500).json({ error: "Failed to persist ChatGPT import preview" });
   }
 });
 
@@ -122,6 +551,71 @@ router.get("/recall", requireScopes(["memory:read"]), async (req: AuthRequest, r
   }
 });
 
+router.post("/cleanup/run", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = cleanupRunSchema.parse(req.body ?? {});
+    const run = await runMemoryCleanupForUser(req.authContext!, {
+      runReason: "manual",
+      dryRun: body.dryRun ?? true,
+      maxMemories: body.maxMemories,
+      processAll: body.processAll ?? false,
+      includeReviewed: body.includeReviewed ?? false,
+      logImplicitKeeps: body.logImplicitKeeps ?? false,
+      selectionStrategy: body.selectionStrategy ?? "newest_hybrid",
+      newestLimit: body.newestLimit ?? 150,
+      interestingLimit: body.interestingLimit ?? 50,
+    });
+    const adminEmail = body.emailAdmin === false
+      ? { sent: false, skipped: true, to: null, error: "disabled by request" }
+      : await sendMemoryCleanupAdminEmail({
+          auth: req.authContext!,
+          run,
+          source: "manual",
+        });
+    res.status(201).json({ run, adminEmail });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation failed", details: error.errors });
+      return;
+    }
+    console.error("Error running memory cleanup:", error);
+    res.status(500).json({ error: "Failed to run memory cleanup" });
+  }
+});
+
+router.post("/cleanup/reset", requireScopes(["memory:write"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await resetMemoryCleanupReviewFlags(req.authContext!);
+    res.json(result);
+  } catch (error) {
+    console.error("Error resetting memory cleanup review flags:", error);
+    res.status(500).json({ error: "Failed to reset memory cleanup review flags" });
+  }
+});
+
+router.get("/cleanup/runs", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const runs = await listMemoryCleanupRuns(req.authContext!);
+    res.json({ runs });
+  } catch (error) {
+    console.error("Error listing memory cleanup runs:", error);
+    res.status(500).json({ error: "Failed to list memory cleanup runs" });
+  }
+});
+
+router.get("/cleanup/runs/:id", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const run = await getMemoryCleanupRun(req.authContext!, String(req.params.id));
+    if (!run) {
+      res.status(404).json({ error: "Memory cleanup run not found" });
+      return;
+    }
+    res.json({ run });
+  } catch (error) {
+    console.error("Error reading memory cleanup run:", error);
+    res.status(500).json({ error: "Failed to read memory cleanup run" });
+  }
+});
 
 router.get("/", requireScopes(["memory:read"]), async (req: AuthRequest, res: Response) => {
   try {

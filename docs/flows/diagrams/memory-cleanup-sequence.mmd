@@ -1,0 +1,36 @@
+sequenceDiagram
+  participant Caller
+  participant Service as Memory Cleanup Service
+  participant Repo as Memory Cleanup Repository
+  participant Snapshot as Snapshot Use Case
+  participant Consolidator as Consolidator Use Case
+  participant Adversary as Adversary Use Case
+  participant Debate as Debate Use Case
+  participant Judge as Judge Use Case
+  participant Apply as Apply Use Case
+  participant Mail as Resend Email
+
+  Caller->>Service: runMemoryCleanupForUser(auth, options)
+  Service->>Repo: createRun(auth, runReason, dryRun)
+  loop each batch
+    Service->>Snapshot: execute(auth, limits, exclusions)
+    Service->>Consolidator: execute(snapshot)
+    Service->>Repo: createProposal(...)
+    alt bucket fast path
+      Service->>Repo: updateProposal(status=approved/applied)
+    else multi-step review
+      Service->>Adversary: execute(snapshot, proposal)
+      Service->>Debate: execute(snapshot, proposal, adversary)
+      Service->>Judge: execute(snapshot, proposal, adversary, debate)
+      alt approved
+        Service->>Apply: execute(auth, proposalId, proposal)
+        Service->>Repo: updateProposal(status=applied)
+      else rejected
+        Service->>Repo: updateProposal(status=rejected)
+      end
+    end
+    Service->>Repo: markMemoriesReviewed(...)
+  end
+  Service->>Repo: updateRunSnapshot(...)
+  Service->>Repo: completeRun(status=completed)
+  Service->>Mail: send admin notification

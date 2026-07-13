@@ -40,3 +40,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .env.local
+
+# Workspace package build outputs
+packages/*/dist/
+packages/*/node_modules/

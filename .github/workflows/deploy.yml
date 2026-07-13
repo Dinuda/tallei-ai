@@ -29,6 +29,7 @@ jobs:
           filters: |
             backend:
               - 'src/**'
+              - 'packages/**'
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig.json'
@@ -37,6 +38,9 @@ jobs:
               - '.github/workflows/deploy.yml'
             dashboard:
               - 'dashboard/**'
+              - 'packages/**'
+              - 'package.json'
+              - 'package-lock.json'
               - 'deploy/cloudrun/deploy-dashboard.sh'
               - '.github/workflows/deploy.yml'
 

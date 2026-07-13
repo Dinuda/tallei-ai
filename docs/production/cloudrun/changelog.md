@@ -9,6 +9,18 @@ Keep entries newest-first. Each entry should include:
 - Summary of what shipped
 - Notes about rollout or follow-up
 
+## 2026-07-10
+
+- Services changed: `tallei-backend`, `tallei-dashboard`
+- Summary:
+  - Removed **Collab** feature end-to-end (MCP tools, `/api/tasks`, ChatGPT Actions, dashboard UI, DB tables, collab memories).
+  - Removed dead **Developer Workflows** nav link and `/api/developer` dashboard proxy.
+  - Removed Loops, Conductor, Temporal, Composio connectors, and browser automation (foundation cleanup).
+- Notes:
+  - Breaking change for Claude/ChatGPT integrations using collab tools or actions.
+  - `initDb()` drops `collab_tasks`, `orchestration_sessions`, `user_task_preferences` and purges `memory_type = 'collab'` on next boot with auto-migrate enabled.
+  - See [ADR-013](../../adr/013-remove-collab-and-developer-workflows.md).
+
 ## 2026-04-15
 
 - Services changed: `tallei-dashboard`, `tallei-backend`

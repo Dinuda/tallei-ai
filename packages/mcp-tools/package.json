@@ -1,0 +1,21 @@
+{
+  "name": "@tallei/mcp-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "exports": {
+    ".": "./dist/defs.js",
+    "./defs": "./dist/defs.js",
+    "./defs.js": "./dist/defs.js"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "zod": "^3.24.2"
+  }
+}
